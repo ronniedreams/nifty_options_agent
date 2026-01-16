@@ -1,0 +1,15 @@
+# Baseline V1 Live Trading Requirements
+
+# Core dependencies (already in parent requirements.txt)
+pandas>=2.0.0
+numpy>=1.24.0
+pytz>=2023.3
+
+# OpenAlgo Python SDK
+openalgo-python>=1.0.0
+
+# Additional for live trading
+python-dotenv>=1.0.0
+
+# Telegram notifications
+requests>=2.31.0
