@@ -7,7 +7,7 @@ paths: order_manager.py, data_pipeline.py, position_tracker.py, baseline_v1_live
 ## Overview
 
 OpenAlgo is the broker integration layer that provides a unified API across 24+ Indian brokers. This trading system uses OpenAlgo for:
-- Order placement and management (LIMIT orders, SL-L orders)
+- Order placement and management (SL orders for both entry and exit)
 - Real-time WebSocket data (quotes, ticks)
 - Position tracking and reconciliation
 - Account/margin information
@@ -47,15 +47,20 @@ Before trading:
 POST http://127.0.0.1:5000/api/v1/orders/place
 ```
 
-**Request Format:**
+**Request Format (SL Order for Entry):**
 ```python
+# Entry uses SL (stop-limit) orders
+# trigger_price = swing_low - tick_size (e.g., 130.00 - 0.05 = 129.95)
+# limit_price = trigger_price - 3 (e.g., 129.95 - 3 = 126.95)
+
 order = {
     "strategy": "baseline_v1",           # Strategy name
     "symbol": "NIFTY30DEC2526000CE",   # Option symbol
-    "action": "SELL",                   # SELL (short) or BUY
+    "action": "SELL",                   # SELL (short) for entry
     "exchange": "NFO",                  # Always NFO for options
-    "price_type": "LIMIT",             # LIMIT or MARKET
-    "price": 129.95,                   # Entry price (swing_low - 0.05)
+    "price_type": "SL",                # Stop-Limit order
+    "trigger_price": 129.95,           # Trigger at swing_low - tick
+    "price": 126.95,                   # Limit price (trigger - 3)
     "quantity": 650,                   # Total quantity (lots × LOT_SIZE)
     "product": "MIS"                   # MIS (intraday) only
 }

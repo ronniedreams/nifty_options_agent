@@ -3,7 +3,7 @@
 ## ⚡ Quick Context (30 seconds)
 
 **What:** Automated trading system for NIFTY index options using swing-break strategy
-**How:** Detect swing lows → Apply 2-stage filters → Place proactive limit orders BEFORE breaks
+**How:** Detect swing lows → Apply 2-stage filters → Place proactive SL (stop-limit) orders BEFORE breaks
 **Risk:** Rs.6,500 per R, daily targets of +/-5R (exit all positions at either point)
 **Broker:** OpenAlgo integration layer (http://127.0.0.1:5000)
 **Mode:** Paper trading by default (PAPER_TRADING=true in .env)
@@ -27,9 +27,9 @@
    Output: current_best dict (qualified strikes for CE and PE)
 
 4. ORDER EXECUTION (order_manager.py)
-   Proactive placement: LIMIT orders at swing_low - 0.05
+   Proactive placement: SL orders (trigger: swing_low - tick, limit: trigger - 3)
    Position sizing: R_VALUE formula (₹6,500 per position)
-   SL placement: SL-L orders at highest_high + 1, price buffer
+   Exit SL: SL orders at highest_high + 1 (trigger), +3 Rs buffer (limit)
 
 5. POSITION TRACKING (position_tracker.py)
    Monitor active positions, calculate R-multiples
@@ -47,8 +47,8 @@ Flow:
 1. Swing LOW detected → Added to candidates (static filter: 100-300 Rs)
 2. EVERY BAR: Evaluate ALL candidates (dynamic filters: VWAP 4%+, SL 2-10%)
 3. Track best CE and best PE separately
-4. Best strike qualifies → Place limit order IMMEDIATELY at swing_low - 0.05
-5. Break happens → Order already waiting → Fills at better price
+4. Best strike qualifies → Place SL order (trigger: swing_low - tick, limit: trigger - 3)
+5. Price drops to trigger → Order activates → Fills at limit price (no slippage)
 ```
 
 ---
@@ -63,7 +63,7 @@ Flow:
 | `data_pipeline.py` | WebSocket → 1-min OHLCV bars + VWAP | ~500 |
 | `swing_detector.py` | Multi-symbol swing low/high detection | ~350 |
 | `continuous_filter.py` | Two-stage filtering engine | ~300 |
-| `order_manager.py` | Proactive limit orders + SL placement | ~680 |
+| `order_manager.py` | Proactive SL orders for entry + exit | ~680 |
 | `position_tracker.py` | R-multiple accounting | ~350 |
 | `state_manager.py` | SQLite persistence | ~280 |
 | `telegram_notifier.py` | Trade notifications | ~150 |
@@ -296,10 +296,12 @@ Step 3: Tie-Breaker
 **Proactive Approach (Current - What We Do):**
 ```
 1. Swing low detected and qualified
-2. Place LIMIT order BEFORE break (at swing_low - 0.05)
-3. Order waits in market
-4. When price breaks, order fills at our limit price
-5. No slippage!
+2. Place SL order BEFORE break:
+   - Trigger: swing_low - tick_size (e.g., swing_low - 0.05)
+   - Limit: trigger - 3 Rs (buffer for fill)
+3. Order sits dormant until trigger hit
+4. When price drops to trigger → Order activates as limit order
+5. Fills at limit price with no slippage!
 ```
 
 ### Order Placement Trigger
@@ -312,31 +314,37 @@ Orders are placed only when a strike passes all three filter stages:
 
 Plus position availability checks (max positions, no duplicate orders)
 
-### Entry Order: LIMIT
+### Entry Order: SL (Stop-Limit)
 
 ```python
 # When strike qualifies:
+tick_size = 0.05
+trigger_price = swing_low - tick_size      # Trigger just below swing
+limit_price = trigger_price - 3            # 3 Rs buffer for fill
+
 order = client.placeorder(
     strategy="baseline_v1",
     symbol="NIFTY30DEC2526000CE",
-    action="SELL",           # Short the option
+    action="SELL",              # Short the option
     exchange="NFO",
-    price_type="LIMIT",
-    price=swing_low - 0.05,  # 1 tick below swing (0.05 tick size)
+    price_type="SL",            # Stop-Limit order
+    trigger_price=trigger_price,
+    price=limit_price,
     quantity=lots * LOT_SIZE,
-    product="MIS"            # Intraday
+    product="MIS"               # Intraday
 )
 ```
 
-**Why LIMIT, not MARKET?**
-- Guarantees fill price (no slippage)
-- Order waits at our desired level
-- Fills when swing breaks naturally
+**Why SL (Stop-Limit), not regular LIMIT?**
+- Order sits dormant until trigger price is hit
+- Prevents fills if price never reaches our entry level
+- When triggered, becomes a limit order with price control
+- Better entry timing aligned with swing break
 
-**Why swing_low - 0.05?**
-- Options tick size is 0.05 Rs
-- Ensures order is BELOW swing low
-- When price drops to swing_low, order fills
+**Price Calculation:**
+- `trigger_price = swing_low - 0.05` (1 tick below swing)
+- `limit_price = trigger_price - 3` (3 Rs buffer below trigger)
+- When price drops to trigger → Order activates → Fills at limit or better
 
 ### Position Sizing
 
@@ -356,29 +364,32 @@ Required lots: 6500 / (10 × 65) = 10 lots
 Quantity: 10 × 65 = 650 shares
 ```
 
-### Stop Loss Order: SL-L (Placed on Fill)
+### Exit Stop Loss Order: SL (Placed on Fill)
 
 ```python
 # SL placed IMMEDIATELY when entry fills:
-sl_order = client.placesmartorder(
+trigger_price = highest_high + 1    # +1 Rs buffer above highest high
+limit_price = trigger_price + 3     # +3 Rs buffer for fill
+
+sl_order = client.placeorder(
     strategy="baseline_v1",
     symbol="NIFTY30DEC2526000CE",
     action="BUY",              # Close the short
     exchange="NFO",
-    price_type="SL-L",         # Stop-Loss Limit
-    trigger_price=highest_high,
-    price=highest_high + 3,    # 3 Rs buffer for fill
+    price_type="SL",           # Stop-Limit order
+    trigger_price=trigger_price,
+    price=limit_price,
     quantity=lots * LOT_SIZE,
     product="MIS"
 )
 ```
 
-**Why SL-L instead of SL-M (Market)?**
-- SL-M can have extreme slippage in fast markets
-- SL-L with 3 Rs buffer ensures reasonable fill
+**Why SL (Stop-Limit) instead of Market?**
+- Market orders can have extreme slippage in fast markets
+- SL with 3 Rs buffer ensures reasonable fill
 - Better control over exit price
 
-**+1 Rs Buffer in SL Calculation:**
+**+1 Rs Buffer in Trigger Calculation:**
 - Accounts for tick-level slippage during volatile moves
 - Prevents premature exits at exact highest high level
 - Ensures SL triggers reliably
@@ -395,7 +406,7 @@ REJECTED   CANCELLED      SL_HIT         CLOSED        LOGGED
 
 1. **NO_ORDER → ORDER_PLACED**
    - Trigger: Strike passes all filters
-   - Action: Place LIMIT order at swing_low - 0.05
+   - Action: Place SL order (trigger: swing_low - tick, limit: trigger - 3)
 
 2. **ORDER_PLACED → ORDER_FILLED**
    - Trigger: Order status = COMPLETE (checked every 10 seconds)
@@ -418,7 +429,7 @@ REJECTED   CANCELLED      SL_HIT         CLOSED        LOGGED
 **When to Modify (keep same symbol):**
 - Same symbol remains best candidate
 - Swing low gets updated (e.g., 80 → 75)
-- Modify order price to: new_swing_low - 0.05
+- Modify order trigger/limit to: new_swing_low - tick, trigger - 3
 
 **When to Cancel and Replace (different symbol):**
 - Different strike becomes best
@@ -628,7 +639,7 @@ Each rule file includes:
 ### OpenAlgo Integration (NEW!)
 
 Comprehensive guide for broker API integration:
-- Order placement (LIMIT, SL-L orders)
+- Order placement (SL orders for entry and exit)
 - WebSocket data feed management
 - Position reconciliation
 - Error handling & retry logic

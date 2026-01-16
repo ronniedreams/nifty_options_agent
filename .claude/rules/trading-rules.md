@@ -48,9 +48,8 @@ Final quantity = Final lots × LOT_SIZE
 - Trust broker as source of truth for positions and orders
 
 ### Order Types
-- **Entry**: LIMIT orders at `swing_low - 0.05` (proactive placement)
-- **SL**: SL-L orders (stop-loss limit) with trigger at highest_high + 1 Rs
-- **SL Price Buffer**: `highest_high + 3` for fill protection
+- **Entry**: SL orders (trigger: swing_low - tick, limit: trigger - 3)
+- **Exit SL**: SL orders (trigger: highest_high + 1, limit: trigger + 3)
 - **Product**: Always MIS (intraday) for NIFTY options
 - **Exchange**: Always NFO for NIFTY
 - **Action**: SELL for entry (short options), BUY for SL (cover)
@@ -68,7 +67,7 @@ Use these tags consistently:
 logger.info("[SWING] New swing detected: NIFTY30DEC2526000CE @ 130.50, VWAP=125.00, Premium=4.4%")
 logger.info("[FILTER] Stage-1 PASS: 26000CE in swing_candidates")
 logger.info("[FILTER] Stage-2 FAIL: 26050CE disqualified (SL% 12.1% > 10%)")
-logger.info("[ORDER] Placing LIMIT order: 26000CE @ 129.95 for 650 qty")
+logger.info("[ORDER] Placing SL order: 26000CE trigger=129.95 limit=126.95 for 650 qty")
 logger.info("[FILL] Entry filled at 129.95, placing SL at 141 (highest_high=140)")
 logger.info("[EXIT] +5R target hit at 15:10:30, closing all positions")
 logger.info("[RECONCILE] Position sync: 3 active, 0 mismatches")
