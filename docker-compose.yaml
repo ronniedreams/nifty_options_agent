@@ -2,8 +2,10 @@ version: '3.8'
 
 services:
   # OpenAlgo API (dependency)
+  # Clone repo first: git clone https://github.com/marketcalls/openalgo.git
   openalgo:
-    image: marketcalls/openalgo:latest
+    build:
+      context: ./openalgo
     container_name: openalgo
     ports:
       - "5000:5000"
