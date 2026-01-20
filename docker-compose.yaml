@@ -2,16 +2,16 @@ version: '3.8'
 
 services:
   # OpenAlgo API (dependency)
-  # Clone repo first: git clone https://github.com/marketcalls/openalgo.git
+  # OpenAlgo source is in ./openalgo-zerodha/openalgo
   openalgo:
     build:
-      context: ./openalgo
+      context: ./openalgo-zerodha/openalgo
     container_name: openalgo
     ports:
       - "5000:5000"
       - "8765:8765"  # WebSocket proxy
     volumes:
-      - ./openalgo/.env:/app/.env:ro  # Mount .env file (not copied during build)
+      - ./openalgo-zerodha/openalgo/.env:/app/.env:ro  # Mount .env file (not copied during build)
       - openalgo_data:/app/db
       - openalgo_logs:/app/log
     environment:
