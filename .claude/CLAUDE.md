@@ -558,6 +558,41 @@ Certbot auto-renews. Manual renewal:
 sudo certbot renew
 ```
 
+### Three-Way Sync Workflow (IMPORTANT for Claude Code)
+
+**Environment Setup:**
+- **Laptop** (Windows): Local development, uses HTTPS for GitHub
+- **GitHub**: Central repository (feature/docker-ec2-fixes branch)
+- **EC2**: Production server, uses SSH for GitHub
+
+**Laptop → GitHub → EC2 (Most Common):**
+```bash
+# 1. On laptop - commit and push
+git add . && git commit -m "message" && git push origin feature/docker-ec2-fixes
+
+# 2. On EC2 - pull and deploy
+ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15
+cd ~/nifty_options_agent && ./deploy.sh
+```
+
+**EC2 → GitHub → Laptop:**
+```bash
+# 1. On EC2 - commit and push
+cd ~/nifty_options_agent
+git add . && git commit -m "message" && git push origin feature/docker-ec2-fixes
+
+# 2. On laptop - pull
+git pull origin feature/docker-ec2-fixes
+```
+
+**CRITICAL RULES for Claude Code:**
+1. **Always check git status** on both laptop and EC2 before making changes
+2. **Never force push** - always resolve conflicts properly
+3. **EC2 is production** - test changes locally first when possible
+4. **After any code change on EC2**, commit and push to keep all three in sync
+5. **docker-compose.yaml** has EC2-specific paths - don't change volume mounts without testing
+6. **SSH key for EC2→GitHub**: `~/.ssh/github_key` (already configured)
+
 ---
 
 ## Common Tasks
