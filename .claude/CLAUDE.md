@@ -481,6 +481,85 @@ PAPER_TRADING=false
 
 ---
 
+## EC2 Deployment (Production)
+
+### Infrastructure
+- **EC2 Instance**: Ubuntu 22.04 on AWS
+- **Elastic IP**: 13.233.211.15 (static)
+- **Domain**: ronniedreams.in
+- **SSL**: Let's Encrypt (auto-renews)
+
+### URLs (Password Protected)
+| Service | URL |
+|---------|-----|
+| OpenAlgo Dashboard | https://openalgo.ronniedreams.in |
+| Monitor Dashboard | https://monitor.ronniedreams.in |
+
+**Basic Auth Credentials:**
+- Username: `admin`
+- Password: `your-dashboard-password`
+
+### SSH Access
+```bash
+ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15
+```
+
+### Deploy Updates to EC2
+After pushing changes to GitHub:
+```bash
+# SSH into EC2
+ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15
+
+# Run deploy script
+cd ~/nifty_options_agent
+./deploy.sh
+```
+
+### Manual Docker Commands on EC2
+```bash
+cd ~/nifty_options_agent
+
+# View container status
+docker-compose ps
+
+# View logs
+docker-compose logs -f trading_agent
+docker-compose logs -f openalgo
+
+# Restart all services
+docker-compose down && docker-compose up -d
+
+# Restart single service
+docker-compose restart trading_agent
+```
+
+### Directory Structure on EC2
+```
+~/nifty_options_agent/
+├── openalgo-zerodha/openalgo/   # OpenAlgo broker integration
+├── baseline_v1_live/            # Trading strategy
+├── docker-compose.yaml          # Container orchestration
+├── deploy.sh                    # Deployment script
+└── .env                         # Environment variables
+```
+
+### Nginx Configuration
+Location: `/etc/nginx/sites-available/ronniedreams.in`
+
+To modify basic auth password:
+```bash
+sudo htpasswd /etc/nginx/.htpasswd admin
+sudo systemctl reload nginx
+```
+
+### SSL Certificate Renewal
+Certbot auto-renews. Manual renewal:
+```bash
+sudo certbot renew
+```
+
+---
+
 ## Common Tasks
 
 ### Check Why No Trades
