@@ -37,7 +37,7 @@ TELEGRAM_CHAT_ID=123456789  # From userinfobot
 Run the test script:
 
 ```powershell
-cd options_agent\live
+cd baseline_v1_live
 python -c "from telegram_notifier import TelegramNotifier; t = TelegramNotifier(); t.send_message('Test message')"
 ```
 
@@ -94,9 +94,11 @@ Edit `config.py` to control which notifications you receive:
 # Notification Events
 NOTIFY_ON_TRADE_ENTRY = True   # Entry notifications
 NOTIFY_ON_TRADE_EXIT = True    # Exit notifications
-NOTIFY_ON_DAILY_TARGET = True  # ±5R target hit
+NOTIFY_ON_DAILY_TARGET = True  # Daily target hit (DAILY_TARGET_R/DAILY_STOP_R, configurable)
 NOTIFY_ON_ERROR = True         # Error alerts
 ```
+
+**Note:** R_VALUE, DAILY_TARGET_R, and DAILY_STOP_R are configurable in config.py. The notification amounts will reflect your configured values.
 
 ## Troubleshooting
 
@@ -137,3 +139,39 @@ Want to send alerts to a group?
 5. Use group ID in TELEGRAM_CHAT_ID
 
 Now all admins in the group will receive alerts!
+
+## EC2/Docker Deployment
+
+When running on EC2 with Docker, Telegram notifications work the same way:
+
+### Configuration
+
+The `.env` file on EC2 should contain the same Telegram settings:
+
+```bash
+TELEGRAM_ENABLED=true
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
+```
+
+### Verify on EC2
+
+```bash
+# SSH into EC2
+ssh -i "path/to/key.pem" ubuntu@13.233.211.15
+
+# Check if Telegram is configured
+docker-compose exec trading_agent env | grep TELEGRAM
+
+# View Telegram-related logs
+docker-compose logs trading_agent | grep -i telegram
+```
+
+### Troubleshooting on EC2
+
+- **No notifications received**: Check that `.env` is mounted correctly in docker-compose.yaml
+- **Connection errors**: EC2 security group must allow outbound HTTPS (port 443) to api.telegram.org
+- **Test from container**:
+  ```bash
+  docker-compose exec trading_agent python -c "from telegram_notifier import TelegramNotifier; t = TelegramNotifier(); t.send_message('EC2 test')"
+  ```

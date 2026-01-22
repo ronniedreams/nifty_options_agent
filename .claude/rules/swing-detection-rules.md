@@ -50,15 +50,47 @@ Before a new alternating swing forms, if a NEW EXTREME appears, UPDATE the exist
 
 This ensures we only look at relevant price action.
 
+## Multi-Symbol Context
+
+Swing detection operates **independently per symbol**. Each option strike (e.g., NIFTY06JAN2624000CE, NIFTY06JAN2624100CE) has its own:
+- Swing history (alternating highs and lows)
+- Watch counters (low_watch, high_watch)
+- Candidates in swing_candidates pool
+
+This allows the system to track multiple potential entry points across different strikes simultaneously.
+
+## Proactive Order Flow
+
+**Key Concept:** Orders are placed BEFORE swing breaks, not after.
+
+```
+1. Swing LOW detected and qualified → Place SL order (entry)
+   - Trigger: swing_low - tick_size (e.g., 130.00 - 0.05 = 129.95)
+   - Limit: trigger - 3 Rs buffer (e.g., 129.95 - 3 = 126.95)
+   - Order sits dormant until price drops to trigger
+
+2. Price drops to trigger → Entry order FILLS → Position opened
+
+3. IMMEDIATELY after fill → Place exit SL order
+   - Trigger: highest_high + 1 Rs (e.g., 142.00 + 1 = 143.00)
+   - Limit: trigger + 3 Rs buffer (e.g., 143.00 + 3 = 146.00)
+   - This protects the position from adverse moves
+```
+
+**Why Proactive?**
+- No latency between swing break and order placement
+- Better fill prices (limit order vs market chase)
+- Order ready and waiting at exchange
+
 ## Strike Filtration Pipeline
 
 ### Stage 1: Static Filter (Run Once)
 
 Applied immediately when swing forms. Never re-evaluated.
 
-**Filters:**
-1. **Price Range**: `MIN_ENTRY_PRICE ≤ Swing Low ≤ MAX_ENTRY_PRICE` (default: 100-300)
-2. **VWAP Premium**: `((Swing Low - VWAP) / VWAP) ≥ MIN_VWAP_PREMIUM` (default: 4%)
+**Filters (all configurable in config.py):**
+1. **Price Range**: `MIN_ENTRY_PRICE ≤ Swing Low ≤ MAX_ENTRY_PRICE` (configurable, default: 100-300)
+2. **VWAP Premium**: `((Swing Low - VWAP) / VWAP) ≥ MIN_VWAP_PREMIUM` (configurable, default: 4%)
 
 **Key Points:**
 - VWAP is frozen at swing formation time (immutable)
@@ -71,8 +103,8 @@ Applied immediately when swing forms. Never re-evaluated.
 
 Applied continuously to all swings in `swing_candidates` pool.
 
-**Filter:**
-- **SL% Range**: `MIN_SL_PERCENT ≤ SL% ≤ MAX_SL_PERCENT` (default: 2-10%)
+**Filter (configurable in config.py):**
+- **SL% Range**: `MIN_SL_PERCENT ≤ SL% ≤ MAX_SL_PERCENT` (configurable, default: 2-10%)
 
 **SL% Calculation:**
 ```
@@ -88,9 +120,18 @@ SL% = (SL Price - Entry Price) / Entry Price × 100
 - Example: Bar 1: SL%=4.6% ✓ → Bar 3: SL%=12.3% ❌ (exceeds 10%)
 
 **Real-Time Evaluation (CRITICAL):**
-- Evaluate EVERY tick (not batched every 10 seconds)
-- Ensures SL% reflects true risk at order placement moment
-- If excluded current bar, SL% will be artificially tight (WRONG)
+- **Highest high tracking**: Includes current bar's high, which updates with each tick as new highs are made
+- **Filter evaluation**: Tick-wise - add/remove candidates as soon as they qualify/disqualify
+- **Why tick-wise matters**: Order placed immediately when strike qualifies in Stage 3, so we need real-time SL%
+
+```
+Example:
+Bar 10: Swing LOW forms @ 130
+Bar 11: High = 135 (highest_high = 135, SL% = 4.6%)
+Bar 12: High = 138 (highest_high = 138, SL% = 6.9%)
+Bar 13: Current bar, high so far = 142 (highest_high = 142, SL% = 10.0%)
+        ↑ If tick pushes high to 144 → highest_high = 144 → SL% = 11.5% → DISQUALIFIED immediately
+```
 
 **Action:**
 - Pass → Add to `qualified_candidates` list (mutable, refreshed every bar)
@@ -102,7 +143,7 @@ When multiple strikes pass all filters for same option type (CE or PE), select O
 
 **Rule 1: SL Points Closest to 10 Rs (Primary)**
 ```
-Target: 10 points (optimized for R_VALUE = ₹6,500)
+Target: 10 points (optimized for R_VALUE - configurable in config.py)
 sl_distance = abs(sl_points - 10)
 
 Example:
@@ -111,13 +152,30 @@ Strike B: SL=12 points → distance=2
 Strike C: SL=9 points → distance=1 ← WINNER (closest to 10)
 ```
 
-**Rule 2: Highest Entry Price (Tie-Breaker)**
+**Rule 2: Strike Multiple of 100 (Secondary Tie-Breaker)**
 ```
-If multiple strikes have same SL distance, prefer higher premium
+If multiple strikes have same SL distance, prefer strikes that are multiples of 100
+
+Why: Round strikes (24000, 24100, 24200) have better liquidity than odd strikes (24050, 24150)
+
+Strike Extraction from Symbol:
+  Symbol: NIFTY06JAN2626200CE
+  Format: NIFTY + DDMMMYY + STRIKE + CE/PE
+  Strike: 26200 (extract numeric portion before CE/PE)
+  Check: 26200 % 100 == 0 → True (multiple of 100)
 
 Example (both distance=1):
-Strike A: Entry=145 ← WINNER (higher premium)
-Strike B: Entry=120
+Strike 24050CE: Entry=145, 24050 % 100 = 50 (not multiple)
+Strike 24100CE: Entry=142, 24100 % 100 = 0 ← WINNER (multiple of 100)
+```
+
+**Rule 3: Highest Entry Price (Final Tie-Breaker)**
+```
+If multiple strikes have same SL distance AND both are multiples of 100, prefer higher premium
+
+Example (both distance=1, both multiples of 100):
+Strike 24100CE: Entry=145 ← WINNER (higher premium)
+Strike 24200CE: Entry=120
 ```
 
 **Output:**
@@ -200,21 +258,56 @@ Log every rejection with reason:
 5. `sl_percent_high`: SL% > MAX_SL_PERCENT (dynamic, mutable)
 6. `no_data`: Missing OHLC/VWAP data
 
-## Swing Break Detection
+## Swing Invalidation Rules
 
-Swings are removed from all pools when price breaks below swing_low:
+**Once swing_low price is breached, that swing is "dead"** - regardless of whether we had an order placed.
 
-```python
-Swing: 26200CE @ 130
-Current bar low: 128 (< 130)
+### Scenario 1: Swing Break WITH Order (Qualified Strike)
+```
+Swing: 26200CE @ 130 (was best qualified → SL order placed)
+Price drops below 130 → Order triggers and fills → Position entered
 
 Action:
-1. Mark swing as broken
+1. Position opened - swing served its purpose
 2. Remove from swing_candidates
-3. Remove from qualified_candidates (if present)
-4. Cancel order (if pending)
-5. Log swing break event
+3. Remove from qualified_candidates
+4. Place exit SL order immediately
+5. Swing data retained for reference (next swing detection)
 ```
+
+### Scenario 2: Swing Break WITHOUT Order (Not Qualified)
+```
+Swing: 26200CE @ 130 (was in pool but NOT the best qualified → no order)
+Price drops below 130 → Entry opportunity passed
+
+Action:
+1. Mark swing as "dead" - no longer considered for qualification
+2. Keep in swing_candidates pool (for reference purposes)
+3. Will NOT appear in qualified_candidates anymore
+4. Swing data retained for next swing detection
+5. Log: "[SWING] 26200CE swing broken without order - opportunity passed"
+```
+
+### Scenario 3: New Swing Replaces Old
+```
+Old swing: 26200CE @ 130 (in pool)
+New swing LOW forms: 26200CE @ 125 (lower low)
+
+Action:
+1. Old swing replaced by new swing
+2. New swing evaluated through filter pipeline
+3. Old swing data discarded
+```
+
+### Summary Table
+
+| Scenario | In Pool? | Considered for Qualification? | Notes |
+|----------|----------|-------------------------------|-------|
+| Swing break + order filled | Removed | No | Position entered |
+| Swing break + no order | Stays (dead) | **No** | Opportunity passed |
+| New swing replaces old | Old removed | No | Replaced by new |
+| SL% out of range | Stays | No (not in qualified) | May re-qualify later |
+| Different strike becomes best | Stays | Yes | Still evaluated each tick |
 
 ## Common Gotchas
 
@@ -228,10 +321,10 @@ Action:
 - **Fix**: VWAP is immutable by design (correct behavior)
 - **Note**: This is intentional - we want VWAP at formation time, not current
 
-### Gotcha 3: Batch Evaluation
-- **Issue**: Only evaluating filters every 10 seconds instead of every tick
-- **Fix**: Evaluate every tick for real-time SL% accuracy
-- **Impact**: SL% will be artificially tight if current bar excluded
+### Gotcha 3: Stale Current Bar High
+- **Issue**: Not updating current bar's high with each tick
+- **Fix**: Track current bar's high in real-time (updates with each tick if new high made)
+- **Impact**: SL% won't reflect true risk mid-bar, may miss disqualification moment
 
 ### Gotcha 4: Missing Swing Updates
 - **Issue**: Not updating swing when new extreme forms
@@ -264,10 +357,21 @@ Action:
 - [ ] No duplicate order already pending for this strike
 - [ ] Position availability check passed
 
+## Evaluation Frequency Summary
+
+| Component | Frequency | Reason |
+|-----------|-----------|--------|
+| **Swing detection** (watch counters) | Bar close | Needs complete OHLC bars |
+| **Highest high tracking** | Every tick | Current bar's high updates with new highs |
+| **SL% calculation** | Every tick | Depends on highest_high |
+| **Filter evaluation** | Every tick | Order placed immediately on qualification |
+| **Order status polling** | Every 10 seconds | Broker API rate limits |
+| **Position reconciliation** | Every 60 seconds | Sync with broker |
+
 ## Performance Optimization
 
 - Cache swing_candidates to avoid re-filtering every bar
-- Only recalculate SL% for swings in qualified_candidates
+- Only recalculate SL% for swings in swing_candidates pool
 - Use index-based lookup for highest_high window (avoid full scan)
-- Log filter rejections periodically (not every bar) to reduce I/O
+- Log filter rejections periodically (not every tick) to reduce I/O
 - Monitor swing detection accuracy through live logs

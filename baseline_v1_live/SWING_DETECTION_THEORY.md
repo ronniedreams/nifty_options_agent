@@ -118,7 +118,11 @@ When any bar's watch counter reaches **2**, it triggers swing detection:
 
 ### Why "2" Confirmations?
 
-One confirmation could be noise. Two co (with Updates)
+One confirmation could be noise. Two confirmations validate that price truly reversed at that point. It's a balance between:
+- **Too few (1)**: Too many false swings from noise
+- **Too many (3+)**: Too much lag, miss real turning points
+
+### Step 5: Enforce Alternating Pattern (with Updates)
 
 Before finalizing the swing:
 - Check if it matches the required pattern (high after low, low after high)
@@ -344,11 +348,9 @@ Bar 12: O=107, H=110, L=105, C=109 ← LL+LC triggers high_watch
 
 Final pattern: **LOW(93) → HIGH(110)** - captures true extremes!
 
-##
-Pattern so far: **LOW → HIGH** ✓ (valid)
+## Why This Method Works
 
-## Why This Method?
- with adaptive updates:
+The watch-based system with adaptive updates:
 
 1. Every bar is a potential swing point
 2. Future bars "vote" whether past bars were turning points
@@ -382,6 +384,8 @@ It's like looking backwards and saying: "Now that I see what happened AFTER that
 
 This ensures every swing represents the ACTUAL extreme in that wave, making trading decisions more accurate.
 
+## Limitations
+
 1. **Lag**: Swing is confirmed AFTER price has already moved away
 2. **Complexity**: Multiple counters to track, can be hard to debug
 3. **Parameter sensitivity**: The "2 confirmations" rule is hardcoded
@@ -414,6 +418,43 @@ Small retracements can trigger watch counters if they meet the HH+HC or LL+LC co
 
 **Result**: Too many swings on minor price fluctuations.
 
+## Multi-Symbol Context
+
+Swing detection operates **independently per symbol**. Each option strike (e.g., NIFTY06JAN2624000CE, NIFTY06JAN2624100CE) has its own:
+
+- Swing detector instance
+- Watch counters (low_watch, high_watch)
+- Swing history (alternating highs and lows)
+- Last swing state
+
+This allows the system to track potential entry points across multiple strikes simultaneously. The `MultiSwingDetector` class manages 42+ individual detectors (21 CE + 21 PE strikes around ATM).
+
+## Evaluation Frequency
+
+**Swing detection happens on BAR CLOSE, not every tick.**
+
+| Component | Frequency | Reason |
+|-----------|-----------|--------|
+| Swing detection (watch counters) | Bar close | Needs complete OHLC bars for comparison |
+| Highest high tracking | Every tick | Current bar's high updates with new highs |
+| Filter evaluation (SL%) | Every tick | Real-time risk assessment |
+
+**Why bar-level for swings?**
+- Watch counters compare OHLC values between bars
+- Incomplete bars would give false signals
+- Confirmed bars provide stable reference points
+
+## What Happens When Swing Breaks
+
+**CRITICAL: Swing breaking is the ENTRY TRIGGER for qualified strikes!**
+
+When price drops below swing_low:
+- If SL order is pending → Order TRIGGERS and FILLS → Position opened
+- If no order (not qualified) → Opportunity passed, swing marked as "broken"
+- Swing is removed from candidates pool (entry complete or missed)
+
+See STRIKE_FILTRATION_THEORY.md for details on swing break behavior.
+
 ## Summary
 
 The watch-based system treats swing detection as a **confirmation game**:
@@ -423,5 +464,7 @@ The watch-based system treats swing detection as a **confirmation game**:
 3. When 2 votes are cast (counter = 2), the swing is confirmed
 4. The actual swing point is the extreme in that confirmed area
 5. Swings must alternate to maintain the wave pattern
+6. **Swing updates**: If a new extreme forms before alternation, UPDATE the existing swing
+7. This ensures we track TRUE extremes, not premature turning points
 
-It's like looking backwards and saying: "Now that I see what happened AFTER that bar, I can confirm it was a turning point."
+It's like looking backwards and saying: "Now that I see what happened AFTER that bar, I can confirm it was a turning point - or wait, an even better extreme just formed, let me update!"

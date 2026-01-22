@@ -1,8 +1,9 @@
 # Baseline V1 Live Trading System - Implementation Summary
 
-**Last Updated:** December 23, 2025  
-**Status:** ✅ CODE COMPLETE - Ready for Paper Trading  
+**Last Updated:** January 22, 2026
+**Status:** ✅ CODE COMPLETE - Ready for Paper Trading
 **Major Revision:** Continuous Filtering Architecture (Proactive Order Management)
+**Latest Update:** Documentation sync with configurable values, EC2/Docker deployment
 
 ---
 
@@ -26,7 +27,7 @@ A **production-ready live trading system** with revolutionary **continuous filte
 ### Key Features
 
 ✅ **Continuous Filtering Architecture (NEW)**
-- **Two-stage filtering**: Static (100-300 price) + Dynamic (VWAP 4%+, SL 2-10%)
+- **Two-stage filtering**: Static (100-300 price, VWAP 4%+) + Dynamic (SL 2-10%)
 - **Continuous evaluation**: All swing candidates re-evaluated EVERY bar
 - **Best strike tracking**: Maintains best CE and best PE separately
 - **Proactive orders**: Placed IMMEDIATELY when strike qualifies (BEFORE break)
@@ -48,12 +49,13 @@ A **production-ready live trading system** with revolutionary **continuous filte
 - **Enriched swing data**: Includes option_type, VWAP, symbol, timestamp
 
 ✅ **Smart Strike Selection**
-- **Static Filter** (when swing forms): 100-300 price range
-- **Dynamic Filters** (every bar):
-  - VWAP Premium ≥4% (price above VWAP at swing)
-  - SL% between 2-10% (reasonable stop-loss range)
-  - Position sizing: 1-10 lots based on R_VALUE (₹6,500)
-- **Tie-breaker:** SL points closest to 10 → then highest entry price
+- **Static Filters** (when swing forms, checked once):
+  - Price range: 100-300 Rs (configurable MIN/MAX_ENTRY_PRICE)
+  - VWAP Premium ≥4% (price above VWAP at swing formation, configurable)
+- **Dynamic Filter** (every tick):
+  - SL% between 2-10% (configurable MIN/MAX_SL_PERCENT)
+  - Position sizing: R-based with configurable safety cap (MAX_LOTS_PER_POSITION = 15)
+- **Tie-breaker:** SL points closest to 10 → Strike multiple of 100 → Highest entry price
 - **Continuous re-evaluation**: Best strike can change as market moves
 
 ✅ **Proactive Order Management (NEW)**
@@ -62,59 +64,59 @@ A **production-ready live trading system** with revolutionary **continuous filte
   - PLACE: When strike qualifies through all filters (no price proximity check)
   - MODIFY: When different strike qualifies (cancel old, place new)
   - CANCEL: When strike disqualified (SL% out of range) or no candidate
-- **Limit orders**: Placed at swing_low - 0.05 (one tick below swing)
+- **SL (stop-limit) orders**: Trigger at swing_low - tick, limit at trigger - 3 Rs
 - **Retry logic**: 3 attempts with 2-second delay on failures
 - **Immediate SL orders**: Placed automatically on fill (SL-L type)
 
 ✅ **R-Multiple Position Tracking**
-- Normalized R_VALUE = ₹6,500 per position
-- Dynamic lot sizing (1-10 lots based on SL width)
+- R_VALUE configurable (default Rs.6,500 per position)
+- R-based lot sizing with configurable safety cap (MAX_LOTS_PER_POSITION = 15)
 - Cumulative R tracking (closed + unrealized)
-- Position limits: Max 5 total, Max 3 CE, Max 3 PE
+- Position limits: Configurable (MAX_POSITIONS=5, MAX_CE_POSITIONS=3, MAX_PE_POSITIONS=3)
 - **Per-type validation**: Can open checks respect CE/PE limits
-     # Main orchestrator - continuous evaluation (531 lines)
-├── config.py                      # All configuration parameters (179 lines)
-├── continuous_filter.py           # NEW: Two-stage filtering engine (295 lines)
-├── data_pipeline.py               # WebSocket → bars + VWAP (494 lines)
-├── swing_detector.py              # Swing detection with callbacks (346 lines)
-├── strike_filter.py               # Legacy filters (kept for reference) (220 lines)
-├── order_manager.py               # UPDATED: Option-type tracking (683 lines)
-├── position_tracker.py            # R-multiple accounting (350 lines)
-├── state_manager.py               # SQLite persistence (280 lines)
-├── telegram_notifier.py           # Telegram integration (150 lines)
-│
-├── test_simple_flow.py            # NEW: Architecture validation test
-├── test_continuous_flow.py        # NEW: Full continuous filter test
-├── check_system.py                # Pre-flight system validation (218 lines)
-│
-├── PRE_LAUNCH_CHECKLIST.md        # NEW: 7-phase launch plan
-├── DAILY_STARTUP.md               # Step-by-step daily procedure
-├── IMPLEMENTATION_STATUS.md       # NEW: Current status & next steps
-├── README.md                      # Complete documentation
-│
-├── requirements.txt               # Python dependencies
-├── start.ps1                      # Quick start script (PowerShell)
-├── .env.example                   # Environment template
-├── .env                           # Actual configuration (not in git)
-│
-├── live_state.db                  # SQLite database (runtime)
-└── logs/                          # Daily logs, trade CSVs
-```
-
-**Total:** ~3,500 lines of production code (25% increase from original)  
-**New Files:** 6 (continuous_filter.py, 2 test scripts, 3 documentation files)  
-**Major Updates:** 3 (baseline_v1_live.py, order_manager.py, swing_detector.py)d logging
 - Telegram notifications for all critical events
 - Real-time position tracking in SQLite database
 
 ## File Structure
 
 ```
-options_agent/live/
-├── baseline_v1_live.py      # Main orchestrator (300 lines)
-├── config.py                 # All configuration in one place (180 lines)
-├── data_pipeline.py          # WebSocket → bars + VWAP (350 lines)
-├── swiContinuous Filtering Architecture (Revolutionary Change)
+baseline_v1_live/
+├── baseline_v1_live.py        # Main orchestrator - continuous evaluation (~530 lines)
+├── config.py                  # All configuration parameters (~180 lines)
+├── continuous_filter.py       # Two-stage filtering engine (~300 lines)
+├── data_pipeline.py           # WebSocket → bars + VWAP (~500 lines)
+├── swing_detector.py          # Swing detection with callbacks (~350 lines)
+├── strike_filter.py           # Legacy filters (kept for reference)
+├── order_manager.py           # Option-type tracking, SL orders (~680 lines)
+├── position_tracker.py        # R-multiple accounting (~350 lines)
+├── state_manager.py           # SQLite persistence (~280 lines)
+├── telegram_notifier.py       # Telegram integration (~150 lines)
+│
+├── test_simple_flow.py        # Architecture validation test
+├── test_continuous_flow.py    # Full continuous filter test
+├── check_system.py            # Pre-flight system validation
+│
+├── PRE_LAUNCH_CHECKLIST.md    # 7-phase launch plan
+├── DAILY_STARTUP.md           # Step-by-step daily procedure
+├── IMPLEMENTATION_STATUS.md   # Current status & next steps
+├── README.md                  # Complete documentation
+│
+├── requirements.txt           # Python dependencies
+├── start.ps1                  # Quick start script (PowerShell)
+├── .env.example               # Environment template
+├── .env                       # Actual configuration (not in git)
+│
+├── live_state.db              # SQLite database (runtime)
+└── logs/                      # Daily logs, trade CSVs
+```
+
+**Total:** ~3,500 lines of production code
+
+---
+
+## Key Design Decisions
+
+### 1. Continuous Filtering Architecture (Revolutionary Change)
 
 **Problem with Original Reactive Approach:**
 ```
@@ -125,37 +127,39 @@ options_agent/live/
 
 **New Continuous Evaluation Approach:**
 ```
-✅ EVERY BAR:
-   1. Swing forms → Callback triggers → Add to candidates (static filter 100-300)
-   2. Evaluate ALL candidates with latest bars (dynamic filters: VWAP, SL%)
-   3. Select best CE and best PE (SL points closest to 10)
+✅ EVERY TICK/BAR:
+   1. Swing forms → Callback triggers → Add to candidates (static filters: 100-300 price, VWAP 4%+)
+   2. Evaluate ALL candidates with latest data (dynamic filter: SL% 2-10%)
+   3. Select best CE and best PE (tie-breaker: SL closest to 10 → multiple of 100 → highest premium)
    4. Order placement logic:
-      - Best strike qualifies → PLACE limit order @ swing - 0.05 IMMEDIATELY (no price proximity check)
+      - Best strike qualifies → PLACE SL order IMMEDIATELY
+        (trigger: swing_low - tick, limit: trigger - 3 Rs)
       - Once placed, keep order (don't cancel just because price moves away)
       - Only CANCEL or MODIFY if:
          • A different strike becomes the new best candidate, or
-         • The current candidate fails dynamic filters (SL% out of range)
-   5. Check fills, place SL orders, update positions
-   
-// This approach reduces unnecessary order churn and ensures the order is always ready for a fill if the price returns to the swing.
+         • The current candidate fails dynamic filter (SL% out of range)
+      - NOT a cancel reason: Swing breaking - that's the ENTRY TRIGGER!
+   5. Check fills, place exit SL orders, update positions
+
+// This approach reduces unnecessary order churn and ensures the order is always ready for a fill.
 ```
 
 **Benefits:**
-- ✅ **Proactive not reactive**: Orders placed BEFORE breaks
+- ✅ **Proactive not reactive**: SL orders placed BEFORE breaks
 - ✅ **No timing race**: Order ready when break happens
-- ✅ **Better fills**: Limit order at swing_low - 0.05
+- ✅ **Better fills**: SL order triggers at swing_low - tick, fills at limit
 - ✅ **Dynamic adaptation**: Switches to better strike automatically
 - ✅ **Separate tracking**: Best CE and best PE managed independently
 
 **Example Flow:**
 ```
-9:25 AM - Swing detected @ Rs.175.00 → Added to candidates
-9:26 AM - Price @ Rs.180 → Too far, wait
-9:27 AM - Price @ Rs.176 → Still too far
-9:28 AM - Price @ Rs.175.50 (0.50 above swing) → PLACE limit order @ 174.95!
-9:29 AM - Price drops to Rs.174.50 → Order FILLS at 174.95
-9:29 AM - SL order placed @ Rs.185.00 immediately
-9:30 AM - Different strike now has better SL → CANCEL old, PLACE new
+9:25 AM - Swing detected @ Rs.175.00, passes static filters → Added to candidates
+9:25 AM - Strike qualifies (SL% in range) → PLACE SL order (trigger=174.95, limit=171.95)
+9:26 AM - Price @ Rs.180 → Order waiting at exchange
+9:27 AM - Price @ Rs.176 → Order still waiting
+9:28 AM - Price drops to Rs.174.95 → Order TRIGGERS and FILLS
+9:28 AM - Exit SL order placed immediately (trigger=highest_high+1, limit=trigger+3)
+9:30 AM - Different strike now qualifies with better SL → For THAT type, CANCEL old, PLACE new
 ```
 
 ### 2. Two-Stage Filtering
@@ -167,23 +171,25 @@ if MIN_ENTRY_PRICE <= swing_price <= MAX_ENTRY_PRICE:  # 100-300 Rs
     add_swing_candidate(symbol, swing_info)
 ```
 
-**Stage 2: Dynamic Filter (Every Bar)**
+**Stage 2: Dynamic Filter (Every Tick)**
 ```python
-# Run EVERY bar for ALL candidates
+# Run EVERY tick for ALL candidates in swing_candidates
 for candidate in swing_candidates:
-    # Calculate with latest data
-    vwap_premium = (swing_low - vwap_at_swing) / vwap_at_swing
-    sl_percent = (sl_price - swing_low) / swing_low
-    
-    # Apply filters
-    if vwap_premium >= 0.04:  # ≥4% VWAP premium
-        if 0.02 <= sl_percent <= 0.10:  # 2-10% SL range
-            # Calculate position size
-            lots = min(R_VALUE / (sl_points * LOT_SIZE), MAX_LOTS_PER_POSITION)
-            qualified_candidates.append(enriched_candidate)
+    # VWAP premium already checked in Stage 1 (static, immutable)
+    # Only SL% is truly dynamic (highest_high updates each tick)
 
-# Select best by SL points closest to 10
-best = min(qualified, key=lambda x: abs(x['sl_points'] - 10))
+    highest_high = get_highest_high_since_swing(candidate)  # Updates with current bar's high
+    sl_price = highest_high + 1  # +1 Rs buffer
+    sl_percent = (sl_price - swing_low) / swing_low
+
+    # Apply dynamic filter
+    if 0.02 <= sl_percent <= 0.10:  # 2-10% SL range (configurable)
+        # Calculate position size (R-based with safety cap)
+        lots = min(R_VALUE / (sl_points * LOT_SIZE), MAX_LOTS_PER_POSITION)  # Cap at 15
+        qualified_candidates.append(enriched_candidate)
+
+# Tie-breaker: SL closest to 10 → Multiple of 100 → Highest premium
+best = select_best_candidate(qualified, tie_breaker_rules)
 ```
 
 **Why Two Stages?**
@@ -243,45 +249,25 @@ Trade 1: Entry 250, SL 260 → 10 points × 65 qty = ₹650 risk
 Trade 2: Entry 150, SL 155 → 5 points × 65 qty = ₹325 risk
 ```
 
-**Solution:** Dynamic lot sizing to normalize R
+**Solution:** Dynamic lot sizing to normalize R (R-based sizing is PRIMARY)
 ```python
-R_VALUE = ₹6,500  # Target risk per trade
+R_VALUE = 6500  # Target risk per trade (configurable in config.py)
 sl_points = sl_price - entry_price
-lots_required = R_VALUE / (sl_points × LOT_SIZE)
-final_lots = min(lots_required, MAX_LOTS_PER_POSITION)  # Cap at 10
+lots_required = R_VALUE / (sl_points * LOT_SIZE)
+final_lots = min(lots_required, MAX_LOTS_PER_POSITION)  # Safety cap at 15 (configurable)
 
 # Example calculations:
-# 10-point SL: ₹6,500 / (10 × 65) = 10 lots → Use 10 lots
-# 5-point SL:  ₹6,500 / (5 × 65) = 20 lots → Use 10 lots (capped)
-# 15-point SL: ₹6,500 / (15 × 65) = 6.67 lots → Use 6 lots
-```w - 1) → Wait for break → Filled at better price
+# 10-point SL: 6500 / (10 × 65) = 10 lots → Use 10 lots
+# 5-point SL:  6500 / (5 × 65) = 20 lots → Use 15 lots (capped by MAX_LOTS_PER_POSITION)
+# 15-point SL: 6500 / (15 × 65) = 6.67 lots → Use 6 lots
 ```
 
-**Benefits:**
-- ✅ Avoids slippage (limit order at precise price)
-- ✅ Order ready BEFORE break (no delay)
-- ✅ Cancels/modifies order if strike changes
-
-### 2. Normalized R-Multiple Accounting
-
-**Challenge:** Different trades have different risk amounts
-```
-Trade 1: Entry 250, SL 260 → 10 points × 65 qty = ₹650 risk
-Trade 2: Entry 150, SL 155 → 5 points × 65 qty = ₹325 risk
-```
-
-**Solution:** Dynamic lot sizing to normalize R
-```python
-R_VALUE = ₹6,500  # Target risk per position
-lots = min((R_VALUE / risk_per_unit) / 65, 10)
-```
-
-**Result:** 
-- Most positions risk ~₹6,000-₹7,000 (tight variance)
-- +5R target = consistent ~₹32,500 profit
+**Result:**
+- Most positions risk ~Rs.6,000-7,000 (tight variance)
+- +5R target = consistent ~Rs.32,500 profit (based on R_VALUE=6500)
 - Easy to compare with backtest (+206R over 184 days)
 
-### 3. Independent Option Monitoring
+### 5. Independent Option Monitoring
 
 **Why not use spot swing lows?**
 - Options price breaks BEFORE spot (options lead, spot follows)
@@ -289,11 +275,11 @@ lots = min((R_VALUE / risk_per_unit) / 65, 10)
 - Each option has unique price action
 
 **Implementation:**
-- 30 separate `SwingDetector` instances
+- 42 separate `SwingDetector` instances (21 CE + 21 PE strikes)
 - Each tracks its own swing state
-- Break detection happens in real-time per option
+- Swing detection happens on bar close per option
 
-### 4. Position Reconciliation
+### 6. Position Reconciliation
 
 **Problem:** SL may hit but strategy doesn't detect it (e.g., network glitch)
 
@@ -381,7 +367,7 @@ MAX_LOTS_PER_POSITION = 5  # Half size
 Revert to full configuration:
 ```python
 MAX_POSITIONS = 5
-MAX_LOTS_PER_POSITION = 10
+MAX_LOTS_PER_POSITION = 15  # Safety cap (R-based sizing is primary)
 ```
 
 ## Performance Expectations
@@ -726,14 +712,51 @@ Create scheduled task:
 - Need to update expiry weekly
 - Less visible (runs in background)
 
-### Option 4: Windows Service with NSSM (Production Grade)
- (Daily - 9:00 AM)
+### Option 4: EC2/Docker Deployment (Production Grade)
+
+Deploy to AWS EC2 with Docker containers for 24/7 reliability:
+
+```bash
+# SSH into EC2
+ssh -i "path/to/key.pem" ubuntu@13.233.211.15
+
+# Deploy latest code
+cd ~/nifty_options_agent && ./deploy.sh
+```
+
+**URLs (Password Protected):**
+- OpenAlgo Dashboard: https://openalgo.ronniedreams.in
+- Monitor Dashboard: https://monitor.ronniedreams.in
+
+**Docker Commands:**
+```bash
+docker-compose ps                          # View status
+docker-compose logs -f trading_agent       # View logs
+docker-compose down && docker-compose up -d # Restart all
+```
+
+**Pros:**
+- 24/7 uptime with auto-restart
+- Cloud-based (no local machine dependency)
+- SSL-secured dashboards
+- Centralized logging
+
+**Cons:**
+- Requires AWS account and setup
+- Monthly hosting costs
+- Need to manage three-way sync (Laptop ↔ GitHub ↔ EC2)
+
+See `.claude/CLAUDE.md` for complete EC2 deployment documentation.
+
+---
+
+## Daily Checklist (9:00 AM)
 
 Before **every trading day**:
 
 - [ ] **OpenAlgo Status**: Running at http://127.0.0.1:5000 ✅
 - [ ] **Broker Login**: Authenticated via OpenAlgo dashboard ✅
-- [ ] **Margin Check**: ≥₹10 Lakh available (for 5 positions × 10 lots) ✅
+- [ ] **Margin Check**: Sufficient margin available (for MAX_POSITIONS × MAX_LOTS_PER_POSITION) ✅
 - [ ] **WebSocket**: Proxy running on ws://127.0.0.1:8765 ✅
 - [ ] **Expiry Date**: Correct for today (check NSE website) ✅
 - [ ] **ATM Strike**: Within 100 points of NIFTY spot ✅
@@ -758,9 +781,9 @@ Before **every trading day**:
 - [ ] Confirm SQLite database updated
 - [ ] Validate position sizing correct
 
-**When Daily Exit Triggers (±5R or 3:15 PM):**
+**When Daily Exit Triggers (DAILY_TARGET_R/DAILY_STOP_R or FORCE_EXIT_TIME):**
 - [ ] All positions closed
-- [ ] All orders cancelled (limit + SL)
+- [ ] All orders cancelled (entry SL + exit SL orders)
 - [ ] System stops taking new entries
 - [ ] Daily summary logged
 
@@ -817,32 +840,9 @@ python baseline_v1_live.py --expiry 26DEC24 --atm 24200
 3. Update SQLite database if needed:
    ```sql
    DELETE FROM orders WHERE status = 'pending';
-   ``
+   ```
 
-- [ ] OpenAlgo running (http://127.0.0.1:5000)
-- [ ] Broker logged in via OpenAlgo
-- [ ] Sufficient margin (₹25L+ available)
-- [ ] Correct expiry date (check NSE website)
-- [ ] Correct ATM strike (within 100 points of spot)
-- [ ] .env file has valid API key
-- [ ] Logs directory exists and writable
-- [ ] Previous day's trades logged correctly
-
-### During Trading
-
-- [ ] Monitor logs every 30 minutes
-- [ ] Check cumulative R hourly
-- [ ] Verify positions match broker dashboard
-- [ ] Watch for WebSocket disconnections
-- [ ] Have manual override ready (close all via broker UI)
-
-### End of Day
-
-- [ ] Verify all positions closed (3:20 PM)
-- [ ] Check daily summary CSV
-- [ ] Review trade log for anomalies
-- [ ] Update expiry if needed (roll to next week)
-- [ ] Backup database: `live_state.db`
+---
 
 ## Support & Maintenance
 
@@ -873,8 +873,9 @@ You now have a **complete, production-ready live trading system** that:
 
 ✅ Matches backtest logic exactly (swing detection, entry filters, R-multiple accounting)
 ✅ Handles real-world challenges (network issues, order management, position reconciliation)
-✅ Provides safety mechanisms (±5R exits, position limits, crash recovery)
+✅ Provides safety mechanisms (configurable daily exits, position limits, crash recovery)
 ✅ Logs everything for analysis (trades, daily summaries, application logs)
+✅ Deploys to EC2/Docker for 24/7 production reliability
 
 **Start conservatively:**
 1. Paper trade for 10-20 days

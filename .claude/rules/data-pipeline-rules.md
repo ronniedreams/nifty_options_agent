@@ -71,7 +71,11 @@ volume = sum(all_volumes)  # Total volume in the minute
 Only emit bar when:
 1. Minute boundary crossed (next minute started)
 2. At least one tick received in the minute
-3. All OHLCV values are valid (not None, open < close < high, etc.)
+3. All OHLCV values are valid:
+   - Not None
+   - high >= max(open, close)
+   - low <= min(open, close)
+   - volume > 0
 
 ### Handling No-Tick Minutes
 
@@ -88,41 +92,49 @@ Volume-Weighted Average Price: average price weighted by volume traded.
 
 ### When to Calculate
 
-- **Every tick** (not just every bar)
+- **On bar completion** (when 1-minute bar closes, not on every tick)
 - **Cumulative** from start of trading day (9:15 AM IST)
 - **Per symbol** (separate VWAP for each option strike)
 
 ### Formula
 
 ```
-Typical Price = (High + Low + Close) / 3
-Cumulative TP × Volume = Sum of (TP × Volume) from start of day
+Typical Price = (High + Low + Close) / 3  # Uses completed bar's OHLC
+Cumulative PV = Sum of (Typical Price × Volume) from start of day
 Cumulative Volume = Total volume from start of day
-VWAP = Cumulative TP × Volume / Cumulative Volume
+VWAP = Cumulative PV / Cumulative Volume
 ```
 
 ### Implementation Details
 
 **For each symbol, maintain:**
 ```python
-vwap_state = {
+session_vwap_data = {
     'symbol': 'NIFTY30DEC2526000CE',
-    'cum_tp_volume': 0,      # Cumulative (TP × Volume)
-    'cum_volume': 0,         # Cumulative volume
-    'last_vwap': None,       # Last calculated VWAP
+    'cum_pv': 0.0,           # Cumulative (Typical Price × Volume)
+    'cum_vol': 0,            # Cumulative volume
 }
 ```
 
-**On each tick:**
-1. Calculate Typical Price: `(high + low + close) / 3`
-2. Add to cumulative: `cum_tp_volume += tp × volume`
-3. Add to cumulative: `cum_volume += volume`
-4. Calculate: `vwap = cum_tp_volume / cum_volume` (if cum_volume > 0)
+**On bar completion:**
+```python
+# When bar completes (minute boundary crossed)
+typical_price = (bar.high + bar.low + bar.close) / 3
+cum_pv += typical_price * bar.volume
+cum_vol += bar.volume
+
+if cum_vol > 0:
+    bar.vwap = cum_pv / cum_vol
+else:
+    bar.vwap = typical_price
+```
 
 **Reset Daily:**
 - At market open (9:15 AM IST), reset VWAP for all symbols
-- Clear cumulative TP and volume
+- Clear cumulative PV and volume
 - Start fresh calculation
+
+**Note:** VWAP is frozen at swing formation time for filter evaluation. Once a swing forms, its VWAP doesn't change (immutable).
 
 ### Include in Bar Data
 
@@ -215,16 +227,23 @@ Receive ticks in format: `(symbol, timestamp, bid, ask, ltp, volume)`
 ### Output: Downstream Systems
 
 Emit bars to:
-1. **Swing Detector** → Processes bar, detects swings
-2. **Filter Engine** → Recalculates SL% using latest bar's high
+1. **Swing Detector** → Processes bar on bar close, detects swings
+2. **Filter Engine** → Recalculates SL% using current bar's high (updates with each tick)
 3. **Position Tracker** → Updates live prices
+
+**Current Bar High Tracking:**
+- Current bar's high updates with each tick (if LTP > current high)
+- Filter engine uses this real-time high for SL% calculation
+- Ensures SL% reflects true risk at any moment, not just at bar close
 
 ## Common Gotchas
 
-### Gotcha 1: VWAP Calculation Timing
-- **Issue**: Calculating VWAP only on bar close (late)
-- **Fix**: Calculate VWAP on every tick (real-time)
-- **Impact**: Strike filtration delay, missed opportunities
+### Gotcha 1: VWAP vs Current Bar High Confusion
+- **Issue**: Confusing VWAP calculation with current bar high tracking
+- **Clarification**:
+  - VWAP: Calculated on bar close (cumulative, uses completed bars)
+  - Current bar high: Updates with each tick (used for SL% calculation)
+- **Impact**: VWAP is frozen at swing formation; current bar high is real-time
 
 ### Gotcha 2: Empty Minutes
 - **Issue**: Creating bars with zero volume (no ticks in minute)
@@ -261,7 +280,7 @@ Emit bars to:
 
 **On bar completion:**
 - [ ] OHLCV values valid (not None)
-- [ ] open < high and low < close (or equal)
+- [ ] high >= max(open, close) and low <= min(open, close)
 - [ ] volume > 0
 - [ ] VWAP calculated and non-zero
 - [ ] Timestamp is exact minute boundary
@@ -279,3 +298,39 @@ Emit bars to:
 - Batch bar emissions (emit once per minute)
 - Calculate VWAP incrementally (don't recalculate from scratch)
 - Log data quality metrics periodically (not every bar)
+
+## EC2/Docker Environment
+
+### WebSocket URL Differences
+
+| Environment | WebSocket URL |
+|-------------|---------------|
+| Local (Laptop) | ws://127.0.0.1:8765 |
+| EC2 (Docker) | ws://openalgo:8765 (internal network) |
+
+### Environment-Aware Configuration
+
+```python
+import os
+
+def get_websocket_url():
+    if os.environ.get('DOCKER_ENV'):
+        return "ws://openalgo:8765"  # Docker service name
+    return "ws://127.0.0.1:8765"     # Local development
+```
+
+### Troubleshooting Data Issues on EC2
+
+```bash
+# Check if data pipeline is receiving ticks
+docker-compose logs -f trading_agent | grep "\[TICK\]"
+
+# Check bar formation
+docker-compose logs -f trading_agent | grep "\[BAR\]"
+
+# Check heartbeat and coverage
+docker-compose logs -f trading_agent | grep "\[HEARTBEAT\]"
+
+# Verify WebSocket connection
+docker-compose logs openalgo | grep -i websocket
+```

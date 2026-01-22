@@ -34,11 +34,12 @@ PAPER_TRADING = os.getenv('PAPER_TRADING', 'true').lower() == 'true'
 6. Monitor first hour closely
 7. Log: `[CRITICAL] LIVE MODE ACTIVATED - ORDERS ARE REAL`
 
-## Position Limits (Hardcoded in config.py)
+## Position Limits (Configurable in config.py)
 
 ### Rule 2: Maximum Concurrent Positions
 
 ```python
+# config.py
 MAX_POSITIONS = 5           # Total concurrent positions
 MAX_CE_POSITIONS = 3        # Max CE positions
 MAX_PE_POSITIONS = 3        # Max PE positions
@@ -61,30 +62,39 @@ if pe_positions >= MAX_PE_POSITIONS and symbol.endswith('PE'):
     return False
 ```
 
-**Hardcoded Check:**
-- These limits are in config.py, NOT in order_manager.py (prevents accidental modification)
-- Don't make them configurable or user-adjustable at runtime
+**Configuration Notes:**
+- These limits are defined in config.py and can be adjusted based on capital/risk appetite
+- Changes require restart to take effect (not adjustable at runtime)
+- Recommended defaults: 5 total, 3 CE max, 3 PE max
 
 ## Daily Profit/Loss Targets (Automatic Exit)
 
-### Rule 3: Daily Target Exit (+5R)
+### Rule 3: Daily Target Exit (Configurable)
 
-When cumulative R-multiple reaches +5.0:
+When cumulative R-multiple reaches the daily target:
 
 ```python
-if daily_cumulative_r >= DAILY_TARGET_R:  # +5.0
+# config.py
+DAILY_TARGET_R = 5.0  # Configurable daily profit target (in R-multiples)
+
+# Enforcement
+if daily_cumulative_r >= DAILY_TARGET_R:
     logger.info(f"[EXIT] Daily target +{DAILY_TARGET_R}R reached. Closing all positions.")
     close_all_positions()
     cancel_all_pending_orders()
     stop_trading_for_today()
 ```
 
-### Rule 4: Daily Stop Loss Exit (-5R)
+### Rule 4: Daily Stop Loss Exit (Configurable)
 
-When cumulative R-multiple reaches -5.0:
+When cumulative R-multiple reaches the daily stop:
 
 ```python
-if daily_cumulative_r <= DAILY_STOP_R:  # -5.0
+# config.py
+DAILY_STOP_R = -5.0  # Configurable daily stop loss (in R-multiples)
+
+# Enforcement
+if daily_cumulative_r <= DAILY_STOP_R:
     logger.info(f"[EXIT] Daily stop loss {DAILY_STOP_R}R hit. Closing all positions.")
     close_all_positions()
     cancel_all_pending_orders()
@@ -112,42 +122,81 @@ if current_time >= FORCE_EXIT_TIME:  # 15:15 in IST
 
 ## Capital & Risk Constraints
 
-### Rule 6: Position Sizing
+### Rule 6: Position Sizing (R-Based Primary)
 
 All positions sized using R-multiple formula:
 
 ```python
-risk_per_unit = entry_price - sl_price
-required_lots = R_VALUE / (risk_per_unit × LOT_SIZE)
-final_lots = min(required_lots, MAX_LOTS_PER_POSITION)
-quantity = final_lots × LOT_SIZE
+risk_per_unit = abs(entry_price - sl_price)
+r_based_lots = R_VALUE / (risk_per_unit * LOT_SIZE)
+final_lots = min(r_based_lots, MAX_LOTS_PER_POSITION)  # Configurable safety cap
+quantity = final_lots * LOT_SIZE
 
-# Never use flat lot sizing; always use R-based sizing
-# This ensures consistent risk across all positions
+# R-based sizing is PRIMARY - ensures consistent risk across all positions
+# MAX_LOTS_PER_POSITION is SECONDARY - configurable safety net for edge cases
+# Never use flat lot sizing
 ```
 
-### Rule 7: Maximum Risk Per Position
+### Rule 7: Configurable Lot Cap (Safety Net)
+
+R-based sizing is primary, but a **configurable cap** acts as a safety net for edge cases:
 
 ```python
-MAX_LOTS_PER_POSITION = 10  # Max 10 lots per trade
-# This caps maximum position size even if risk is tiny
+# config.py
+R_VALUE = 6500                    # Primary: Risk per trade (configurable)
+MAX_LOTS_PER_POSITION = 15        # Secondary: Safety cap (configurable)
 
-# Example: Entry=200, SL=190
-# risk_per_unit = 10
-# required_lots = 6500 / (10 × 65) = 10 lots
-# final_lots = min(10, 10) = 10 lots (hit max)
+# Position sizing logic
+def calculate_lots(entry_price, sl_price):
+    risk_per_unit = abs(entry_price - sl_price)
+    r_based_lots = R_VALUE / (risk_per_unit * LOT_SIZE)
+    final_lots = min(r_based_lots, MAX_LOTS_PER_POSITION)  # Cap applied
+
+    if final_lots < r_based_lots:
+        logger.info(f"[SIZING] Capped from {r_based_lots:.1f} to {MAX_LOTS_PER_POSITION} lots")
+
+    return int(final_lots)
 ```
+
+**Why a configurable cap?**
+
+| Scenario | Without Cap | With Cap |
+|----------|-------------|----------|
+| Tight SL (2 Rs risk) | 50 lots - liquidity issues | Capped at 15 lots |
+| Gap beyond SL | Huge unexpected loss | Limited exposure |
+| Broker order limits | Order rejected | Stays within limits |
+
+**Key Points:**
+- R-based sizing determines lots (primary method)
+- Cap only activates when R-based lots exceed MAX_LOTS_PER_POSITION
+- Both R_VALUE and MAX_LOTS_PER_POSITION are configurable in config.py
+- Log when cap is applied for visibility
 
 ### Rule 8: Capital Preservation
 
-If daily loss reaches -5R (₹32,500):
+Daily loss is capped using configurable R-multiples:
 
 ```python
-DAILY_STOP_R = -5.0
-Maximum daily loss = 5 × R_VALUE = 5 × 6500 = ₹32,500
+# config.py
+DAILY_STOP_R = -5.0               # Configurable daily stop (in R-multiples)
+R_VALUE = 6500                    # Configurable risk per trade
+
+# Maximum daily loss = DAILY_STOP_R * R_VALUE
+# Example: -5.0 * 6500 = -32,500 (but this varies based on config)
 ```
 
-This ensures no day loses more than 5% of daily P&L target.
+**Enforcement:**
+```python
+if daily_cumulative_r <= DAILY_STOP_R:
+    logger.info(f"[EXIT] Daily stop {DAILY_STOP_R}R hit. Max loss: {abs(DAILY_STOP_R * R_VALUE)}")
+    close_all_positions()
+    stop_trading_for_today()
+```
+
+**Key Points:**
+- No hardcoded rupee amounts - always derived from R_VALUE
+- Adjust R_VALUE to change risk per trade
+- Adjust DAILY_STOP_R to change daily loss tolerance
 
 ## Data Validation Rules
 
@@ -174,20 +223,9 @@ Check heartbeat metrics every 60 seconds:
 - Stale > 0: "Some symbols have no recent ticks"
 - Missing data for > 30 seconds: Pause trading
 
-### Rule 11: Reject Stale Swings
-
-Swing cannot be more than 5 bars old:
-
-```python
-bars_since_swing = current_bar_index - swing_bar_index
-if bars_since_swing > 5:
-    remove_from_swing_candidates()
-    logger.info(f"[SWING] Removing stale swing: {bars_since_swing} bars old")
-```
-
 ## Order Validation Rules
 
-### Rule 12: No Duplicate Orders
+### Rule 11: No Duplicate Orders
 
 Never place two orders for same symbol:
 
@@ -197,35 +235,42 @@ if symbol in pending_orders:
     return False
 ```
 
-### Rule 13: Entry Price Validation
+### Rule 12: Entry Price Validation
 
 Every order entry must pass filter checks:
 
 ```python
 # Stage-1 Static Filter
-assert MIN_ENTRY_PRICE <= entry_price <= MAX_ENTRY_PRICE, "Price out of range"
-assert vwap_premium >= MIN_VWAP_PREMIUM, "VWAP premium too low"
+if not (MIN_ENTRY_PRICE <= entry_price <= MAX_ENTRY_PRICE):
+    logger.warning(f"[FILTER] Price {entry_price} out of range [{MIN_ENTRY_PRICE}-{MAX_ENTRY_PRICE}]")
+    return False
+
+if vwap_premium < MIN_VWAP_PREMIUM:
+    logger.warning(f"[FILTER] VWAP premium {vwap_premium:.2%} below minimum {MIN_VWAP_PREMIUM:.2%}")
+    return False
 
 # Stage-2 Dynamic Filter
-assert MIN_SL_PERCENT <= sl_percent <= MAX_SL_PERCENT, "SL% out of range"
+if not (MIN_SL_PERCENT <= sl_percent <= MAX_SL_PERCENT):
+    logger.warning(f"[FILTER] SL% {sl_percent:.2%} out of range [{MIN_SL_PERCENT:.2%}-{MAX_SL_PERCENT:.2%}]")
+    return False
 
-# If any assertion fails, reject order
+# All filters passed - proceed with order
 ```
 
-### Rule 14: Order Cancellation on Disqualification
+### Rule 13: Order Cancellation on Disqualification
 
-If a strike gets disqualified (SL% > 10%), cancel its pending order:
+If a strike gets disqualified (SL% exceeds maximum), cancel its pending order:
 
 ```python
 if sl_percent > MAX_SL_PERCENT:
     if order_id in pending_orders:
         cancel_order(order_id)
-        logger.info(f"[CANCEL] {symbol} disqualified (SL% {sl_percent:.1%})")
+        logger.info(f"[CANCEL] {symbol} disqualified (SL% {sl_percent:.1%} > {MAX_SL_PERCENT:.1%})")
 ```
 
 ## Reconciliation Rules
 
-### Rule 15: Daily Position Reconciliation
+### Rule 14: Daily Position Reconciliation
 
 Every 60 seconds, sync with broker:
 
@@ -239,7 +284,7 @@ if internal_positions != broker_positions:
     update_internal_to_match_broker()
 ```
 
-### Rule 16: Order Status Polling
+### Rule 15: Order Status Polling
 
 Check order status every 10 seconds:
 
@@ -254,16 +299,16 @@ for order_id, order in pending_orders.items():
 
 ## Logging & Audit Trail
 
-### Rule 17: Log All Critical Events
+### Rule 16: Log All Critical Events
 
 Every action must be logged:
 
 ```python
-# Order placed
-logger.info("[ORDER] Placing LIMIT for 26000CE @ 129.95 qty=650")
+# Order placed (SL = stop-limit order for entry)
+logger.info("[ORDER] Placing SL for 26000CE @ trigger=129.95 limit=126.95 qty=650")
 
 # Order filled
-logger.info("[FILL] Entry 26000CE @ 129.95, placing SL @ 141")
+logger.info("[FILL] Entry 26000CE @ 129.95, placing exit SL @ trigger=141 limit=144")
 
 # Position closed
 logger.info("[EXIT] Position 26000CE closed: Entry=129.95 Exit=135 PnL=+3375 R=+0.5")
@@ -272,7 +317,7 @@ logger.info("[EXIT] Position 26000CE closed: Entry=129.95 Exit=135 PnL=+3375 R=+
 logger.info("[SUMMARY] Day: +2.5R (5 trades, 3 winners, 2 losers)")
 ```
 
-### Rule 18: Structured Error Logging
+### Rule 17: Structured Error Logging
 
 All errors logged with context:
 
@@ -289,7 +334,7 @@ except Exception as e:
 
 ## System Health Rules
 
-### Rule 19: Prevent Runaway Orders
+### Rule 18: Prevent Runaway Orders
 
 If order placement fails 3 times in a row:
 
@@ -304,7 +349,7 @@ for order in pending_orders:
             alert_user()
 ```
 
-### Rule 20: Shutdown Gracefully
+### Rule 19: Shutdown Gracefully
 
 On system shutdown:
 
@@ -315,8 +360,8 @@ def shutdown():
     # Cancel all pending orders
     cancel_all_pending_orders()
 
-    # Close all positions (optional - may keep positions overnight)
-    # close_all_positions()
+    # Close all positions (REQUIRED - MIS is intraday only)
+    close_all_positions()
 
     # Save state to database
     save_state_to_db()
@@ -327,9 +372,11 @@ def shutdown():
     logger.info("[SHUTDOWN] Complete")
 ```
 
+**Note:** This is an intraday MIS trading system. Positions cannot be held overnight - they must be squared off before market close (3:15 PM IST) or during shutdown.
+
 ## Terminal Output Rules
 
-### Rule 21: NO Emojis in Terminal Output
+### Rule 20: NO Emojis in Terminal Output
 
 When writing Python code that executes in terminals, NEVER use emojis or non-ASCII Unicode characters:
 
@@ -363,63 +410,163 @@ print("SUCCESS: Operation completed")
 
 ---
 
-## File Protection Rules
+## EC2/Docker Production Safety Rules
 
-### Rule 22: Critical Analysis Files - Never Delete
+### Rule 21: Pre-Deployment Checks
 
-The following files contain critical analytics and must NEVER be deleted when cleaning up unused files:
+Before deploying to EC2 production:
 
+```bash
+# 1. Verify local tests pass
+python -m baseline_v1_live.check_system
+
+# 2. Ensure code is committed and pushed
+git status  # Should be clean
+git push origin feature/docker-ec2-fixes
+
+# 3. SSH and pull latest
+ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15
+cd ~/nifty_options_agent
+git pull origin feature/docker-ec2-fixes
 ```
-PROTECTED_FILES = [
-    "strategy_vwap_filter.py",      # VWAP filter analysis and testing
-    "strategy_analytics.py",         # Trading strategy analytics
-    "profitability_analytics.py",    # Profitability analysis and metrics
-    "offline_data_viewer.py",        # Offline data viewing and analysis tool
-    "swing_identifier_v5.py"         # Reference swing detection logic (backtest validation)
-]
+
+### Rule 22: Container Health Monitoring
+
+**Check container status regularly:**
+
+```bash
+# All containers should show "Up"
+docker-compose ps
+
+# Check for restart loops
+docker-compose ps | grep "Restarting"
+
+# Monitor resource usage
+docker stats --no-stream
 ```
 
-**When Deleting Files:**
-- Before deleting any file with pattern `*_filter.py`, `*_analytics.py`, or similar:
-  - Check if filename is in PROTECTED_FILES
-  - If YES: DO NOT DELETE, ask user for explicit confirmation
-  - If NO: Safe to delete
+**Alert conditions:**
+- Container status is not "Up"
+- Container has restarted more than 3 times
+- Memory usage > 80%
+- Disk usage > 90% (`df -h`)
 
-**Why Protected:**
-- These files contain analysis logic for strategy optimization
-- Results and insights from these files guide strategy improvements
-- Deletion would require rewriting analysis from scratch
-- Essential for understanding strategy performance
+### Rule 23: EC2 Deployment Safety
 
-**Exception Process:**
-- User must explicitly state: "Delete [filename] even if protected"
-- Before deletion, ask: "Are you sure? This file contains critical [analysis type]"
+**Never deploy during market hours (9:15 AM - 3:30 PM IST):**
+
+```python
+from datetime import datetime, time
+import pytz
+
+IST = pytz.timezone('Asia/Kolkata')
+now = datetime.now(IST).time()
+
+MARKET_OPEN = time(9, 15)
+MARKET_CLOSE = time(15, 30)
+
+if MARKET_OPEN <= now <= MARKET_CLOSE:
+    print("WARNING: Market is open. Deployment not recommended.")
+    print("Deploy before 9:15 AM or after 3:30 PM IST.")
+```
+
+**Safe deployment windows:**
+- Before market: 6:00 AM - 9:00 AM IST
+- After market: 3:45 PM - 11:59 PM IST
+- Weekends: Anytime
+
+### Rule 24: Three-Way Sync Discipline
+
+**Always maintain sync between Laptop ↔ GitHub ↔ EC2:**
+
+```bash
+# Before making changes on EC2
+git status
+git pull origin feature/docker-ec2-fixes
+
+# After making changes on EC2
+git add .
+git commit -m "Fix from EC2"
+git push origin feature/docker-ec2-fixes
+
+# On laptop - pull EC2 changes
+git pull origin feature/docker-ec2-fixes
+```
+
+**Critical Rules:**
+1. Never force push (`git push --force`)
+2. Always pull before making changes
+3. Commit EC2 changes immediately
+4. Resolve conflicts properly (don't overwrite)
+
+### Rule 25: Production Rollback Plan
+
+**If deployment fails or system misbehaves:**
+
+```bash
+# 1. Stop trading immediately
+docker-compose stop trading_agent
+
+# 2. Check logs for errors
+docker-compose logs --tail=100 trading_agent
+
+# 3. Rollback to previous commit
+git log --oneline -5  # Find last working commit
+git checkout <commit-hash> -- baseline_v1_live/
+
+# 4. Rebuild and restart
+docker-compose up -d --build trading_agent
+
+# 5. Verify system health
+docker-compose logs -f trading_agent
+```
+
+### Rule 26: Sensitive Data Protection
+
+**Never commit to git:**
+- `.env` files (API keys, credentials)
+- `*.pem` files (SSH keys)
+- `live_state.db` (trading state)
+- Broker credentials
+
+**Verify before commit:**
+```bash
+git status
+# Check for sensitive files in "Untracked files"
+# Add to .gitignore if found
+```
+
+---
 
 ## Summary of Non-Negotiables
 
 | Rule | Constraint | Enforcement |
 |------|-----------|------------|
 | **Paper Trading** | Default PAPER_TRADING=true | Check before every order |
-| **Max Positions** | 5 total, 3 CE max, 3 PE max | Hardcoded in config.py |
-| **Daily Target** | Exit all at +5R | Auto-exit at threshold |
-| **Daily Stop Loss** | Exit all at -5R | Auto-exit at threshold |
+| **Max Positions** | Configurable (default: 5 total, 3 CE, 3 PE) | Check in config.py |
+| **Daily Target** | Configurable DAILY_TARGET_R (default: +5R) | Auto-exit at threshold |
+| **Daily Stop Loss** | Configurable DAILY_STOP_R (default: -5R) | Auto-exit at threshold |
 | **Market Close** | Exit all at 3:15 PM IST | Force close at time |
-| **Position Sizing** | R-based formula | Never use flat lots |
+| **Position Sizing** | R-based formula + configurable cap | Primary: R-based, Secondary: MAX_LOTS_PER_POSITION |
 | **Data Quality** | Coverage ≥90%, no stale > 30s | Monitor every 60s |
 | **Order Validation** | All filters pass | Reject if any fail |
 | **No Duplicates** | One order per symbol | Check before placing |
 | **Reconciliation** | Sync every 60 seconds | Trust broker as truth |
-| **NO Emojis in Terminal Code** | ASCII only in print/log statements | Avoid Unicode characters |
-| **Protected Files** | Never delete analytics files | Ask explicit confirmation before deletion |
+| **Intraday Only** | No overnight positions | MIS product, close by 3:15 PM |
+| **NO Emojis** | ASCII only in terminal output | Avoid Unicode characters |
+| **EC2 Deployment** | Never during market hours | Deploy before 9:15 AM or after 3:30 PM |
+| **Three-Way Sync** | Laptop ↔ GitHub ↔ EC2 | Always pull before changes |
 
 ## Testing Checklist
+
+### Local Testing
 
 Before going live, verify:
 
 - [ ] PAPER_TRADING=true by default (.env file)
-- [ ] Position limits enforced (5 max, 3 CE, 3 PE)
-- [ ] Daily target exits at +5R (automatic)
-- [ ] Daily stop-loss exits at -5R (automatic)
+- [ ] Position limits enforced (check config.py values)
+- [ ] Daily target exits at configured DAILY_TARGET_R (automatic)
+- [ ] Daily stop-loss exits at configured DAILY_STOP_R (automatic)
 - [ ] Force close at 3:15 PM IST (automatic)
 - [ ] R-based position sizing working (verify calculations)
 - [ ] Data quality monitoring (heartbeat logs good)
@@ -427,4 +574,20 @@ Before going live, verify:
 - [ ] All critical events logged
 - [ ] Error handling graceful (system doesn't crash)
 - [ ] Shutdown procedure tested
-- [ ] Database persistence working (state saved)
+
+### EC2 Production Testing
+
+Before going live on EC2:
+
+- [ ] All local tests passing
+- [ ] Code pushed to GitHub
+- [ ] EC2 pulled latest code
+- [ ] Docker containers built successfully
+- [ ] All containers showing "Up" status
+- [ ] OpenAlgo dashboard accessible
+- [ ] Broker connected in dashboard
+- [ ] WebSocket receiving ticks (check logs)
+- [ ] Paper trading mode tested on EC2
+- [ ] Deployment done outside market hours
+- [ ] Rollback plan documented and tested
+- [ ] .env file backed up (not in git)

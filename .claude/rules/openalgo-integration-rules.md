@@ -12,9 +12,54 @@ OpenAlgo is the broker integration layer that provides a unified API across 24+ 
 - Position tracking and reconciliation
 - Account/margin information
 
+## Environments
+
+This system runs in two environments with different configurations:
+
+| Aspect | Local (Laptop) | Production (EC2) |
+|--------|----------------|------------------|
+| **OpenAlgo Dashboard** | http://127.0.0.1:5000 | https://openalgo.ronniedreams.in |
+| **API Base** | http://127.0.0.1:5000/api/v1/ | https://openalgo.ronniedreams.in/api/v1/ |
+| **Monitor Dashboard** | http://localhost:8501 | https://monitor.ronniedreams.in |
+| **WebSocket** | ws://127.0.0.1:8765 | Internal Docker network |
+| **Auth** | None (localhost) | Basic Auth (admin/your-dashboard-password) |
+| **Deployment** | Direct Python | Docker containers |
+| **Logs** | File system | Docker logs |
+
+### Environment Detection
+
+```python
+import os
+
+def get_openalgo_base_url():
+    """Return appropriate OpenAlgo URL based on environment"""
+    # Check if running in Docker (EC2)
+    if os.path.exists('/.dockerenv') or os.environ.get('DOCKER_ENV'):
+        return "http://openalgo:5000/api/v1"  # Docker internal network
+    else:
+        return "http://127.0.0.1:5000/api/v1"  # Local development
+```
+
+### Configuration via .env
+
+**Local (.env):**
+```bash
+OPENALGO_HOST=127.0.0.1
+OPENALGO_PORT=5000
+PAPER_TRADING=true
+```
+
+**EC2 (.env):**
+```bash
+OPENALGO_HOST=openalgo          # Docker service name
+OPENALGO_PORT=5000
+PAPER_TRADING=false             # Production mode
+DOCKER_ENV=true
+```
+
 ## OpenAlgo Server Setup
 
-### Starting OpenAlgo
+### Local Development (Laptop)
 
 **Before starting the trading system, OpenAlgo must be running:**
 
@@ -29,13 +74,71 @@ python app.py
 - **API Base**: http://127.0.0.1:5000/api/v1/
 - **WebSocket**: ws://127.0.0.1:8765 (or configured proxy)
 
+### EC2 Production (Docker)
+
+**OpenAlgo runs as a Docker container:**
+
+```bash
+# SSH into EC2
+ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15
+
+# Check container status
+cd ~/nifty_options_agent
+docker-compose ps
+
+# View OpenAlgo logs
+docker-compose logs -f openalgo
+
+# Restart OpenAlgo container
+docker-compose restart openalgo
+```
+
+**Docker Compose Service (docker-compose.yaml):**
+```yaml
+services:
+  openalgo:
+    build: ./openalgo-zerodha/openalgo
+    container_name: openalgo
+    ports:
+      - "5000:5000"
+      - "8765:8765"
+    volumes:
+      - ./openalgo-zerodha/openalgo:/app
+    environment:
+      - FLASK_ENV=production
+    networks:
+      - trading_network
+
+  trading_agent:
+    build: ./baseline_v1_live
+    container_name: trading_agent
+    depends_on:
+      - openalgo
+    environment:
+      - OPENALGO_HOST=openalgo
+      - OPENALGO_PORT=5000
+    networks:
+      - trading_network
+```
+
+**EC2 URLs (Password Protected):**
+- **OpenAlgo Dashboard**: https://openalgo.ronniedreams.in
+- **Monitor Dashboard**: https://monitor.ronniedreams.in
+- **Credentials**: admin / your-dashboard-password
+
 ### Broker Login
 
-Before trading:
+**Local:**
 1. Go to http://127.0.0.1:5000
 2. Login with broker credentials (configured in OpenAlgo)
 3. Verify "Status: Connected"
 4. Check available margin/balance
+
+**EC2:**
+1. Go to https://openalgo.ronniedreams.in
+2. Enter Basic Auth (admin/your-dashboard-password)
+3. Login with broker credentials
+4. Verify "Status: Connected"
 
 **DO NOT proceed if broker not connected!**
 
@@ -44,7 +147,11 @@ Before trading:
 ### Endpoint: Place Order (Entry)
 
 ```
+# Local
 POST http://127.0.0.1:5000/api/v1/orders/place
+
+# EC2 (from trading_agent container)
+POST http://openalgo:5000/api/v1/orders/place
 ```
 
 **Request Format (SL Order for Entry):**
@@ -118,7 +225,11 @@ for order_id, order_info in pending_orders.items():
 ### Endpoint: Place Stop-Loss Order
 
 ```
+# Local
 POST http://127.0.0.1:5000/api/v1/smartorders/place
+
+# EC2 (from trading_agent container)
+POST http://openalgo:5000/api/v1/smartorders/place
 ```
 
 **Request Format:**
@@ -166,14 +277,24 @@ elif response['status'] == 'COMPLETE':
 
 ### Connection
 
-**WebSocket is typically proxied through OpenAlgo:**
-
+**Local:**
 ```python
-# OpenAlgo proxy WebSocket
-WS_URL = "ws://127.0.0.1:8765"  # Configured in OpenAlgo
+WS_URL = "ws://127.0.0.1:8765"  # Local OpenAlgo proxy
+```
 
-# Or direct to broker (depends on OpenAlgo setup)
-WS_URL = "wss://broker-ws.example.com/quote"
+**EC2 (Docker internal):**
+```python
+WS_URL = "ws://openalgo:8765"  # Docker service name
+```
+
+**Environment-aware connection:**
+```python
+import os
+
+def get_websocket_url():
+    if os.environ.get('DOCKER_ENV'):
+        return "ws://openalgo:8765"
+    return "ws://127.0.0.1:8765"
 ```
 
 ### Authentication
@@ -257,7 +378,11 @@ def on_websocket_close():
 ### Get Current Positions
 
 ```
+# Local
 GET http://127.0.0.1:5000/api/v1/positions
+
+# EC2
+GET http://openalgo:5000/api/v1/positions
 ```
 
 **Response:**
@@ -313,7 +438,11 @@ def reconcile_positions():
 ### Get Account Details
 
 ```
+# Local
 GET http://127.0.0.1:5000/api/v1/account
+
+# EC2
+GET http://openalgo:5000/api/v1/account
 ```
 
 **Response:**
@@ -411,8 +540,9 @@ def rate_limited_api_call(func, *args, **kwargs):
 **OpenAlgo supports sandbox/paper trading:**
 
 ```python
-# In OpenAlgo config, set broker to "PAPER" mode
-# Orders will be simulated, not sent to real broker
+# In .env file
+PAPER_TRADING=true   # Local testing
+PAPER_TRADING=false  # Production (EC2)
 ```
 
 ### Testing Checklist
@@ -428,27 +558,113 @@ Before going live:
 - [ ] Error handling works (network failure, margin error, etc.)
 - [ ] Rate limiting doesn't block legitimate orders
 
+## Deployment Workflow
+
+### Three-Way Sync (Laptop ↔ GitHub ↔ EC2)
+
+**Standard Flow: Laptop → GitHub → EC2**
+
+```bash
+# 1. On laptop - make changes and push
+git add .
+git commit -m "Update OpenAlgo integration"
+git push origin feature/docker-ec2-fixes
+
+# 2. SSH into EC2 and deploy
+ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15
+cd ~/nifty_options_agent
+./deploy.sh
+```
+
+**deploy.sh script:**
+```bash
+#!/bin/bash
+git pull origin feature/docker-ec2-fixes
+docker-compose down
+docker-compose build
+docker-compose up -d
+docker-compose logs -f
+```
+
+**Reverse Flow: EC2 → GitHub → Laptop**
+
+```bash
+# 1. On EC2 - commit and push changes made on server
+cd ~/nifty_options_agent
+git add .
+git commit -m "Fix from EC2"
+git push origin feature/docker-ec2-fixes
+
+# 2. On laptop - pull changes
+git pull origin feature/docker-ec2-fixes
+```
+
+### Critical Deployment Rules
+
+1. **Always test locally first** before deploying to EC2
+2. **Check git status** on both laptop and EC2 before changes
+3. **Never force push** - resolve conflicts properly
+4. **Commit EC2 changes immediately** to keep all three in sync
+5. **Volume mounts in docker-compose.yaml** are EC2-specific paths
+
+### EC2 Docker Commands
+
+```bash
+# View all container status
+docker-compose ps
+
+# View logs (follow mode)
+docker-compose logs -f trading_agent
+docker-compose logs -f openalgo
+
+# Restart specific service
+docker-compose restart trading_agent
+
+# Rebuild and restart all
+docker-compose down && docker-compose up -d --build
+
+# Enter container shell
+docker exec -it trading_agent bash
+docker exec -it openalgo bash
+
+# View container resource usage
+docker stats
+```
+
 ## Common Integration Issues
 
 ### Issue 1: Orders Not Placing
 **Symptom:** Order endpoint called but no response
 
-**Debug:**
+**Debug (Local):**
 1. Is OpenAlgo running? Check http://127.0.0.1:5000
 2. Is broker connected? Check dashboard Status
 3. Check available margin: `client.get_account()`
 4. Verify symbol exists: `client.search_symbol(symbol)`
 5. Check logs: `D:\marketcalls\openalgo\logs/`
 
+**Debug (EC2):**
+1. Check container status: `docker-compose ps`
+2. View OpenAlgo logs: `docker-compose logs openalgo`
+3. Check dashboard: https://openalgo.ronniedreams.in
+4. Verify broker connected in dashboard
+5. Check trading_agent logs: `docker-compose logs trading_agent`
+
 ### Issue 2: WebSocket Ticks Stopping
 **Symptom:** Data pipeline receives ticks, then stops
 
-**Debug:**
+**Debug (Local):**
 1. Check WebSocket connection status
 2. Verify subscription tokens are valid
 3. Check OpenAlgo logs for connection errors
 4. Restart WebSocket: Close and reconnect
 5. Check data coverage: `[HEARTBEAT] Data: 22/22`
+
+**Debug (EC2):**
+1. Check container networking: `docker network ls`
+2. Verify openalgo container is healthy: `docker-compose ps`
+3. View WebSocket logs: `docker-compose logs openalgo | grep -i websocket`
+4. Restart containers: `docker-compose restart`
 
 ### Issue 3: Position Mismatch
 **Symptom:** Internal positions differ from broker
@@ -470,6 +686,48 @@ Before going live:
 4. Check logs for OpenAlgo errors
 5. Validate with paper trading first
 
+### Issue 5: EC2 Container Not Starting
+**Symptom:** Docker container exits immediately
+
+**Debug:**
+```bash
+# Check container exit logs
+docker-compose logs trading_agent
+
+# Check for missing environment variables
+docker-compose config
+
+# Verify .env file exists and has correct values
+cat .env
+
+# Check disk space
+df -h
+
+# Check memory
+free -m
+```
+
+### Issue 6: Cannot Access EC2 Dashboard
+**Symptom:** https://openalgo.ronniedreams.in not loading
+
+**Debug:**
+```bash
+# Check nginx status
+sudo systemctl status nginx
+
+# Check nginx error log
+sudo tail -f /var/log/nginx/error.log
+
+# Verify SSL certificate
+sudo certbot certificates
+
+# Check if containers are running
+docker-compose ps
+
+# Test internal connectivity
+curl http://localhost:5000
+```
+
 ## Performance Optimization
 
 ### Connection Pooling
@@ -477,9 +735,12 @@ Before going live:
 ```python
 # Use persistent HTTP connection for API calls
 import httpx
+import os
+
+base_url = "http://openalgo:5000/api/v1" if os.environ.get('DOCKER_ENV') else "http://127.0.0.1:5000/api/v1"
 
 client = httpx.Client(
-    base_url="http://127.0.0.1:5000/api/v1",
+    base_url=base_url,
     timeout=30.0,
     limits=httpx.Limits(max_connections=10)
 )
@@ -518,8 +779,10 @@ def get_token(symbol):
 
 ### Live Monitoring
 
-**OpenAlgo Dashboard** (http://127.0.0.1:5000) provides:
+**Local Dashboard** (http://127.0.0.1:5000):
+**EC2 Dashboard** (https://openalgo.ronniedreams.in):
 
+Both provide:
 1. **Orders Tab**: All orders placed, status, fills
 2. **Positions Tab**: Current positions, P&L, margin usage
 3. **Trades Tab**: Completed trades, entry/exit prices
@@ -564,11 +827,24 @@ For detailed OpenAlgo documentation:
 9. **Alert on connection loss** (WebSocket, broker disconnection)
 10. **Never hardcode API keys** (use .env or secure vault)
 
+### EC2-Specific Safety Rules
+
+1. **Always pull latest code** before making EC2 changes
+2. **Test locally first** when possible
+3. **Keep three-way sync** (laptop ↔ GitHub ↔ EC2)
+4. **Monitor container health** via `docker-compose ps`
+5. **Set up alerts** for container crashes
+6. **Backup .env file** - it's not in git
+7. **Check disk space** periodically (`df -h`)
+8. **Review logs daily** for errors
+
 ## Validation Checklist
 
-Before deploying to production:
+### Local Development
 
-- [ ] OpenAlgo server running and accessible
+Before testing locally:
+
+- [ ] OpenAlgo server running (http://127.0.0.1:5000)
 - [ ] Broker credentials configured and connected
 - [ ] HTTP API responding to requests
 - [ ] WebSocket receiving ticks in real-time
@@ -576,5 +852,33 @@ Before deploying to production:
 - [ ] SL-L orders placing correctly
 - [ ] Position reconciliation syncing
 - [ ] Error handling catching all common errors
+
+### EC2 Production
+
+Before deploying to production:
+
+- [ ] All local tests passing
+- [ ] Code committed and pushed to GitHub
+- [ ] EC2 pulled latest code (`git pull`)
+- [ ] Docker containers built successfully
+- [ ] OpenAlgo container healthy (`docker-compose ps`)
+- [ ] Trading agent container healthy
+- [ ] Dashboard accessible (https://openalgo.ronniedreams.in)
+- [ ] Broker connected via EC2 dashboard
+- [ ] WebSocket receiving ticks (check logs)
+- [ ] Paper trading mode tested on EC2 first
+- [ ] Logs showing expected behavior
 - [ ] Rate limiting not blocking legitimate traffic
-- [ ] Logs capturing all events for audit trail
+- [ ] Nginx/SSL working correctly
+
+### Post-Deployment Verification
+
+After deploying changes:
+
+```bash
+# On EC2
+docker-compose ps                          # All containers "Up"
+docker-compose logs --tail=50 trading_agent # No errors
+docker-compose logs --tail=50 openalgo     # Broker connected
+curl http://localhost:5000/api/v1/account  # API responding
+```

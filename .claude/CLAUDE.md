@@ -4,8 +4,8 @@
 
 **What:** Automated trading system for NIFTY index options using swing-break strategy
 **How:** Detect swing lows → Apply 2-stage filters → Place proactive SL (stop-limit) orders BEFORE breaks
-**Risk:** Rs.6,500 per R, daily targets of +/-5R (exit all positions at either point)
-**Broker:** OpenAlgo integration layer (http://127.0.0.1:5000)
+**Risk:** Configurable R_VALUE (default Rs.6,500 per R), daily targets configurable (default +/-5R)
+**Broker:** OpenAlgo (Local: http://127.0.0.1:5000 | EC2: https://openalgo.ronniedreams.in)
 **Mode:** Paper trading by default (PAPER_TRADING=true in .env)
 
 ---
@@ -27,8 +27,8 @@
    Output: current_best dict (qualified strikes for CE and PE)
 
 4. ORDER EXECUTION (order_manager.py)
-   Proactive placement: SL orders (trigger: swing_low - tick, limit: trigger - 3)
-   Position sizing: R_VALUE formula (₹6,500 per position)
+   Proactive placement: SL orders BEFORE swing breaks (trigger: swing_low - tick, limit: trigger - 3)
+   Position sizing: R-based formula (R_VALUE configurable, default ₹6,500)
    Exit SL: SL orders at highest_high + 1 (trigger), +3 Rs buffer (limit)
 
 5. POSITION TRACKING (position_tracker.py)
@@ -85,24 +85,26 @@ Flow:
 
 ## Key Configuration (config.py)
 
+All values below are **configurable** in config.py:
+
 ```python
 # Capital & Position Sizing
 TOTAL_CAPITAL = 10000000      # Rs.1 Crore
-R_VALUE = 6500                # Rs.6,500 per R
-MAX_POSITIONS = 5             # Max concurrent positions
-MAX_LOTS_PER_POSITION = 10    # Max lots per trade
+R_VALUE = 6500                # Rs.6,500 per R (configurable risk per trade)
+MAX_POSITIONS = 5             # Max concurrent positions (configurable)
+MAX_LOTS_PER_POSITION = 15    # Safety cap on lots (configurable, R-based sizing is primary)
 LOT_SIZE = 65                 # NIFTY lot size
 
-# Entry Filters
+# Entry Filters (all configurable)
 MIN_ENTRY_PRICE = 100         # Minimum option price
 MAX_ENTRY_PRICE = 300         # Maximum option price
 MIN_VWAP_PREMIUM = 0.04       # 4% above VWAP required
 MIN_SL_PERCENT = 0.02         # 2% minimum SL
 MAX_SL_PERCENT = 0.10         # 10% maximum SL
 
-# Daily Exits
-DAILY_TARGET_R = 5.0          # Exit all at +5R
-DAILY_STOP_R = -5.0           # Exit all at -5R
+# Daily Exits (configurable)
+DAILY_TARGET_R = 5.0          # Exit all at +5R (configurable)
+DAILY_STOP_R = -5.0           # Exit all at -5R (configurable)
 FORCE_EXIT_TIME = time(15, 15) # Force exit at 3:15 PM
 ```
 
@@ -202,40 +204,46 @@ Pass both → Add to swing_candidates (static pool)
 Fail either → Log rejection, discard swing
 ```
 
-### Stage 2: Dynamic Filter (Run Every Bar/Tick)
+### Stage 2: Dynamic Filter (Tick-Level Evaluation)
 
-Applied **every time new 1-min bar arrives** to all candidates in `swing_candidates`.
+Applied **every tick** to all candidates in `swing_candidates`. Current bar's high updates with each tick.
 
 **SL% Filter (Truly Dynamic):**
-- Rule: `MIN_SL_PERCENT ≤ SL% ≤ MAX_SL_PERCENT` (2-10% by default)
+- Rule: `MIN_SL_PERCENT ≤ SL% ≤ MAX_SL_PERCENT` (2-10% by default, configurable)
 - Formula:
   ```
-  Highest High = Maximum high since swing formation
+  Highest High = Maximum high since swing formation (includes current bar's high, updates each tick)
   Entry Price = Swing low
   SL Price = Highest High + 1 Rs (buffer for slippage)
   SL% = (SL Price - Entry Price) / Entry Price × 100
   ```
 
 **Why SL% is Dynamic:**
-- Highest High updates every bar (price action continues)
-- SL% can change from passing → failing
-- Example: Bar 1: SL%=4.6% ✓ → Bar 3: SL%=12.3% ❌ (exceeds 10% limit)
+- Highest High updates every tick (current bar's high tracked in real-time)
+- SL% can change from passing → failing mid-bar
+- Example: Bar starts SL%=8% ✓ → Tick pushes high up → SL%=11% ❌ (disqualified immediately)
 
-**Real-Time Evaluation:**
-- Evaluate every tick/bar (not just every 10 seconds)
-- Ensures SL% reflects true risk at order placement moment
+**Evaluation Frequency:**
+- **Swing detection**: On bar close (needs complete OHLC)
+- **Filter evaluation**: Every tick (real-time SL% accuracy)
+- Order placed immediately when strike qualifies
 
 ### Stage 3: Tie-Breaker (Best Strike Selection)
 
 When **multiple strikes pass all filters** for the same option type (CE or PE), select ONE using:
 
-**Rule 1: SL Points Closest to 10 Rs**
-- Target: 10 points (optimized for R_VALUE = ₹6,500)
+**Rule 1: SL Points Closest to 10 Rs (Primary)**
+- Target: 10 points (optimized for R_VALUE, configurable)
 - Formula: `sl_distance = abs(sl_points - 10)`
 - Example: 8pts (distance=2), 12pts (distance=2), 9pts (distance=1) ← **BEST**
 
-**Rule 2: Highest Entry Price (if tied on Rule 1)**
-- If SL distance is same, prefer higher premium
+**Rule 2: Strike Multiple of 100 (Secondary Tie-Breaker)**
+- If multiple strikes have same SL distance, prefer strikes that are multiples of 100
+- Why: Round strikes (24000, 24100, 24200) have better liquidity than odd strikes (24050, 24150)
+- Strike extraction from symbol: `NIFTY06JAN2626200CE` → Strike = 26200 → 26200 % 100 == 0 ✓
+
+**Rule 3: Highest Entry Price (Final Tie-Breaker)**
+- If still tied (same SL distance AND both multiples of 100), prefer higher premium
 
 ### Filter State Tracking
 
@@ -414,11 +422,12 @@ REJECTED   CANCELLED      SL_HIT         CLOSED        LOGGED
 
 3. **ORDER_PLACED → CANCELLED**
    - Triggers:
-     - Disqualification (SL% > 10%)
-     - Swing breaks before order fills
-     - Different strike becomes best
-     - Daily limits hit (+/-5R)
-     - Market close (3:15 PM)
+     - Disqualification (SL% exceeds MAX_SL_PERCENT)
+     - Different strike becomes best (tie-breaker selects new winner)
+     - Daily limits hit (DAILY_TARGET_R or DAILY_STOP_R reached)
+     - Market close approaching (FORCE_EXIT_TIME)
+     - System shutdown
+   - **NOT a cancellation reason**: Swing breaking - that's the ENTRY TRIGGER!
 
 4. **POSITION_ACTIVE → EXITED**
    - Triggers: SL hit, target hit, or force exit
@@ -675,11 +684,14 @@ logger.info("[TAG] Message")  # Use tags like [SWING], [ORDER], [FILL]
 
 ## Safety Rules
 
+All limits below are **configurable** in config.py:
+
 1. **Never skip Analyzer Mode** - Always test with PAPER_TRADING=true first
-2. **Position limits enforced** - Max 5 total, max 3 CE, max 3 PE
-3. **Daily stops** - Auto-exit at +/-5R
-4. **Force exit** - All positions closed at 3:15 PM
+2. **Position limits enforced** - MAX_POSITIONS (default 5), MAX_CE_POSITIONS (default 3), MAX_PE_POSITIONS (default 3)
+3. **Daily stops** - Auto-exit at DAILY_TARGET_R/DAILY_STOP_R (default +/-5R)
+4. **Force exit** - All positions closed at FORCE_EXIT_TIME (default 3:15 PM)
 5. **Reconciliation** - Positions synced with broker every 60 seconds
+6. **R-based position sizing** - Primary sizing via R_VALUE formula, MAX_LOTS_PER_POSITION as safety cap
 
 ---
 

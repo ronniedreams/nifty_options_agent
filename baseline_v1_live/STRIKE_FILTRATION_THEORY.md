@@ -25,7 +25,7 @@ VWAP Filter (≥MIN_VWAP_PREMIUM) - IMMUTABLE
 Pass → swing_candidates
 Fail → Rejected (never rechecked)
     ↓
-[STAGE 2: Dynamic Filter] (Run EVERY bar)
+[STAGE 2: Dynamic Filter] (Run EVERY TICK - real-time)
     ↓
 SL% Filter (MIN_SL_PERCENT-MAX_SL_PERCENT) - MUTABLE
     ↓
@@ -33,7 +33,7 @@ Pass → qualified_candidates
     ↓
 [STAGE 3: Tie-Breaker]
     ↓
-Best Strike Selection (per option type)
+Best Strike Selection (SL closest to 10 → Multiple of 100 → Highest premium)
     ↓
 Order Placement Trigger
 ```
@@ -77,19 +77,18 @@ Once a swing passes static filter:
 
 Static filter is NEVER re-evaluated.
 
-## Stage 2: Dynamic Filter (Run Every Bar)
+## Stage 2: Dynamic Filter (Run Every Tick)
 
-vwap_qualified_swings = {
-    'CE': [
-        {'symbol': '26200CE', 'swing_low': 130, 'vwap_premium': 5.2%},
-        {'symbol': '26250CE', 'swing_low': 95, 'vwap_premium': 4.8%}
-    ],
-    'PE': [
-        {'symbol': '26150PE', 'swing_low': 140, 'vwap_premium': 6.1%}
-    ]
+Applied **every tick** to all candidates in `swing_candidates`. Current bar's high updates with each tick, so SL% is evaluated in real-time.
+
+Example candidates pool:
+```python
+swing_candidates = {
+    'NIFTY...26200CE': {'swing_low': 130, 'vwap_premium': 5.2%},
+    'NIFTY...26250CE': {'swing_low': 95, 'vwap_premium': 4.8%},
+    'NIFTY...26150PE': {'swing_low': 140, 'vwap_premium': 6.1%}
 }
-
-Applied **every time new 1-min bar arrives** to all candidates in the system.
+```
 
 ### SL% Filter (Truly Dynamic)
 
@@ -110,7 +109,7 @@ SL% = (SL Points / Entry Price) × 100
 - Protects against price whipsaws at exact highest high level
 - Example: Entry 130, Highest High 140 → SL at 141 (11 points instead of 10)
 
-**Requirement:** MIN_SL_PERCENT ≤ SL% ≤ MAX_SL_PERCENT (2% to 10%)
+**Requirement:** MIN_SL_PERCENT ≤ SL% ≤ MAX_SL_PERCENT (configurable, default 2% to 10%)
 
 ### Dynamic Re-evaluation
 
@@ -153,29 +152,7 @@ Bar 3 after swing: High = 145, Swing = 130, SL Price = 146, SL% = 12.3% ❌ FAIL
 **As highest_high grows:**
 - SL% increases
 - Can change from passing → failing
-- Swing gets disqualified when SL% exceeds 10%
-
-
-### Dynamic Re-evaluation
-
-Real-time (tick-level) evaluation:
-
-```python
-on every tick:
-    for swing in vwap_qualified_swings:
-        # Get latest highest high since swing (including current tick)
-        highest_high = get_highest_high_since_swing(swing)
-        # Calculate SL with +1 Rs buffer
-        sl_price = highest_high + 1
-        sl_points = sl_price - swing_low
-        sl_percent = sl_points / swing_low
-        # Check range
-        if sl_percent < MIN_SL_PERCENT or sl_percent > MAX_SL_PERCENT:
-            # Disqualified - remove from candidates
-            continue
-        # Still qualified - add to current cycle's qualified list
-        qualified_candidates.append(swing)
-```
+- Swing gets disqualified when SL% exceeds MAX_SL_PERCENT
 
 ## Stage 3: Tie-Breaker (Best Strike Selection)
 
@@ -183,9 +160,9 @@ When **multiple strikes pass all filters**, select ONE per option type (CE/PE).
 
 ### Tie-Breaker Rules (in order)
 
-**Rule 1: SL Points Closest to 10**
+**Rule 1: SL Points Closest to 10 (Primary)**
 
-Target: 10 points (based on R_VALUE = ₹6,500 for 10-lot position)
+Target: 10 points (based on R_VALUE, configurable)
 
 ```python
 sl_distance = abs(sl_points - 10)
@@ -201,20 +178,34 @@ Strike C: SL = 9 points → distance = 1 ✓ BEST
 
 **Why prefer 10 points?**
 
-R_VALUE (₹6,500) optimized for:
-- 10 points × 10 lots × 65 qty = ₹6,500
+R_VALUE (configurable, default Rs.6,500) optimized for:
+- 10 points × 10 lots × 65 qty = Rs.6,500
 
 Strikes with ~10-point SL give:
-- Optimal position sizing (exactly 10 lots)
+- Optimal position sizing
 - Maximum capital efficiency
 - Balanced risk/reward
 
-**Rule 2: Highest Entry Price (if tied on Rule 1)**
+**Rule 2: Strike Multiple of 100 (Secondary Tie-Breaker)**
 
 ```python
-# If same SL distance, choose higher premium
-Strike A: SL distance = 2, Entry = 125 ✓ BETTER
-Strike B: SL distance = 2, Entry = 120
+# If same SL distance, prefer strikes that are multiples of 100
+# Why: Round strikes (24000, 24100, 24200) have better liquidity
+
+# Strike extraction from symbol:
+# NIFTY06JAN2626200CE → Strike = 26200 → 26200 % 100 == 0 ✓
+
+# Example (both distance=1):
+Strike 24050CE: Entry=145, 24050 % 100 = 50 (not multiple)
+Strike 24100CE: Entry=142, 24100 % 100 = 0 ✓ BETTER (multiple of 100)
+```
+
+**Rule 3: Highest Entry Price (Final Tie-Breaker)**
+
+```python
+# If still tied (same SL distance AND both multiples of 100), choose higher premium
+Strike A: SL distance = 2, multiple of 100, Entry = 125 ✓ BETTER
+Strike B: SL distance = 2, multiple of 100, Entry = 120
 ```
 
 
@@ -222,19 +213,21 @@ Strike B: SL distance = 2, Entry = 120
 
 ```
 CE Candidates after filters:
-1. 26200CE: SL=11pts, Entry=145 → distance=1
-2. 26250CE: SL=9pts, Entry=130  → distance=1 (tied)
+1. 26200CE: SL=11pts, Entry=145 → distance=1, 26200 % 100 = 0 ✓
+2. 26250CE: SL=9pts, Entry=130  → distance=1, 26250 % 100 = 50 ✗
 3. 26300CE: SL=7pts, Entry=115  → distance=3
 
-Step 1: Check SL distance
+Step 1: Check SL distance (Rule 1)
 - 26200CE and 26250CE tied (distance=1)
 - 26300CE eliminated (distance=3)
 
-Step 2: Check entry price
-- 26200CE: 145 ✓ WINNER
-- 26250CE: 130
+Step 2: Check multiple of 100 (Rule 2)
+- 26200CE: 26200 % 100 = 0 ✓ WINNER (multiple of 100)
+- 26250CE: 26250 % 100 = 50 (not multiple)
 
 Best CE = 26200CE
+
+(Rule 3 not needed - resolved by Rule 2)
 ```
 
 ## Filter State Tracking
@@ -383,28 +376,45 @@ Action:
 
 Prevents losing good swings when new weaker swings form for same symbol.
 
-## Swing Break Detection
+## Swing Break Behavior
 
-Swings are removed from ALL pools when price breaks below swing_low:
+**CRITICAL: Swing breaking is the ENTRY TRIGGER, not a cancellation event!**
 
+### Scenario 1: Swing Break WITH Order (Qualified Strike)
 ```
-Swing: 26200CE @ 130
-Current bar low: 128 (< 130)
+Swing: 26200CE @ 130 (was best qualified → SL order placed)
+Price drops below 130 → SL order TRIGGERS and FILLS → Position opened!
 
 Action:
-1. Mark swing as broken
-2. Remove from swing_candidates
-3. Remove from vwap_qualified_swings (if present)
-4. Cancel order (if pending)
-5. Log swing break event
+1. Order fills - swing served its purpose
+2. Remove from swing_candidates (entry complete)
+3. Place exit SL order immediately
+4. Log entry event
 ```
 
-**Why remove on break?**
+### Scenario 2: Swing Break WITHOUT Order (Not Qualified)
+```
+Swing: 26200CE @ 130 (in pool but NOT the best qualified → no order placed)
+Price drops below 130 → Entry opportunity passed
 
-Once swing breaks:
-- Entry opportunity missed (price already below entry)
-- Swing invalidated (no longer a turning point)
-- Risk/reward changed (would enter in middle of move)
+Action:
+1. Mark swing as "broken" - no longer considered for qualification
+2. Remove from swing_candidates
+3. Log: "[SWING] 26200CE swing broken without order - opportunity passed"
+```
+
+### Scenario 3: Swing Break While Disqualified
+```
+Swing: 26200CE @ 130 (was qualified, but SL% exceeded MAX_SL_PERCENT → order cancelled)
+Price drops below 130 → Entry opportunity passed (correctly avoided high-risk entry)
+
+Action:
+1. Swing already removed from qualified pool (disqualified earlier)
+2. Remove from swing_candidates if still there
+3. Log swing break event
+```
+
+**Key Principle:** If an SL order is pending for a swing, swing break = ORDER FILLS, not cancel!
 
 ## Filter Rejection Logging
 
@@ -509,16 +519,17 @@ Best Strike Selected: 2 (1 CE, 1 PE)
 The filtration system ensures:
 
 1. **Quality Swings**: Only trade setups with good fundamentals
-2. **Risk Control**: SL% range keeps risk consistent
-3. **Momentum Confirmation**: VWAP filter validates strength
-4. **Optimal Selection**: Tie-breaker finds best strike
-5. **Dynamic Adaptation**: SL% updates as market moves
+2. **Risk Control**: SL% range keeps risk consistent (configurable MIN/MAX_SL_PERCENT)
+3. **Momentum Confirmation**: VWAP filter validates strength (static, immutable)
+4. **Optimal Selection**: Tie-breaker finds best strike (SL closest to 10 → Multiple of 100 → Highest premium)
+5. **Dynamic Adaptation**: SL% updates every tick as market moves
 6. **Static Context**: VWAP frozen at formation time
+7. **Entry Trigger**: Swing break = order fills (not cancellation!)
 
 **Two-Stage Philosophy:**
 
-- **Static filter**: Eliminates unusable strikes immediately (run once)
-- **Dynamic filter**: Validates ongoing viability (run every bar)
+- **Static filter**: Eliminates unusable strikes immediately (run once at swing formation)
+- **Dynamic filter**: Validates ongoing viability (run every tick for real-time SL% accuracy)
 
 **Multi-Swing Tracking:**
 
