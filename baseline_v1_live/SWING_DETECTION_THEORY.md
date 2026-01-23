@@ -23,19 +23,23 @@ High → Low → High → Low → High → Low
 
 ### Exception: Swing Updates (Same Direction)
 
-However, if a **new extreme** is found BEFORE the next alternating swing forms, we UPDATE the existing swing:
+However, if a **new extreme** is found BEFORE the next alternating swing forms AND receives 2-watch confirmation, we UPDATE the existing swing:
 
 **For Swing Lows:**
 - Swing LOW @ 80 detected
 - Before a swing HIGH forms, price drops to new lower low @ 75
+- Wait for 2 watch confirmations (HH+HC pattern twice)
 - **Action**: UPDATE the swing low from 80 → 75
 - **Reason**: 75 is the true low point, not 80
 
 **For Swing Highs:**
-- Swing HIGH @ 100 detected  
+- Swing HIGH @ 100 detected
 - Before a swing LOW forms, price rallies to new higher high @ 105
+- Wait for 2 watch confirmations (LL+LC pattern twice)
 - **Action**: UPDATE the swing high from 100 → 105
 - **Reason**: 105 is the true high point, not 100
+
+**CRITICAL: Updates are NOT immediate** - they require the same 2-watch confirmation as initial swings. This prevents noise and false signals from being marked as swing updates.
 
 ### Why Allow Updates?
 
@@ -127,10 +131,12 @@ One confirmation could be noise. Two confirmations validate that price truly rev
 Before finalizing the swing:
 - Check if it matches the required pattern (high after low, low after high)
 - **If it's the SAME type as the last swing:**
-  - Check if it's a NEW extreme (lower low or higher high)
+  - Check if it's a NEW extreme (lower low or higher high) AND has 2-watch confirmation
   - If YES → **UPDATE the existing swing** to the new extreme
   - If NO → Reject the swing
 - If it's the opposite type → Accept as new alternating swing
+
+**Note:** All swings (initial + updates) require 2-watch confirmation - no immediate updates.
 ### Step 1: New Bar Arrives
 
 When a new 1-minute bar completes, the detector activates.
@@ -313,26 +319,29 @@ Bar 8: O=101, H=102, L=98, C=99    ← LL+LC vs Bar 6 again
 - **Create SWING HIGH at Bar 6, price 107**
 # Swing Update Example:
 
-Let's see what happens if a lower low forms:
+Let's see what happens if a lower low forms WITH 2-watch confirmation:
 
 ```
 Bar 9: O=99, H=100, L=94, C=95    ← New LOWER low (94 < 96)
-Bar 10: O=95, H=98, L=93, C=97    ← Even lower (93)
+Bar 10: O=95, H=98, L=93, C=97    ← Even lower (93), provides confirmation
+Bar 11: O=97, H=105, L=96, C=103  ← HH+HC vs Bar 9 (first confirmation)
+Bar 12: O=103, H=108, L=100, C=107 ← HH+HC vs Bar 9 (second confirmation)
 ```
 
-**At Bar 9**:
+**At Bar 11**:
 - Last swing: LOW @ Bar 3 (price 96)
-- New swing detected: LOW @ 94
-- Same type (LOW after LOW) → Check if new extreme
-- 94 < 96 ✓ → **UPDATE swing low** from Bar 3 to Bar 9 (96 → 94)
+- Bar 9's low_watch = 1 (first HH+HC confirmation)
+- Wait for second confirmation
 
-**At Bar 10**:
-- Last swing: LOW @ Bar 9 (price 94)
-- New swing detected: LOW @ 93
+**At Bar 12**:
+- Bar 9's low_watch = 2 (second HH+HC confirmation) ← TRIGGER!
+- New swing detected: LOW @ 94 (or 93 if Bar 10 is lowest in window)
 - Same type (LOW after LOW) → Check if new extreme
-- 93 < 94 ✓ → **UPDATE swing low** from Bar 9 to Bar 10 (94 → 93)
+- 93 < 96 ✓ → **UPDATE swing low** from Bar 3 (96) to Bar 10 (93)
 
 Now we have the TRUE low at 93, not the premature 96.
+
+**Key Point:** The update at Bar 9/10 doesn't happen immediately when price drops to 94/93. It happens when the watch counter reaches 2, confirming that was indeed a turning point.
 
 ```
 Bar 11: O=97, H=108, L=96, C=107  ← Rally
@@ -357,32 +366,37 @@ The watch-based system with adaptive updates:
 3. When 2 votes are cast (counter = 2), the swing is confirmed
 4. The actual swing point is the extreme in that confirmed area
 5. Swings must alternate to maintain the wave pattern
-6. **NEW**: If a new extreme forms before alternation, UPDATE the existing swing
-7. This ensures we track TRUE extremes, not premature turning points
+6. **Swing updates**: If a new extreme forms before alternation AND gets 2-watch confirmation, UPDATE the existing swing
+7. This ensures we track TRUE extremes with proper validation, not premature turning points
 
-It's like looking backwards and saying: "Now that I see what happened AFTER that bar, I can confirm it was a turning point - or wait, an even better extreme just formed, let me update!"
+It's like looking backwards and saying: "Now that I see what happened AFTER that bar, I can confirm it was a turning point - or wait, an even better extreme just formed AND got confirmed with 2 watches, let me update!"
 
 ### The Update Rule in Practice
 
 **Swing Low Update**:
 - Have: Swing LOW @ 80
-- Detect: New swing LOW @ 75 (before any HIGH)
+- Price drops to 75 (before any HIGH)
+- Wait for 2-watch confirmation (HH+HC pattern twice)
+- Detect: New swing LOW @ 75 confirmed
 - Check: Is 75 < 80? YES
 - **Action**: Replace 80 with 75 as the swing low
 
 **Swing High Update**:
 - Have: Swing HIGH @ 100
-- Detect: New swing HIGH @ 105 (before any LOW)
+- Price rallies to 105 (before any LOW)
+- Wait for 2-watch confirmation (LL+LC pattern twice)
+- Detect: New swing HIGH @ 105 confirmed
 - Check: Is 105 > 100? YES
 - **Action**: Replace 100 with 105 as the swing high
 
 **Invalid Update (Rejected)**:
 - Have: Swing LOW @ 80
-- Detect: New swing LOW @ 82 (before any HIGH)
+- Price drops to 82 (before any HIGH)
+- Even if 2-watch confirmation occurs
 - Check: Is 82 < 80? NO
 - **Action**: Reject (not a new extreme, just noise)
 
-This ensures every swing represents the ACTUAL extreme in that wave, making trading decisions more accurate.
+**Key Point:** ALL swings (initial + updates) require 2-watch confirmation. No immediate updates on extreme detection alone. This ensures every swing represents the ACTUAL extreme in that wave with proper validation, making trading decisions more accurate.
 
 ## Limitations
 
@@ -464,7 +478,7 @@ The watch-based system treats swing detection as a **confirmation game**:
 3. When 2 votes are cast (counter = 2), the swing is confirmed
 4. The actual swing point is the extreme in that confirmed area
 5. Swings must alternate to maintain the wave pattern
-6. **Swing updates**: If a new extreme forms before alternation, UPDATE the existing swing
-7. This ensures we track TRUE extremes, not premature turning points
+6. **Swing updates**: If a new extreme forms before alternation AND gets 2-watch confirmation, UPDATE the existing swing
+7. This ensures we track TRUE extremes with proper validation, not premature turning points
 
-It's like looking backwards and saying: "Now that I see what happened AFTER that bar, I can confirm it was a turning point - or wait, an even better extreme just formed, let me update!"
+It's like looking backwards and saying: "Now that I see what happened AFTER that bar, I can confirm it was a turning point - or wait, an even better extreme just formed AND got confirmed with 2 watches, let me update!"

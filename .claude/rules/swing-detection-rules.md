@@ -24,17 +24,21 @@ Valid swing sequence: `High → Low → High → Low → High → Low`
 
 ### Swing Updates (Same Direction)
 
-Before a new alternating swing forms, if a NEW EXTREME appears, UPDATE the existing swing:
+Before a new alternating swing forms, if a NEW EXTREME appears AND gets 2-watch confirmation, UPDATE the existing swing:
+
+**CRITICAL: Updates are NOT immediate - require same 2-watch confirmation as initial swings.**
 
 **For Swing Lows:**
 - Current swing LOW @ 80
 - Price drops to 75 (new lower low) before any HIGH
+- Wait for 2 watch confirmations (HH+HC pattern twice)
 - Action: UPDATE swing low from 80 → 75
 - Reason: 75 is the true extreme, not 80
 
 **For Swing Highs:**
 - Current swing HIGH @ 100
 - Price rallies to 105 (new higher high) before any LOW
+- Wait for 2 watch confirmations (LL+LC pattern twice)
 - Action: UPDATE swing high from 100 → 105
 - Reason: 105 is the true extreme, not 100
 
@@ -42,6 +46,12 @@ Before a new alternating swing forms, if a NEW EXTREME appears, UPDATE the exist
 - Current swing LOW @ 80
 - Price drops to 82 (not lower than 80)
 - Action: REJECT - not a new extreme
+
+**Why 2-Watch Confirmation for Updates:**
+- Prevents noise and false signals from being marked as swing updates
+- Ensures updates represent true turning points, not temporary fluctuations
+- Maintains consistency with initial swing detection logic
+- All swings (initial + updates) follow the same validation rules
 
 ### Window Behavior
 
@@ -327,9 +337,10 @@ Action:
 - **Impact**: SL% won't reflect true risk mid-bar, may miss disqualification moment
 
 ### Gotcha 4: Missing Swing Updates
-- **Issue**: Not updating swing when new extreme forms
-- **Fix**: Check for new lows (if swing low) and new highs (if swing high) every bar
+- **Issue**: Not updating swing when new extreme forms and gets 2-watch confirmation
+- **Fix**: Check for new lows (if swing low) and new highs (if swing high) using watch-based system (2 confirmations required)
 - **Impact**: Entering at wrong levels, wrong risk calculations
+- **Note**: Updates are NOT immediate - they require the same 2-watch confirmation as initial swings
 
 ### Gotcha 5: Alternating Pattern Violation
 - **Issue**: Creating same-direction swings (two LOWs or two HIGHs in a row)

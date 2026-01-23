@@ -200,44 +200,34 @@ class SwingDetector:
 
     def _find_alternate_swing(self, i, current):
         """
-        Find alternating swing after initial swing is established
+        Find alternating swing OR same-direction extreme after initial swing is established
+
+        CRITICAL CHANGE: ALL swings require watch-based confirmation (2 watches), including updates.
 
         Per theory SWING_DETECTION_THEORY.md:
-        - If last swing was Low, look for High (check high_watch)
-        - If last swing was High, look for Low (check low_watch)
+        - If last swing was Low, look for:
+          1. High (alternating) - check high_watch
+          2. Lower Low (same-direction update) - check low_watch
+        - If last swing was High, look for:
+          1. Low (alternating) - check low_watch
+          2. Higher High (same-direction update) - check high_watch
         - Window: From bar AFTER last swing to current bar [last_idx+1 to i]
         - Check counters for bars in range [last_idx+1 to i-1] (not current bar, not last swing)
-
-        CRITICAL: Check for new extreme FIRST on every bar (simultaneous with alternating check)
+        - Both alternating swings AND updates need 2 watches
         """
         last_idx = self.last_swing_idx
 
-        # === CHECK 1: New extreme in SAME direction (IMMEDIATE, no watch needed) ===
-        # This check happens EVERY bar before checking for alternating swing
         if self.last_swing_type == 'low':
-            # Check if current bar makes a new lower low
-            if current['low'] < self.last_swing['price']:
-                return self._update_swing_extreme('Low', current, i)
-
-        elif self.last_swing_type == 'high':
-            # Check if current bar makes a new higher high
-            if current['high'] > self.last_swing['price']:
-                return self._update_swing_extreme('High', current, i)
-
-        # === CHECK 2: Alternating swing (WATCH-BASED, requires confirmation) ===
-        # Only reaches here if no new extreme detected above
-        if self.last_swing_type == 'low':
-            # Looking for SWING HIGH
-            # Check bars from last_idx+1 to i-1 for high_watch
+            # Check bars from last_idx+1 to i-1 for watches
             for j in range(last_idx + 1, i):
                 prev = self.bars[j]
 
-                # high_watch: current makes LOWER low AND LOWER close
+                # Check for SWING HIGH (alternating)
                 if current['low'] < prev['low'] and current['close'] < prev['close']:
                     self.high_watch_count[j] = self.high_watch_count.get(j, 0) + 1
 
                     if self.high_watch_count[j] == 2:
-                        # Find highest high in window AFTER last swing (exclude last_idx)
+                        # Find highest high in window AFTER last swing
                         window = self.bars[last_idx + 1:i + 1]
                         highest_local_idx = max(range(len(window)), key=lambda x: window[x]['high'])
                         highest_idx = last_idx + 1 + highest_local_idx
@@ -245,18 +235,32 @@ class SwingDetector:
 
                         return self._create_swing('High', highest_bar, highest_idx)
 
-        elif self.last_swing_type == 'high':
-            # Looking for SWING LOW
-            # Check bars from last_idx+1 to i-1 for low_watch
-            for j in range(last_idx + 1, i):
-                prev = self.bars[j]
-
-                # low_watch: current makes HIGHER high AND HIGHER close
+                # Check for LOWER LOW (same-direction update) - ALSO needs 2 watches!
                 if current['high'] > prev['high'] and current['close'] > prev['close']:
                     self.low_watch_count[j] = self.low_watch_count.get(j, 0) + 1
 
                     if self.low_watch_count[j] == 2:
-                        # Find lowest low in window AFTER last swing (exclude last_idx)
+                        # Find lowest low in window AFTER last swing
+                        window = self.bars[last_idx + 1:i + 1]
+                        lowest_local_idx = min(range(len(window)), key=lambda x: window[x]['low'])
+                        lowest_idx = last_idx + 1 + lowest_local_idx
+                        lowest_bar = self.bars[lowest_idx]
+
+                        # Check if this is a new lower low (update candidate)
+                        if lowest_bar['low'] < self.last_swing['price']:
+                            return self._update_swing_extreme('Low', lowest_bar, lowest_idx)
+
+        elif self.last_swing_type == 'high':
+            # Check bars from last_idx+1 to i-1 for watches
+            for j in range(last_idx + 1, i):
+                prev = self.bars[j]
+
+                # Check for SWING LOW (alternating)
+                if current['high'] > prev['high'] and current['close'] > prev['close']:
+                    self.low_watch_count[j] = self.low_watch_count.get(j, 0) + 1
+
+                    if self.low_watch_count[j] == 2:
+                        # Find lowest low in window AFTER last swing
                         window = self.bars[last_idx + 1:i + 1]
                         lowest_local_idx = min(range(len(window)), key=lambda x: window[x]['low'])
                         lowest_idx = last_idx + 1 + lowest_local_idx
@@ -264,21 +268,38 @@ class SwingDetector:
 
                         return self._create_swing('Low', lowest_bar, lowest_idx)
 
+                # Check for HIGHER HIGH (same-direction update) - ALSO needs 2 watches!
+                if current['low'] < prev['low'] and current['close'] < prev['close']:
+                    self.high_watch_count[j] = self.high_watch_count.get(j, 0) + 1
+
+                    if self.high_watch_count[j] == 2:
+                        # Find highest high in window AFTER last swing
+                        window = self.bars[last_idx + 1:i + 1]
+                        highest_local_idx = max(range(len(window)), key=lambda x: window[x]['high'])
+                        highest_idx = last_idx + 1 + highest_local_idx
+                        highest_bar = self.bars[highest_idx]
+
+                        # Check if this is a new higher high (update candidate)
+                        if highest_bar['high'] > self.last_swing['price']:
+                            return self._update_swing_extreme('High', highest_bar, highest_idx)
+
         return None
 
 
     def _update_swing_extreme(self, swing_type, bar, idx):
         """
-        Update existing swing to new extreme (when same-direction extreme forms)
+        Update existing swing to new extreme (when same-direction extreme forms WITH watch confirmation)
 
-        This is called when:
-        - Last swing was LOW and current bar makes new lower low
-        - Last swing was HIGH and current bar makes new higher high
+        CRITICAL: This is called ONLY after 2-watch confirmation in _find_alternate_swing().
+
+        Called when:
+        - Last swing was LOW and new lower low confirmed with 2 watches
+        - Last swing was HIGH and new higher high confirmed with 2 watches
 
         Args:
             swing_type: 'Low' or 'High'
-            bar: Current bar dict
-            idx: Current bar index
+            bar: Bar dict at confirmed extreme
+            idx: Bar index at confirmed extreme
 
         Returns:
             Updated swing dict if swing_type is 'Low', None otherwise
@@ -289,7 +310,7 @@ class SwingDetector:
         logger.info(
             f"[SWING-UPDATE] {self.symbol}: Updating {swing_type.upper()} "
             f"from {last_price:.2f} -> {new_price:.2f} "
-            f"@ {bar['timestamp'].strftime('%H:%M')} (new extreme before alternating swing)"
+            f"@ {bar['timestamp'].strftime('%H:%M')} (watch-confirmed new extreme)"
         )
 
         # Update the existing swing in place (same swing object, new values)
@@ -335,88 +356,18 @@ class SwingDetector:
 
     def _create_swing(self, swing_type, bar, idx):
         """
-        Create a new swing point with alternating pattern enforcement and swing updates
+        Create a new swing point with alternating pattern enforcement
+
+        CRITICAL CHANGE: Removed immediate update logic. Updates now come through
+        watch-based system in _find_alternate_swing() with 2-watch confirmation.
 
         Args:
             swing_type: 'Low' or 'High'
             bar: Bar dict
             idx: Bar index
         """
-        # SWING UPDATE LOGIC: If same type as last swing, check if it's a NEW extreme
-        if self.last_swing_type is not None:
-            if swing_type.lower() == self.last_swing_type:
-                # Same type detected - check if it's a new extreme
-                new_price = bar['low'] if swing_type == 'Low' else bar['high']
-                last_price = self.last_swing['price']
-
-                is_new_extreme = False
-                if swing_type == 'Low' and new_price < last_price:
-                    # New lower low
-                    is_new_extreme = True
-                elif swing_type == 'High' and new_price > last_price:
-                    # New higher high
-                    is_new_extreme = True
-
-                if is_new_extreme:
-                    # UPDATE existing swing to new extreme
-                    logger.info(
-                        f"[SWING-UPDATE] {self.symbol}: Updating {swing_type.upper()} "
-                        f"from {last_price:.2f} -> {new_price:.2f} "
-                        f"@ {bar['timestamp'].strftime('%H:%M')} (new extreme)"
-                    )
-
-                    # Update the last swing in place
-                    self.last_swing['price'] = new_price
-                    self.last_swing['timestamp'] = bar['timestamp']
-                    self.last_swing['index'] = idx
-                    # 🔒 CRITICAL: Do NOT update VWAP - keep it frozen at original swing formation time
-                    # self.last_swing['vwap'] = bar.get('vwap', bar['close'])  # ❌ REMOVED
-                    # VWAP should represent market context at FIRST swing detection, not latest extreme
-                    self.last_swing['high'] = bar['high']
-                    self.last_swing['low'] = bar['low']
-                    # Preserve 'broken' status
-                    # last_swing['broken'] remains unchanged
-
-                    # Reset watch counts (start fresh for next swing)
-                    self.low_watch_count = {}
-                    self.high_watch_count = {}
-
-                    # Update last_swing_idx
-                    self.last_swing_idx = idx
-
-                    # Log to database if in live mode
-                    if (not self.is_historical_processing and
-                        hasattr(self, '_state_manager') and
-                        self._state_manager):
-
-                        swing_key = (
-                            bar['timestamp'].isoformat() if hasattr(bar['timestamp'], 'isoformat') else str(bar['timestamp']),
-                            swing_type,
-                            round(new_price, 2)
-                        )
-
-                        if swing_key not in self._logged_swings:
-                            self._state_manager.log_swing_detection(
-                                symbol=self.symbol,
-                                swing_type=f"{swing_type} Update",
-                                swing_price=new_price,
-                                swing_time=bar['timestamp'],
-                                vwap=self.last_swing['vwap'],
-                                bar_index=idx
-                            )
-                            self._logged_swings.add(swing_key)
-
-                    # Return updated swing if it's a Low (for trading strategy)
-                    if swing_type == 'Low':
-                        return self.last_swing
-                    return None
-                else:
-                    # NOT a new extreme - reject as noise
-                    logger.debug(
-                        f"[SWING-REJECTION] {self.symbol}: {swing_type} @ {new_price:.2f} "
-                        f"not a new extreme (last: {last_price:.2f}) - REJECTED"
-                    )
-                    return None
+        # REMOVED: Immediate swing update logic (now requires 2 watches via _find_alternate_swing)
+        # Same-type swings should not reach here anymore - they go through _update_swing_extreme
 
         option_type = 'CE' if 'CE' in self.symbol else 'PE'
 
