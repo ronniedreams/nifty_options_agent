@@ -29,6 +29,7 @@ from .config import (
     OPENALGO_HOST,
     EXCHANGE,
     PRODUCT_TYPE,
+    STRATEGY_NAME,
     SL_TRIGGER_PRICE_OFFSET,
     SL_LIMIT_PRICE_OFFSET,
     ORDER_FILL_CHECK_INTERVAL,
@@ -125,7 +126,7 @@ class OrderManager:
         
         try:
             response = self.client.placeorder(
-                strategy="baseline_v1_live",
+                strategy=STRATEGY_NAME,
                 symbol=symbol,
                 action="SELL",  # Shorting
                 exchange=EXCHANGE,
@@ -310,7 +311,7 @@ class OrderManager:
         
         try:
             response = self.client.placeorder(
-                strategy="baseline_v1_live",
+                strategy=STRATEGY_NAME,
                 symbol=symbol,
                 action="BUY",  # Close short position
                 exchange=EXCHANGE,
@@ -717,7 +718,7 @@ class OrderManager:
         for attempt in range(MAX_ORDER_RETRIES):
             try:
                 response = self.client.placeorder(
-                    strategy='baseline_v1',
+                    strategy=STRATEGY_NAME,
                     symbol=symbol,
                     action='SELL',
                     exchange=EXCHANGE,
@@ -791,7 +792,7 @@ class OrderManager:
         for attempt in range(MAX_ORDER_RETRIES):
             try:
                 response = self.client.placeorder(
-                    strategy='baseline_v1',
+                    strategy=STRATEGY_NAME,
                     symbol=symbol,
                     action='SELL',
                     exchange=EXCHANGE,
