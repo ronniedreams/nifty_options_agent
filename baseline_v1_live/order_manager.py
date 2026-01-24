@@ -1,4 +1,4 @@
-﻿"""
+"""
 Order Manager for Proactive Limit Orders and SL Orders
 
 Manages the complete order lifecycle:
@@ -693,28 +693,77 @@ class OrderManager:
         
         # Case 2: No existing order - place new
         if not existing:
-                order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
-                if order_id:
-                    self.pending_limit_orders[option_type] = {
-                        'order_id': order_id,
-                        'symbol': symbol,
-                        'trigger_price': trigger_price,
-                        'limit_price': limit_price_entry,
-                        'quantity': quantity,
-                        'status': 'pending',
-                        'placed_at': datetime.now(IST),
-                        'candidate_info': candidate
-                    }
-                    logger.info(f"[PLACE-{option_type}] {symbol} SL-L trigger {trigger_price:.2f} limit {limit_price_entry:.2f} QTY {quantity}")
-                    return 'placed'
-                return 'failed'
+            order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
+            if order_id:
+                self.pending_limit_orders[option_type] = {
+                    'order_id': order_id,
+                    'symbol': symbol,
+                    'trigger_price': trigger_price,
+                    'limit_price': limit_price_entry,
+                    'quantity': quantity,
+                    'status': 'pending',
+                    'placed_at': datetime.now(IST),
+                    'candidate_info': candidate
+                }
+                logger.info(f"[PLACE-{option_type}] {symbol} SL-L trigger {trigger_price:.2f} limit {limit_price_entry:.2f} QTY {quantity}")
+                return 'placed'
+            return 'failed'
+
+        # Case 3: Different symbol - cancel old, place new
+        if existing['symbol'] != symbol:
+            self._cancel_broker_order(existing['order_id'])
+            order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
+            if order_id:
+                self.pending_limit_orders[option_type] = {
+                    'order_id': order_id,
+                    'symbol': symbol,
+                    'trigger_price': trigger_price,
+                    'limit_price': limit_price_entry,
+                    'quantity': quantity,
+                    'status': 'pending',
+                    'placed_at': datetime.now(IST),
+                    'candidate_info': candidate
+                }
+                logger.info(f"[MODIFY-{option_type}] {existing['symbol']} -> {symbol} trigger {trigger_price:.2f} limit {limit_price_entry:.2f}")
+                return 'modified'
+            return 'failed'
+        
+        # Case 4: Same symbol, check if trigger or limit price changed
+        if abs(existing['trigger_price'] - trigger_price) > 0.01 or abs(existing['limit_price'] - limit_price_entry) > 0.01:
+            # Price changed - cancel old and place new SL order
+            self._cancel_broker_order(existing['order_id'])
+            order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
+            if order_id:
+                existing['order_id'] = order_id
+                existing['trigger_price'] = trigger_price
+                existing['limit_price'] = limit_price_entry
+                existing['placed_at'] = datetime.now(IST)
+                logger.info(f"[MODIFY-{option_type}] {symbol} trigger {trigger_price:.2f} limit {limit_price_entry:.2f}")
+                return 'modified'
+            return 'failed'
+
+        # Case 5: Same symbol, same price - keep existing order
+        logger.debug(f"[KEEP-{option_type}] {symbol} unchanged (trigger={trigger_price:.2f}, limit={limit_price_entry:.2f})")
+        return 'kept'
 
     def _place_broker_stop_limit_order(self, symbol: str, trigger_price: float, limit_price: float, quantity: int) -> Optional[str]:
-        """Place stop-loss (SL) order via broker API with retry logic"""
+        """
+        Place stop-limit (SL) order via broker API with retry logic
+
+        Args:
+            symbol: Option symbol (e.g., NIFTY30DEC2526000CE)
+            trigger_price: Price at which order becomes active (swing_low - tick_size)
+            limit_price: Limit price once triggered (trigger_price - 3 Rs)
+            quantity: Total quantity (lots × LOT_SIZE)
+
+        Returns:
+            Order ID if successful, None otherwise
+        """
         if DRY_RUN:
             order_id = f"DRY_SLL_{symbol}_{int(time.time())}"
-            logger.info(f"[DRY-RUN] Would place SL-L {symbol} trigger {trigger_price} limit {limit_price} QTY {quantity}")
+            logger.info(f"[DRY-RUN] Would place SL-L {symbol} trigger {trigger_price:.2f} limit {limit_price:.2f} QTY {quantity}")
             return order_id
+
         for attempt in range(MAX_ORDER_RETRIES):
             try:
                 response = self.client.placeorder(
@@ -728,60 +777,25 @@ class OrderManager:
                     quantity=quantity,
                     product=PRODUCT_TYPE
                 )
+
                 if response.get('status') == 'success':
                     order_id = response.get('orderid')
-                    logger.info(f"[ORDER-PLACED] {symbol} SL trigger {trigger_price} limit {limit_price} QTY {quantity} | ID: {order_id}")
+                    logger.info(f"[ORDER-PLACED] {symbol} SL trigger {trigger_price:.2f} limit {limit_price:.2f} QTY {quantity} | ID: {order_id}")
                     return order_id
                 else:
                     error_msg = response.get('message', 'Unknown error')
                     logger.error(f"SL order failed (attempt {attempt + 1}/{MAX_ORDER_RETRIES}): {error_msg}")
                     if attempt < MAX_ORDER_RETRIES - 1:
                         time.sleep(ORDER_RETRY_DELAY)
+
             except Exception as e:
                 logger.error(f"Exception placing SL order (attempt {attempt + 1}/{MAX_ORDER_RETRIES}): {e}")
                 if attempt < MAX_ORDER_RETRIES - 1:
                     time.sleep(ORDER_RETRY_DELAY)
+
         logger.error(f"Failed to place SL order after {MAX_ORDER_RETRIES} attempts")
         return None
-        
-        # Case 3: Different symbol - cancel old, place new
-        if existing['symbol'] != symbol:
-            self._cancel_broker_order(existing['order_id'])
-            order_id = self._place_broker_limit_order(symbol, limit_price, quantity)
-            if order_id:
-                self.pending_limit_orders[option_type] = {
-                    'order_id': order_id,
-                    'symbol': symbol,
-                    'limit_price': limit_price,
-                    'quantity': quantity,
-                    'status': 'pending',
-                    'placed_at': datetime.now(IST),
-                    'candidate_info': candidate
-                }
-                logger.info(f"[MODIFY-{option_type}] {existing['symbol']} -> {symbol} @ {limit_price:.2f}")
-                return 'modified'
-            return 'failed'
-        
-        # Case 4: Same symbol, check price
-        if abs(existing['limit_price'] - limit_price) > 0.01:
-            # Price changed - modify order
-            success = self._modify_broker_order(existing['order_id'], limit_price)
-            if success:
-                existing['limit_price'] = limit_price
-                logger.info(f"[MODIFY-{option_type}] {symbol} price {existing['limit_price']:.2f} -> {limit_price:.2f}")
-                return 'modified'
-            # Modification failed - try cancel and replace
-            self._cancel_broker_order(existing['order_id'])
-            order_id = self._place_broker_limit_order(symbol, limit_price, quantity)
-            if order_id:
-                existing['order_id'] = order_id
-                existing['limit_price'] = limit_price
-                return 'modified'
-            return 'failed'
-        
-        # Case 5: Same symbol, same price - keep
-        return 'kept'
-    
+
     def _place_broker_limit_order(self, symbol: str, price: float, quantity: int) -> Optional[str]:
         """Place limit order via broker API with retry logic"""
         if DRY_RUN:
