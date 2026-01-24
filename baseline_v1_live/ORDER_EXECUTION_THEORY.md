@@ -105,6 +105,68 @@ Action: BUY (close the short)
 - SL-L gives 3 Rs buffer above trigger for fill
 - Better control over exit price
 
+### Daily Target Exit: MARKET Orders
+
+**NEW (2026-01-24):** When cumulative R reaches daily target/stop or end-of-day, all positions are closed via MARKET orders.
+
+```
+Type: MARKET
+Quantity: Position quantity
+Product: MIS
+Action: BUY (close the short)
+Triggers:
+- +5R target (configurable via DAILY_TARGET_R)
+- -5R stop loss (configurable via DAILY_STOP_R)
+- 3:15 PM force exit (configurable via FORCE_EXIT_TIME)
+```
+
+**Why MARKET orders for daily exits?**
+- Guaranteed fills (always execute)
+- Exact +5R precision (±0.2R)
+- All-or-nothing exit (all positions close together)
+- Simple, reliable implementation
+- Acceptable slippage at profit levels (~0.5-1% of ₹32,500)
+
+**Exit Sequence:**
+1. Daily target/stop reached OR time = FORCE_EXIT_TIME
+2. Cancel all pending entry orders (no new positions)
+3. For each open position:
+   - Cancel existing exit SL order
+   - Place MARKET order (BUY to cover short)
+   - 3-retry logic with 2-second delay
+4. Update internal state (mark positions closed)
+5. Save daily summary to database
+6. Send Telegram notification
+
+**Example Log Sequence:**
+```
+[10:46:15] [R-CHECK] Cumulative R: +5.1R (2 closed, 3 open)
+[10:46:15] [EXIT] DAILY EXIT TRIGGERED: +5R_TARGET
+[10:46:15] [EXIT] Cancelling all pending orders...
+[10:46:16] [EXIT] Cancelling SL for NIFTY30DEC2526000CE
+[10:46:16] [MARKET-EXIT] NIFTY30DEC2526000CE qty=650 reason=+5R_TARGET
+[10:46:17] [MARKET-EXIT] Order placed: ORD123456
+[10:46:17] [EXIT] Cancelling SL for NIFTY30DEC2526300PE
+[10:46:17] [MARKET-EXIT] NIFTY30DEC2526300PE qty=650 reason=+5R_TARGET
+[10:46:18] [MARKET-EXIT] Order placed: ORD123457
+[10:46:19] [SUMMARY] All positions closed. Final R: +5.1R
+```
+
+**Slippage Tolerance:**
+- At +5R profit (₹32,500), typical slippage is ₹200-300 (~0.6%)
+- Acceptable trade-off for guaranteed fills and exact targeting
+
+**Fallback Protection:**
+- If MARKET order fails after 3 retries, position remains open
+- MIS product ensures broker auto-squares at 3:15 PM
+- All positions are intraday - cannot be held overnight
+
+**Implementation Details:**
+- Method: `order_manager.place_market_order()`
+- Called from: `position_tracker.close_all_positions()`
+- Parameters: symbol, quantity, action, reason
+- Returns: order_id or None (if failed)
+
 ## Order Lifecycle
 
 ### Stage 1: Qualification
@@ -125,7 +187,11 @@ If COMPLETE: Entry filled → Place exit SL-L order immediately
 
 ### Stage 4: Position Management
 ```
-Monitor position → Track R-multiples → Exit at DAILY_TARGET_R/DAILY_STOP_R or FORCE_EXIT_TIME
+Monitor position → Track R-multiples
+If cumulative_R >= DAILY_TARGET_R or <= DAILY_STOP_R or time = FORCE_EXIT_TIME:
+    → Cancel all orders → Place MARKET orders → Close all positions → Save summary
+Else:
+    → Continue monitoring until exit SL hit or daily exit triggers
 ```
 
 ## Proactive Order Management Rules
@@ -330,16 +396,36 @@ Tracks all order placement/cancellation events:
 
 Before going live, verify:
 
+**Entry Orders:**
 - [ ] Orders placed when strike qualifies
 - [ ] Orders NOT placed when filters fail
 - [ ] Orders cancelled when disqualified
 - [ ] Orders modified when swing updates
-- [ ] SL orders placed after entry fills
-- [ ] Position sizing correct
+- [ ] No duplicate orders
 - [ ] Order status polling works
 - [ ] Multiple strikes handled (tie-breaker)
-- [ ] No duplicate orders
-- [ ] Error handling graceful
+
+**Position Management:**
+- [ ] SL orders placed after entry fills
+- [ ] Position sizing correct (R-based formula)
+- [ ] Exit SL triggers correctly
+
+**Daily Exits (NEW):**
+- [ ] +5R target triggers market orders
+- [ ] -5R stop triggers market orders
+- [ ] 3:15 PM force exit triggers market orders
+- [ ] All SL orders cancelled before market orders
+- [ ] Market orders visible in broker dashboard
+- [ ] Positions actually close at broker (not just internal state)
+- [ ] Internal state matches broker after exit
+- [ ] Daily summary saved correctly
+- [ ] Telegram notifications sent
+
+**Error Handling:**
+- [ ] Market order retry logic works (3 attempts)
+- [ ] Graceful degradation if order fails
+- [ ] Network failures handled
+- [ ] No crashes on broker API errors
 
 ## Common Issues
 
@@ -379,15 +465,69 @@ Before going live, verify:
 3. Order manager received fill notification?
 4. API error when placing SL?
 
+### Issue 5: Daily Exit Not Closing Positions (NEW)
+**Symptoms:** +5R target reached, logs show exit triggered, but positions still open at broker
+
+**Check:**
+1. Is order_manager passed to PositionTracker? (should be in baseline_v1_live.py line 121)
+2. Check logs for `[MARKET-EXIT]` tags - are market orders being placed?
+3. Check broker dashboard - do you see MARKET orders?
+4. API errors when placing market orders? (check 3-retry logs)
+5. Network connectivity to broker?
+
+**Expected Logs:**
+```
+[EXIT] DAILY EXIT TRIGGERED: +5R_TARGET
+[EXIT] Cancelling SL for NIFTY30DEC2526000CE
+[MARKET-EXIT] NIFTY30DEC2526000CE qty=650 reason=+5R_TARGET
+[MARKET-EXIT] Order placed: ORD123456
+```
+
+**If market orders failing:**
+- Check available margin (though shouldn't be needed for closing)
+- Verify symbol format (should match OpenAlgo format)
+- Check broker rate limits (retry logic should handle this)
+- Verify API key valid and not expired
+
+**Fallback:**
+- All positions are MIS (intraday) product
+- Broker will auto-square positions at 3:15 PM
+- This is your safety net if market orders fail
+
+### Issue 6: Market Order Slippage Too High
+**Symptoms:** Positions closing, but exit prices much worse than expected
+
+**Check:**
+1. What's the profit level? (slippage more noticeable on small profits)
+2. Market volatility at exit time (high volatility = more slippage)
+3. Position size vs liquidity (large positions in illiquid strikes)
+
+**Acceptable Slippage:**
+- At +5R (₹32,500 profit): ₹200-500 is typical (~0.6-1.5%)
+- At -5R (₹32,500 loss): Similar slippage acceptable
+
+**If Excessive (>2% of profit):**
+- Consider LIMIT orders instead of MARKET (but may not fill)
+- Reduce position sizes (better liquidity)
+- Trade more liquid strikes (round strikes like 24000, 24100)
+
 ## Summary
 
 The order execution system is designed for:
 
 1. **Proactive placement** - SL orders ready before break
-2. **Price control** - SL (stop-limit) orders prevent slippage
+2. **Price control** - SL (stop-limit) orders prevent slippage on entry and individual exits
 3. **Minimal churn** - Keep orders unless disqualified
 4. **Risk management** - Exit SL-L orders placed immediately on fill
 5. **Position sizing** - R-based quantity calculation with configurable safety cap
 6. **State tracking** - Full lifecycle monitoring
+7. **Daily exits (NEW)** - MARKET orders for guaranteed fills at +5R/-5R/EOD
 
 **Key Principle:** Orders should be placed and kept stable. Only cancel/modify when necessary (disqualification or better opportunity). Swing breaking is the ENTRY TRIGGER, not a cancellation reason. This reduces API calls, broker flags, and execution complexity.
+
+**Daily Exit Mechanism:** When cumulative R reaches daily target/stop or EOD time:
+1. Cancel all pending entry orders (prevent new positions)
+2. Cancel all exit SL orders (replace with market orders)
+3. Place MARKET orders for each position (guaranteed fills)
+4. Update internal state and save summary
+5. Fallback: MIS product ensures broker auto-squares at 3:15 PM if orders fail

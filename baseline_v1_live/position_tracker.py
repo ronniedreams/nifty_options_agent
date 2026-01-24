@@ -142,25 +142,26 @@ class PositionTracker:
     Track all positions with R-multiple accounting
     """
     
-    def __init__(self, client: api = None):
+    def __init__(self, client: api = None, order_manager = None):
         self.client = client or api(api_key=OPENALGO_API_KEY, host=OPENALGO_HOST)
-        
+        self.order_manager = order_manager  # NEW: Store reference for market orders
+
         # Open positions: {symbol: Position}
         self.open_positions = {}
-        
+
         # Closed positions (today only)
         self.closed_positions = []
-        
+
         # Daily exit state
         self.daily_exit_triggered = False
         self.daily_exit_reason = None
-        
+
         # Current date for intraday reset
         self.current_date = None
-        
+
         # Telegram notifier
         self.telegram = get_notifier() if TELEGRAM_AVAILABLE else None
-        
+
         logger.info("PositionTracker initialized")
     
     def reset_for_new_day(self):
@@ -295,20 +296,46 @@ class PositionTracker:
     def close_all_positions(self, exit_reason: str, current_prices: Dict[str, float]):
         """
         Close ALL open positions (for ±5R or EOD exit)
-        
+
+        NEW: Places MARKET orders at broker to actually close positions
+
         Args:
-            exit_reason: Reason for exit
-            current_prices: {symbol: current_price} for exit prices
+            exit_reason: Reason for exit (+5R_TARGET, -5R_STOP, EOD_EXIT)
+            current_prices: {symbol: current_price} for P&L calculation
         """
         logger.info(f"Closing ALL positions: {exit_reason}")
-        
+
         for symbol in list(self.open_positions.keys()):
+            position = self.open_positions[symbol]
             exit_price = current_prices.get(symbol)
-            
+
             if exit_price is None:
                 logger.warning(f"No price for {symbol}, using last known price")
-                exit_price = self.open_positions[symbol].current_price
-            
+                exit_price = position.current_price
+
+            # NEW: Place broker orders if order_manager provided
+            if self.order_manager:
+                # 1. Cancel existing exit SL order
+                logger.info(f"[EXIT] Cancelling SL for {symbol}")
+                self.order_manager.cancel_sl_order(symbol)
+
+                # 2. Place MARKET order to close position
+                logger.info(f"[EXIT] Placing MARKET order for {symbol}")
+                order_id = self.order_manager.place_market_order(
+                    symbol=symbol,
+                    quantity=position.quantity,
+                    action="BUY",  # Cover the short
+                    reason=exit_reason
+                )
+
+                if not order_id:
+                    logger.error(
+                        f"[EXIT] Failed to place market order for {symbol}. "
+                        f"Position will auto-square at 3:15 PM (MIS product)."
+                    )
+                    # Continue with other positions
+
+            # Update internal state (existing logic)
             self.close_position(symbol, exit_price, exit_reason)
     
     def get_cumulative_R(self) -> float:

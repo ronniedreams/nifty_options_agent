@@ -46,9 +46,6 @@ from .config import (
     LOG_DIR,
     LOG_LEVEL,
     PAPER_TRADING,
-    WAITING_MODE_CHECK_INTERVAL,
-    WAITING_MODE_SEND_HOURLY_STATUS,
-    SHUTDOWN_TIMEOUT,
 )
 from .data_pipeline import DataPipeline
 from .swing_detector import MultiSwingDetector
@@ -58,8 +55,6 @@ from .order_manager import OrderManager
 from .position_tracker import PositionTracker
 from .state_manager import StateManager
 from .telegram_notifier import get_notifier
-from .notification_manager import NotificationManager
-from .startup_health_check import StartupHealthCheck
 
 # Setup logging
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -74,20 +69,6 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 IST = pytz.timezone('Asia/Kolkata')
-
-# Global flag for graceful shutdown
-shutdown_requested = False
-
-def signal_handler(signum, frame):
-    """Handle SIGTERM (Docker stop) and SIGINT (Ctrl+C)"""
-    signal_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
-    logger.warning(f"[SHUTDOWN] Received {signal_name}")
-    global shutdown_requested
-    shutdown_requested = True
-
-# Register signal handlers
-signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
-signal.signal(signal.SIGTERM, signal_handler)  # Docker stop
 
 
 class BaselineV1Live:
@@ -136,10 +117,9 @@ class BaselineV1Live:
         # Clear in-memory swing data for new trading day
         self.continuous_filter.reset_daily_data()
         
-        self.telegram = get_notifier()
-        self.notification_manager = NotificationManager(self.telegram, self.state_manager)
         self.order_manager = OrderManager()
         self.position_tracker = PositionTracker(order_manager=self.order_manager)
+        self.telegram = get_notifier()
         
         # Generate option symbols to monitor
         self.symbols = self.data_pipeline.generate_option_symbols(atm_strike, expiry_date)
@@ -163,51 +143,11 @@ class BaselineV1Live:
         logger.info("Initialization complete")
     
     def start(self):
-        """Start live trading with health checks"""
+        """Start live trading"""
         logger.info("="*80)
         logger.info("Starting Baseline V1 Live Trading")
         logger.info("="*80)
-
-        # Pre-flight health checks
-        health_checker = StartupHealthCheck(self.notification_manager)
-        success, error_type, error_message = health_checker.run_all_checks()
-
-        if not success:
-            # Health checks failed
-            logger.error(f"[STARTUP] Health checks failed: {error_message}")
-
-            if error_type == 'PERMANENT':
-                # Permanent failure (auth, config) - enter ERROR state
-                self.state_manager.transition_to('ERROR', error_message)
-                self.notification_manager.send_error_notification(
-                    'STARTUP_FAILURE',
-                    f"Trading system cannot start.\n\n"
-                    f"Reason: {error_message}\n\n"
-                    f"Action: Check OpenAlgo dashboard, verify broker login, and restart manually.",
-                    is_critical=True
-                )
-                logger.critical("[STARTUP] System in ERROR state - manual intervention required")
-                return  # Exit, don't start trading
-
-            else:  # TRANSIENT
-                # Transient failure (connection issues) - enter WAITING state
-                self.state_manager.transition_to('WAITING', error_message)
-                self.notification_manager.send_error_notification(
-                    'STARTUP_FAILURE',
-                    f"Trading system temporarily unavailable.\n\n"
-                    f"Reason: {error_message}\n\n"
-                    f"System will retry every 5 minutes.\n"
-                    f"You will be notified when service resumes.",
-                    is_critical=False
-                )
-                # Enter waiting loop (check every 5 minutes)
-                self.enter_waiting_mode()
-                return
-
-        # Health checks passed - proceed with normal startup
-        logger.info("[STARTUP] All health checks passed")
-        self.state_manager.transition_to('ACTIVE', 'Health checks passed')
-
+        
         # Connect to data pipeline
         self.data_pipeline.connect()
         
@@ -357,19 +297,13 @@ class BaselineV1Live:
     def run_trading_loop(self):
         """Main trading loop - runs continuously during market hours"""
         logger.info("Entering main trading loop...")
-
+        
         tick_count = 0
         last_heartbeat = time.time()
         last_watchdog_check = time.time()
-
+        
         while True:
             try:
-                # Check shutdown flag first
-                global shutdown_requested
-                if shutdown_requested:
-                    self.handle_graceful_shutdown()
-                    break
-
                 tick_count += 1
                 
                 # [CRITICAL] WATCHDOG: Check data freshness every 30 seconds
@@ -1032,101 +966,16 @@ class BaselineV1Live:
             )
             raise
 
-    def enter_waiting_mode(self):
-        """Wait for dependencies to become available"""
-        logger.info("[WAITING] Entering waiting mode")
 
-        last_hourly_update = datetime.now(IST)
+# Global flag for graceful shutdown
+shutdown_flag = False
 
-        while True:
-            # Check shutdown signal
-            global shutdown_requested
-            if shutdown_requested:
-                self.handle_graceful_shutdown()
-                break
-
-            # Wait 5 minutes
-            time.sleep(WAITING_MODE_CHECK_INTERVAL)
-
-            # Re-run health checks
-            logger.info("[WAITING] Running health checks...")
-            health_checker = StartupHealthCheck(self.notification_manager)
-            success, error_type, error_message = health_checker.run_all_checks()
-
-            if success:
-                # Health checks passed - transition to STARTING
-                logger.info("[WAITING] Health checks passed - resuming trading")
-                self.notification_manager.send_error_notification(
-                    'SYSTEM_RECOVERED',
-                    "[SUCCESS] Trading system online\n\nAll checks passed - resuming normal operation.",
-                    is_critical=True
-                )
-                self.start()  # Restart trading
-                break
-
-            # Still failing - check if hourly update needed
-            now = datetime.now(IST)
-            if WAITING_MODE_SEND_HOURLY_STATUS and (now - last_hourly_update).total_seconds() >= 3600:
-                self.telegram.send_message(
-                    f"[WAITING] Still waiting...\n\n"
-                    f"System checking every 5 minutes.\n"
-                    f"Reason: {error_message}\n\n"
-                    f"You'll be notified when service resumes.",
-                    parse_mode=None
-                )
-                last_hourly_update = now
-
-    def handle_graceful_shutdown(self):
-        """Execute shutdown sequence within 10 seconds"""
-        logger.info("[SHUTDOWN] Starting graceful shutdown")
-        start_time = time.time()
-
-        try:
-            # 1. Transition to SHUTDOWN state
-            self.state_manager.transition_to('SHUTDOWN', 'Manual shutdown requested')
-
-            # 2. Cancel all pending orders
-            logger.info("[SHUTDOWN] Cancelling pending orders...")
-            self.order_manager.cancel_all_orders()
-
-            # 3. Close all positions
-            logger.info("[SHUTDOWN] Closing open positions...")
-            all_positions = self.position_tracker.get_all_positions()
-            open_positions = [pos for pos in all_positions if not pos['is_closed']]
-
-            if open_positions:
-                for position in open_positions:
-                    self.order_manager.emergency_market_exit(
-                        symbol=position['symbol'],
-                        quantity=position['quantity'],
-                        reason='SHUTDOWN'
-                    )
-
-            # 4. Save state
-            logger.info("[SHUTDOWN] Saving state...")
-            self.save_state()
-
-            # 5. Send final notification
-            elapsed = time.time() - start_time
-            self.telegram.send_message(
-                f"[SHUTDOWN] Trading System Shutdown\n\n"
-                f"Reason: Manual shutdown\n"
-                f"Open positions closed: {len(open_positions)}\n"
-                f"Shutdown time: {elapsed:.1f}s",
-                parse_mode=None
-            )
-
-            # 6. Disconnect data pipeline
-            logger.info("[SHUTDOWN] Disconnecting data pipeline...")
-            self.data_pipeline.disconnect()
-
-            elapsed = time.time() - start_time
-            logger.info(f"[SHUTDOWN] Complete in {elapsed:.1f}s")
-
-        except Exception as e:
-            logger.error(f"[SHUTDOWN] Error during shutdown: {e}")
-            # Still exit to prevent hanging
-
+def signal_handler(signum, frame):
+    """Handle Ctrl+C signal"""
+    global shutdown_flag
+    print("\n[SHUTDOWN] Shutdown signal received. Exiting gracefully...")
+    shutdown_flag = True
+    sys.exit(0)
 
 def main():
     """Main entry point"""

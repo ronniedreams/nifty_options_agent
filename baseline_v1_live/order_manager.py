@@ -488,7 +488,70 @@ class OrderManager:
         )
         
         return None
-    
+
+    def place_market_order(
+        self,
+        symbol: str,
+        quantity: int,
+        action: str,
+        reason: str = "DAILY_TARGET"
+    ) -> Optional[str]:
+        """
+        Place MARKET order to close position at daily target/stop
+
+        Used for:
+        - Daily +5R target exit
+        - Daily -5R stop loss exit
+        - EOD force close at 3:15 PM
+
+        Args:
+            symbol: Option symbol to close
+            quantity: Total quantity to close
+            action: "BUY" (to cover short position)
+            reason: Exit reason for logging (DAILY_TARGET, DAILY_STOP, EOD_EXIT)
+
+        Returns:
+            Order ID if successful, None if failed
+        """
+        logger.info(f"[MARKET-EXIT] {symbol} qty={quantity} reason={reason}")
+
+        if DRY_RUN:
+            logger.info(f"[DRY RUN] Would place MARKET order for {symbol}")
+            return f"DRY_MARKET_{symbol}_{int(time.time())}"
+
+        # 3-retry logic (same as other order methods)
+        for attempt in range(1, MAX_ORDER_RETRIES + 1):
+            try:
+                response = self.client.placeorder(
+                    strategy=STRATEGY_NAME,
+                    symbol=symbol,
+                    action=action,
+                    exchange=EXCHANGE,
+                    price_type="MARKET",
+                    quantity=quantity,
+                    product=PRODUCT_TYPE
+                )
+
+                if response and response.get('status') == 'success':
+                    order_id = response.get('orderid')
+                    logger.info(f"[MARKET-EXIT] Order placed: {order_id}")
+                    return order_id
+                else:
+                    logger.warning(
+                        f"[MARKET-EXIT] Attempt {attempt}/{MAX_ORDER_RETRIES} failed: {response}"
+                    )
+
+            except Exception as e:
+                logger.error(
+                    f"[MARKET-EXIT] Attempt {attempt}/{MAX_ORDER_RETRIES} error: {e}"
+                )
+
+            if attempt < MAX_ORDER_RETRIES:
+                time.sleep(ORDER_RETRY_DELAY)  # 2-second delay before retry
+
+        logger.error(f"[MARKET-EXIT] Failed after {MAX_ORDER_RETRIES} retries")
+        return None
+
     def should_halt_trading(self) -> bool:
         """
         Check if trading should be halted due to SL failures
