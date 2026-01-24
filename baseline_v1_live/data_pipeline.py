@@ -510,8 +510,8 @@ class DataPipeline:
             logger.warning(f"[GAP-FILL] No bars could be filled (failed: {failed_count})")
     
     def get_atm_strike(self, spot_price):
-        """Calculate ATM strike from spot price (rounded to nearest 50)"""
-        return round(spot_price / 50) * 50
+        """Calculate ATM strike from spot price (rounded to nearest 100)"""
+        return round(spot_price / 100) * 100
     
     def generate_option_symbols(self, atm_strike, expiry_date):
         """

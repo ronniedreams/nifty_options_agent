@@ -98,6 +98,15 @@ FORCE_EXIT_TIME = time(15, 15)    # Force exit all positions at 3:15 PM
 MARKET_CLOSE_TIME = time(15, 30)  # 3:30 PM (actual NSE close - WebSocket stops after this)
 
 # ============================================================================
+# AUTO-DETECTION TIMING
+# ============================================================================
+
+MARKET_OPEN_TIME = time(9, 15)   # Market opens at 9:15 AM IST
+AUTO_DETECT_TIME = time(9, 16)   # Fetch spot price 1 min after open
+MAX_AUTO_DETECT_RETRIES = 3      # Max retries for API calls
+AUTO_DETECT_RETRY_DELAY = 5      # Seconds between retries
+
+# ============================================================================
 # DATA PIPELINE
 # ============================================================================
 
