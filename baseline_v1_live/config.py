@@ -37,6 +37,12 @@ DAILY_TARGET_R = 5.0   # Exit all positions at +5R
 DAILY_STOP_R = -5.0    # Exit all positions at -5R
 
 # ============================================================================
+# STRATEGY IDENTIFICATION
+# ============================================================================
+
+STRATEGY_NAME = "baseline_v1_live"  # Strategy identifier for OpenAlgo orders
+
+# ============================================================================
 # ENTRY FILTERS (from baseline_v1 backtest)
 # ============================================================================
 
