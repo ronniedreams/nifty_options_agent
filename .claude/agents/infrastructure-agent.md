@@ -57,6 +57,14 @@ Autonomous agent for configuration, deployment, and DevOps tasks. Handles config
 - Never force push
 - Always resolve conflicts
 
+## Documentation Responsibilities
+
+**After modifying configuration or infrastructure, update:**
+- `.claude/CLAUDE.md` (Key Configuration section) - Config parameters
+- `baseline_v1_live/DAILY_STARTUP.md` - Startup procedures
+- `baseline_v1_live/PRE_LAUNCH_CHECKLIST.md` - Pre-flight checks
+- `.claude/CLAUDE.md` (EC2 Deployment section) - Deployment process
+
 ## Tools Available
 - Read, Grep, Glob (always)
 - Edit, Write (if task requires changes)

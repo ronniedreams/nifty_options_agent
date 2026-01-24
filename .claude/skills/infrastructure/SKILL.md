@@ -1,5 +1,5 @@
 ---
-name: Infrastructure
+name: infrastructure
 description: Config, Docker, and EC2 deployment specialist for NIFTY options
 ---
 
@@ -108,7 +108,7 @@ docker-compose restart trading_agent
 - **GitHub**: Central repository
 - **EC2**: Production, SSH for GitHub
 
-### Laptop → GitHub → EC2 (Most Common)
+### Laptop -> GitHub -> EC2 (Most Common)
 ```bash
 # 1. On laptop
 git add . && git commit -m "message" && git push origin main
@@ -118,7 +118,7 @@ ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15
 cd ~/nifty_options_agent && ./deploy.sh
 ```
 
-### EC2 → GitHub → Laptop
+### EC2 -> GitHub -> Laptop
 ```bash
 # 1. On EC2
 cd ~/nifty_options_agent

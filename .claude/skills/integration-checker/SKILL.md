@@ -1,5 +1,5 @@
 ---
-name: Integration Checker
+name: integration-checker
 description: Cross-module impact analysis for NIFTY options codebase
 ---
 
@@ -18,34 +18,34 @@ You are the integration expert for the NIFTY options trading system. You analyze
 ### Module Dependency Graph
 ```
 config.py (Base - no dependencies)
-    │
-    ├── data_pipeline.py (WebSocket → OHLCV bars)
-    │       │
-    │       └── swing_detector.py (Swing detection)
-    │               │
-    │               └── continuous_filter.py (Filtration)
-    │                       │
-    │                       └── order_manager.py (Order placement)
-    │                               │
-    │                               ├── position_tracker.py (Position tracking)
-    │                               │
-    │                               └── state_manager.py (Persistence)
-    │
-    ├── telegram_notifier.py (Alerts - independent)
-    │
-    └── monitor_dashboard/ (Monitoring - reads state_manager)
+    |
+    +-- data_pipeline.py (WebSocket -> OHLCV bars)
+    |       |
+    |       +-- swing_detector.py (Swing detection)
+    |               |
+    |               +-- continuous_filter.py (Filtration)
+    |                       |
+    |                       +-- order_manager.py (Order placement)
+    |                               |
+    |                               +-- position_tracker.py (Position tracking)
+    |                               |
+    |                               +-- state_manager.py (Persistence)
+    |
+    +-- telegram_notifier.py (Alerts - independent)
+    |
+    +-- monitor_dashboard/ (Monitoring - reads state_manager)
 ```
 
 ### Data Flow
 ```
 1. WebSocket tick
-   └─→ data_pipeline.py: Aggregate to 1-min bars
-       └─→ swing_detector.py: Detect swing points
-           └─→ continuous_filter.py: Apply filters
-               └─→ order_manager.py: Place/manage orders
-                   └─→ position_tracker.py: Track R-multiples
-                       └─→ state_manager.py: Persist state
-                           └─→ telegram_notifier.py: Send alerts
+   +-> data_pipeline.py: Aggregate to 1-min bars
+       +-> swing_detector.py: Detect swing points
+           +-> continuous_filter.py: Apply filters
+               +-> order_manager.py: Place/manage orders
+                   +-> position_tracker.py: Track R-multiples
+                       +-> state_manager.py: Persist state
+                           +-> telegram_notifier.py: Send alerts
 ```
 
 ## What You Check
@@ -177,28 +177,28 @@ If config.py changes:
 ### Pattern 1: Config Parameter Change
 ```
 config.py: R_VALUE changed
-    │
-    ├─→ order_manager.py: Position sizing affected
-    ├─→ position_tracker.py: R-multiple calculation affected
-    └─→ monitor_dashboard: Display values affected
+    |
+    +-> order_manager.py: Position sizing affected
+    +-> position_tracker.py: R-multiple calculation affected
+    +-> monitor_dashboard: Display values affected
 ```
 
 ### Pattern 2: Swing Detector Change
 ```
 swing_detector.py: swing format changed
-    │
-    ├─→ continuous_filter.py: Must update to new format
-    ├─→ order_manager.py: May need swing data updates
-    └─→ state_manager.py: Database schema may need update
+    |
+    +-> continuous_filter.py: Must update to new format
+    +-> order_manager.py: May need swing data updates
+    +-> state_manager.py: Database schema may need update
 ```
 
 ### Pattern 3: Order Manager Change
 ```
 order_manager.py: order structure changed
-    │
-    ├─→ position_tracker.py: Position creation affected
-    ├─→ state_manager.py: Order persistence affected
-    └─→ telegram_notifier.py: Alert format may change
+    |
+    +-> position_tracker.py: Position creation affected
+    +-> state_manager.py: Order persistence affected
+    +-> telegram_notifier.py: Alert format may change
 ```
 
 ## Output Format
@@ -244,7 +244,7 @@ When changes span multiple domains:
 Example:
 ```
 swing_detector.py change
-├─→ trading-strategy agent (owner)
-├─→ order-execution agent (affected)
-└─→ state-management agent (affected)
++-> trading-strategy agent (owner)
++-> order-execution agent (affected)
++-> state-management agent (affected)
 ```

@@ -1,5 +1,5 @@
 ---
-name: E2E Workflow
+name: e2e-workflow
 description: End-to-end workflow validation for NIFTY options trading
 ---
 
@@ -18,71 +18,71 @@ You are the end-to-end workflow validation expert for the NIFTY options trading 
 ## Complete Trading Pipeline
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           TRADING PIPELINE                                   │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  1. DATA PIPELINE (data_pipeline.py)                                        │
-│     ┌─────────────────┐                                                     │
-│     │ WebSocket Tick  │ → Aggregate → OHLCV Bar + VWAP                      │
-│     │ {ltp, volume}   │              {open, high, low, close, volume, vwap} │
-│     └─────────────────┘                                                     │
-│              │                                                               │
-│              ▼                                                               │
-│  2. SWING DETECTION (swing_detector.py)                                     │
-│     ┌─────────────────┐                                                     │
-│     │ Watch Counters  │ → Confirm → Swing Point                             │
-│     │ low_watch=2     │            {type, price, bar_idx, vwap}             │
-│     └─────────────────┘                                                     │
-│              │                                                               │
-│              ▼                                                               │
-│  3. STATIC FILTER (continuous_filter.py)                                    │
-│     ┌─────────────────┐                                                     │
-│     │ Price 100-300   │ → Check → swing_candidates                          │
-│     │ VWAP Premium 4% │            {symbol: swing_data}                     │
-│     └─────────────────┘                                                     │
-│              │                                                               │
-│              ▼                                                               │
-│  4. DYNAMIC FILTER (continuous_filter.py)                                   │
-│     ┌─────────────────┐                                                     │
-│     │ SL% 2-10%       │ → Check → qualified_candidates                      │
-│     │ Every tick      │            [qualified swings]                       │
-│     └─────────────────┘                                                     │
-│              │                                                               │
-│              ▼                                                               │
-│  5. TIE-BREAKER (continuous_filter.py)                                      │
-│     ┌─────────────────┐                                                     │
-│     │ SL closest 10   │ → Select → current_best                             │
-│     │ Multiple of 100 │            {CE: best, PE: best}                     │
-│     └─────────────────┘                                                     │
-│              │                                                               │
-│              ▼                                                               │
-│  6. ORDER PLACEMENT (order_manager.py)                                      │
-│     ┌─────────────────┐                                                     │
-│     │ SL Order        │ → Place → Pending Order                             │
-│     │ trigger - tick  │            {order_id, symbol, status}               │
-│     └─────────────────┘                                                     │
-│              │                                                               │
-│              ▼                                                               │
-│  7. ORDER FILL (order_manager.py)                                           │
-│     ┌─────────────────┐                                                     │
-│     │ Price triggers  │ → Fill → Position + Exit SL                         │
-│     │ Order executes  │          {position_id, entry, sl_order}             │
-│     └─────────────────┘                                                     │
-│              │                                                               │
-│              ▼                                                               │
-│  8. POSITION TRACKING (position_tracker.py)                                 │
-│     ┌─────────────────┐                                                     │
-│     │ R-Multiple      │ → Track → PnL + Daily Summary                       │
-│     │ Daily limits    │           {cumulative_r, daily_pnl}                 │
-│     └─────────────────┘                                                     │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------------------+
+|                           TRADING PIPELINE                                   |
++-----------------------------------------------------------------------------+
+|                                                                              |
+|  1. DATA PIPELINE (data_pipeline.py)                                        |
+|     +------------------+                                                     |
+|     | WebSocket Tick   | -> Aggregate -> OHLCV Bar + VWAP                   |
+|     | {ltp, volume}    |               {open, high, low, close, volume, vwap}|
+|     +------------------+                                                     |
+|              |                                                               |
+|              v                                                               |
+|  2. SWING DETECTION (swing_detector.py)                                     |
+|     +------------------+                                                     |
+|     | Watch Counters   | -> Confirm -> Swing Point                          |
+|     | low_watch=2      |             {type, price, bar_idx, vwap}            |
+|     +------------------+                                                     |
+|              |                                                               |
+|              v                                                               |
+|  3. STATIC FILTER (continuous_filter.py)                                    |
+|     +------------------+                                                     |
+|     | Price 100-300    | -> Check -> swing_candidates                       |
+|     | VWAP Premium 4%  |             {symbol: swing_data}                    |
+|     +------------------+                                                     |
+|              |                                                               |
+|              v                                                               |
+|  4. DYNAMIC FILTER (continuous_filter.py)                                   |
+|     +------------------+                                                     |
+|     | SL% 2-10%        | -> Check -> qualified_candidates                   |
+|     | Every tick       |             [qualified swings]                      |
+|     +------------------+                                                     |
+|              |                                                               |
+|              v                                                               |
+|  5. TIE-BREAKER (continuous_filter.py)                                      |
+|     +------------------+                                                     |
+|     | SL closest 10    | -> Select -> current_best                          |
+|     | Multiple of 100  |             {CE: best, PE: best}                    |
+|     +------------------+                                                     |
+|              |                                                               |
+|              v                                                               |
+|  6. ORDER PLACEMENT (order_manager.py)                                      |
+|     +------------------+                                                     |
+|     | SL Order         | -> Place -> Pending Order                          |
+|     | trigger - tick   |             {order_id, symbol, status}              |
+|     +------------------+                                                     |
+|              |                                                               |
+|              v                                                               |
+|  7. ORDER FILL (order_manager.py)                                           |
+|     +------------------+                                                     |
+|     | Price triggers   | -> Fill -> Position + Exit SL                      |
+|     | Order executes   |           {position_id, entry, sl_order}            |
+|     +------------------+                                                     |
+|              |                                                               |
+|              v                                                               |
+|  8. POSITION TRACKING (position_tracker.py)                                 |
+|     +------------------+                                                     |
+|     | R-Multiple       | -> Track -> PnL + Daily Summary                    |
+|     | Daily limits     |            {cumulative_r, daily_pnl}                |
+|     +------------------+                                                     |
+|                                                                              |
++-----------------------------------------------------------------------------+
 ```
 
 ## Workflow Validation Checkpoints
 
-### Checkpoint 1: Tick → Bar
+### Checkpoint 1: Tick -> Bar
 **Verify**:
 - Ticks aggregate correctly into 1-min bars
 - Bar OHLC values are accurate
@@ -98,7 +98,7 @@ assert bar['high'] == max(tick['ltp'] for tick in ticks_60)
 assert bar['low'] == min(tick['ltp'] for tick in ticks_60)
 ```
 
-### Checkpoint 2: Bar → Swing
+### Checkpoint 2: Bar -> Swing
 **Verify**:
 - Watch counters increment on HH+HC / LL+LC
 - Trigger at counter = 2
@@ -114,7 +114,7 @@ swings = detector.get_swings()
 assert swings[-1]['type'] == 'LOW'
 ```
 
-### Checkpoint 3: Swing → Static Filter
+### Checkpoint 3: Swing -> Static Filter
 **Verify**:
 - Price range check (100-300)
 - VWAP premium check (>=4%)
@@ -130,7 +130,7 @@ assert result['passed'] == True
 assert swing['symbol'] in filter.swing_candidates
 ```
 
-### Checkpoint 4: Candidate → Dynamic Filter
+### Checkpoint 4: Candidate -> Dynamic Filter
 **Verify**:
 - SL% calculated correctly (highest_high + 1 - entry) / entry
 - SL% within 2-10% range
@@ -147,7 +147,7 @@ assert result['sl_percent'] == 0.06
 assert result['passed'] == True
 ```
 
-### Checkpoint 5: Qualified → Best Selection
+### Checkpoint 5: Qualified -> Best Selection
 **Verify**:
 - SL points distance from 10 calculated
 - Multiple of 100 preference applied
@@ -167,7 +167,7 @@ best = filter.select_best(candidates)
 assert best['premium'] == 160
 ```
 
-### Checkpoint 6: Best → Order Placement
+### Checkpoint 6: Best -> Order Placement
 **Verify**:
 - Order placed when strike qualifies
 - Trigger = swing_low - tick_size
@@ -184,7 +184,7 @@ assert order['limit_price'] == 146.95
 assert order['order_type'] == 'SL'
 ```
 
-### Checkpoint 7: Order → Fill → Position
+### Checkpoint 7: Order -> Fill -> Position
 **Verify**:
 - Position created on fill
 - Entry price from fill
@@ -203,7 +203,7 @@ assert position['entry_price'] == 148
 assert position['sl_order']['trigger'] == 156
 ```
 
-### Checkpoint 8: Position → R-Multiple
+### Checkpoint 8: Position -> R-Multiple
 **Verify**:
 - R-multiple calculated correctly
 - Daily cumulative R tracked
@@ -315,32 +315,32 @@ assert r_multiple == 1.0
 
 ```
 [E2E WORKFLOW VALIDATION]
-Flow: Tick → Order Placement
+Flow: Tick -> Order Placement
 Status: VALIDATED
 
 [CHECKPOINT RESULTS]
-1. Tick → Bar: PASS
-   - 60 ticks → 1 bar (correct)
+1. Tick -> Bar: PASS
+   - 60 ticks -> 1 bar (correct)
    - VWAP: 150.5 (correct)
 
-2. Bar → Swing: PASS
+2. Bar -> Swing: PASS
    - Watch counter: 2 (triggered)
    - Swing type: LOW (correct)
    - Price: 148 (correct)
 
-3. Swing → Static: PASS
+3. Swing -> Static: PASS
    - Price range: 148 in [100,300]
    - VWAP premium: 5.7% >= 4%
 
-4. Static → Dynamic: PASS
+4. Static -> Dynamic: PASS
    - SL%: 5.4% in [2%,10%]
    - Updates on each tick: YES
 
-5. Dynamic → Best: PASS
+5. Dynamic -> Best: PASS
    - Selected as best CE
    - Tie-breaker criteria met
 
-6. Best → Order: PASS
+6. Best -> Order: PASS
    - Order type: SL
    - Trigger: 147.95
    - Limit: 144.95

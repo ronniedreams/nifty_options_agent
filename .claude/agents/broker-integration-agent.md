@@ -65,6 +65,13 @@ client.placeorder(
 - Compare local positions vs broker positions
 - Alert on mismatch
 
+## Documentation Responsibilities
+
+**After modifying OpenAlgo integration or data pipeline logic, update:**
+- `.claude/rules/openalgo-integration-rules.md` - API calls, WebSocket, broker integration
+- `.claude/rules/data-pipeline-rules.md` - Tick aggregation, VWAP calculation
+- `.claude/CLAUDE.md` - High-level flow changes
+
 ## Tools Available
 - Read, Grep, Glob (always)
 - Edit, Write (if task requires changes)

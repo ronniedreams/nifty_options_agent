@@ -62,6 +62,13 @@ NO_ORDER → ORDER_PLACED → ORDER_FILLED → POSITION_ACTIVE → EXITED
 - Exit all at -5R (DAILY_STOP_R)
 - Force exit at 3:15 PM (FORCE_EXIT_TIME)
 
+## Documentation Responsibilities
+
+**After modifying order placement or position management logic, update:**
+- `baseline_v1_live/ORDER_EXECUTION_THEORY.md` - Order placement, position sizing, lifecycle
+- `.claude/rules/trading-rules.md` - Trading patterns and validations
+- `.claude/CLAUDE.md` - High-level behavior summaries
+
 ## Tools Available
 - Read, Grep, Glob (always)
 - Edit, Write (if task requires changes)

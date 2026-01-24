@@ -1,5 +1,37 @@
 # Sub-Agents Complete Reference Guide
 
+## Quick Reference Card
+
+### Skills (Slash Commands)
+| Skill | Use When |
+|-------|----------|
+| `/trading-strategy` | Swing detection issues, filter problems, tie-breaker questions |
+| `/order-execution` | Order cancelled, position sizing, daily limits, SL placement |
+| `/broker-integration` | WebSocket issues, ticks stopped, API errors, connection problems |
+| `/state-management` | Crash recovery, database queries, schema changes |
+| `/monitoring-alerts` | Dashboard issues, Telegram notifications, health monitoring |
+| `/infrastructure` | Deployment, Docker, config changes, git sync |
+| `/code-reviewer` | Review code before commit for safety/quality |
+| `/integration-checker` | Check how changes affect other modules |
+| `/test-runner` | Run tests, validate system, check config |
+| `/e2e-workflow` | Validate complete trading pipeline |
+| `/pre-commit` | Full quality check workflow before commit |
+
+### Subagents (Autonomous)
+Use `Task` tool with `subagent_type` parameter:
+- `trading-strategy-agent` - Swing/filter investigation
+- `order-execution-agent` - Order/position analysis
+- `broker-integration-agent` - API/WebSocket debugging
+- `state-management-agent` - Database operations
+- `monitoring-alerts-agent` - Dashboard/alerts work
+- `infrastructure-agent` - Config/deployment tasks
+- `code-reviewer-agent` - Automated code review
+- `integration-checker-agent` - Impact analysis
+- `test-runner-agent` - Test execution
+- `e2e-workflow-agent` - Pipeline validation
+
+---
+
 ## Overview
 
 The NIFTY Options Trading System uses **specialized sub-agents** to handle different functional domains. This architecture:
@@ -10,7 +42,7 @@ The NIFTY Options Trading System uses **specialized sub-agents** to handle diffe
 
 ---
 
-## Agent Types: Skills vs Task Agents
+## Agent Types: Skills vs Subagents
 
 ### Skills (Slash Commands)
 **What:** Interactive mode where you stay in the conversation with specialized context loaded.
@@ -22,12 +54,12 @@ The NIFTY Options Trading System uses **specialized sub-agents** to handle diffe
 - You need to ask follow-up questions
 - The task requires back-and-forth discussion
 
-**Location:** `.claude/skills/`
+**Location:** `.claude/skills/<skill-name>/SKILL.md`
 
-### Task Agents
+### Subagents (Autonomous)
 **What:** Autonomous delegation where the agent works independently and returns results.
 
-**How to invoke:** Via Task tool with appropriate `subagent_type`
+**How to invoke:** Via Task tool with `subagent_type` parameter
 
 **When to use:**
 - The task is well-defined and self-contained
@@ -35,6 +67,9 @@ The NIFTY Options Trading System uses **specialized sub-agents** to handle diffe
 - You need research done in the background
 
 **Location:** `.claude/agents/`
+
+**Built-in subagents:** `Explore`, `Plan`, `Bash`, `general-purpose`
+**Custom subagents:** Our domain-specific agents like `trading-strategy-agent`
 
 ---
 
@@ -47,7 +82,7 @@ These agents handle the core functional areas of the trading system.
 ### Agent 1: Trading Strategy
 
 **Skill:** `/trading-strategy`
-**Task Agent:** `trading-strategy-agent`
+**Subagent:** `trading-strategy-agent`
 
 #### Responsibility
 Swing detection and strike filtration - the core trading logic that determines WHAT to trade.
@@ -118,7 +153,7 @@ Agent Investigation:
 ### Agent 2: Order Execution
 
 **Skill:** `/order-execution`
-**Task Agent:** `order-execution-agent`
+**Subagent:** `order-execution-agent`
 
 #### Responsibility
 Proactive order placement, order lifecycle, position tracking, and R-multiple calculations.
@@ -201,7 +236,7 @@ Agent Investigation:
 ### Agent 3: Broker Integration
 
 **Skill:** `/broker-integration`
-**Task Agent:** `broker-integration-agent`
+**Subagent:** `broker-integration-agent`
 
 #### Responsibility
 OpenAlgo API interactions, WebSocket data feed, position reconciliation, and connection management.
@@ -284,7 +319,7 @@ Agent Investigation:
 ### Agent 4: State Management
 
 **Skill:** `/state-management`
-**Task Agent:** `state-management-agent`
+**Subagent:** `state-management-agent`
 
 #### Responsibility
 SQLite database operations, crash recovery, schema management, and query optimization.
@@ -357,7 +392,7 @@ ORDER BY entry_time;
 ### Agent 5: Monitoring Alerts
 
 **Skill:** `/monitoring-alerts`
-**Task Agent:** `monitoring-alerts-agent`
+**Subagent:** `monitoring-alerts-agent`
 
 #### Responsibility
 Streamlit dashboard, Telegram notifications, health monitoring, and visualization.
@@ -426,7 +461,7 @@ Risk: 1R (6,500)
 ### Agent 6: Infrastructure
 
 **Skill:** `/infrastructure`
-**Task Agent:** `infrastructure-agent`
+**Subagent:** `infrastructure-agent`
 
 #### Responsibility
 Configuration management, Docker containers, EC2 deployment, and three-way git sync.
@@ -514,7 +549,7 @@ These agents ensure code quality, safety, and proper testing.
 ### Agent 7: Code Reviewer
 
 **Skill:** `/code-reviewer`
-**Task Agent:** `code-reviewer-agent`
+**Subagent:** `code-reviewer-agent`
 
 #### Responsibility
 Review code changes for quality, safety rule violations, pattern consistency, and potential bugs.
@@ -586,7 +621,7 @@ APPROVED with minor suggestions
 ### Agent 8: Integration Checker
 
 **Skill:** `/integration-checker`
-**Task Agent:** `integration-checker-agent`
+**Subagent:** `integration-checker-agent`
 
 #### Responsibility
 Analyze how changes in one module affect others, ensuring cross-module consistency.
@@ -667,7 +702,7 @@ CAUTION - continuous_filter.py needs update
 ### Agent 9: Test Runner
 
 **Skill:** `/test-runner`
-**Task Agent:** `test-runner-agent`
+**Subagent:** `test-runner-agent`
 
 #### Responsibility
 Write tests, run system validation, and verify behavior before deployment.
@@ -747,7 +782,7 @@ Failed: 1
 ### Agent 10: E2E Workflow
 
 **Skill:** `/e2e-workflow`
-**Task Agent:** `e2e-workflow-agent`
+**Subagent:** `e2e-workflow-agent`
 
 #### Responsibility
 Validate complete trading workflows from data ingestion to order execution.
@@ -938,7 +973,7 @@ Step 5: infrastructure
 
 ## Quick Reference Table
 
-| User Intent | Agent | Skill | Task Agent |
+| User Intent | Agent | Skill | Subagent |
 |-------------|-------|-------|------------|
 | Swing not detecting | Trading Strategy | `/trading-strategy` | `trading-strategy-agent` |
 | Candidate disqualified | Trading Strategy | `/trading-strategy` | `trading-strategy-agent` |
@@ -969,18 +1004,29 @@ Step 5: infrastructure
 
 ```
 .claude/
-├── skills/                          # Slash command definitions
-│   ├── trading-strategy.md
-│   ├── order-execution.md
-│   ├── broker-integration.md
-│   ├── state-management.md
-│   ├── monitoring-alerts.md
-│   ├── infrastructure.md
-│   ├── code-reviewer.md
-│   ├── integration-checker.md
-│   ├── test-runner.md
-│   ├── e2e-workflow.md
-│   └── pre-commit.md
+├── skills/                          # Slash command definitions (each in subdirectory)
+│   ├── trading-strategy/
+│   │   └── SKILL.md
+│   ├── order-execution/
+│   │   └── SKILL.md
+│   ├── broker-integration/
+│   │   └── SKILL.md
+│   ├── state-management/
+│   │   └── SKILL.md
+│   ├── monitoring-alerts/
+│   │   └── SKILL.md
+│   ├── infrastructure/
+│   │   └── SKILL.md
+│   ├── code-reviewer/
+│   │   └── SKILL.md
+│   ├── integration-checker/
+│   │   └── SKILL.md
+│   ├── test-runner/
+│   │   └── SKILL.md
+│   ├── e2e-workflow/
+│   │   └── SKILL.md
+│   └── pre-commit/
+│       └── SKILL.md
 │
 ├── agents/                          # Task agent definitions
 │   ├── trading-strategy-agent.md
@@ -1004,3 +1050,17 @@ Step 5: infrastructure
 ├── CLAUDE.md                        # Main project documentation
 └── SUB_AGENTS_REFERENCE.md          # This file
 ```
+
+---
+
+## Skill Frontmatter Format
+
+Each skill requires this YAML frontmatter:
+```yaml
+---
+name: skill-name          # Lowercase, hyphenated (becomes /slash-command)
+description: Brief description of what the skill does
+---
+```
+
+**Important:** Skills must be in `<skill-name>/SKILL.md` format to be discovered by Claude Code.

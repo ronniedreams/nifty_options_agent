@@ -48,6 +48,14 @@ Autonomous agent for code quality and safety review. Reviews code changes for qu
 - [ ] State transitions correct
 - [ ] Pool membership correct
 
+### Documentation Drift Checks
+- [ ] Config changes reflected in CLAUDE.md?
+- [ ] Swing/filter logic reflected in theory files?
+- [ ] Order execution changes in ORDER_EXECUTION_THEORY.md?
+- [ ] Schema changes in CLAUDE.md database section?
+- [ ] New agent in SUB_AGENTS_REFERENCE.md?
+- [ ] OpenAlgo changes in integration rules?
+
 ### Style Checks
 - [ ] No over-engineering
 - [ ] Minimal changes
@@ -72,12 +80,45 @@ Lines Changed: [range]
 [WARNINGS] (count)
 - Line X: [issue description]
 
+[DOCUMENTATION DRIFT] (count)
+- Change: [what changed]
+  Required Docs: [file(s) to update]
+  Reason: [why update needed]
+
 [STYLE NOTES] (count)
 - Line X: [suggestion]
 
 [VERDICT]
-APPROVED / APPROVED with warnings / NEEDS CHANGES
+APPROVED / APPROVED with doc updates needed / NEEDS CHANGES
 ```
+
+## Documentation Drift Patterns
+
+**Detect when code changes require doc updates:**
+
+1. **Config Parameter Changes** (config.py modified)
+   - Flag if: New parameter OR changed default value
+   - Required: Update CLAUDE.md (Key Configuration section)
+
+2. **Swing/Filter Logic** (swing_detector.py, continuous_filter.py)
+   - Flag if: Watch counter logic, filter criteria, tie-breaker rules modified
+   - Required: Update SWING_DETECTION_THEORY.md, STRIKE_FILTRATION_THEORY.md
+
+3. **Order Execution** (order_manager.py, position_tracker.py)
+   - Flag if: SL calculation, position sizing, order states modified
+   - Required: Update ORDER_EXECUTION_THEORY.md
+
+4. **Database Schema** (state_manager.py schema changes)
+   - Flag if: New table, new column, modified constraint
+   - Required: Update CLAUDE.md (Database Schema section)
+
+5. **New Agent** (new .md in .claude/skills/ or .claude/agents/)
+   - Flag if: New agent file added
+   - Required: Update SUB_AGENTS_REFERENCE.md
+
+6. **OpenAlgo Integration** (data_pipeline.py, order API calls)
+   - Flag if: API endpoints, retry logic, WebSocket handling modified
+   - Required: Update openalgo-integration-rules.md
 
 ## Common Issues
 
@@ -93,6 +134,11 @@ APPROVED / APPROVED with warnings / NEEDS CHANGES
 - Over-commenting
 - Magic numbers
 - Missing type hints
+
+### Documentation Drift (Must Address)
+- Code behavior changed but docs outdated
+- New functionality not documented
+- Config parameter added without doc update
 
 ### Style (Consider Fixing)
 - Emojis in log messages

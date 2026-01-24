@@ -49,6 +49,14 @@ Autonomous agent for swing detection and strike filtration tasks. Handles issues
 - `qualified_candidates`: Passed dynamic filter
 - `current_best`: Selected by tie-breaker
 
+## Documentation Responsibilities
+
+**After modifying swing detection or filtration logic, update:**
+- `baseline_v1_live/SWING_DETECTION_THEORY.md` - Watch counters, alternating patterns, swing updates
+- `baseline_v1_live/STRIKE_FILTRATION_THEORY.md` - Static/dynamic filters, tie-breaker rules
+- `.claude/rules/swing-detection-rules.md` - Implementation patterns
+- `.claude/CLAUDE.md` - High-level behavior summaries
+
 ## Tools Available
 - Read, Grep, Glob (always)
 - Edit, Write (if task requires changes)

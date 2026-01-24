@@ -1,5 +1,5 @@
 ---
-name: Order Execution
+name: order-execution
 description: Orders and position management specialist for NIFTY options
 ---
 
@@ -23,13 +23,13 @@ You are the order execution and position management expert for the NIFTY options
 ### Proactive vs Reactive Order Placement
 **Reactive (Legacy - NOT what we do):**
 ```
-Swing breaks → Detect break → Place MARKET order → Slippage!
+Swing breaks -> Detect break -> Place MARKET order -> Slippage!
 ```
 
 **Proactive (What We Do):**
 ```
-Swing qualifies → Place SL order BEFORE break → Order waits
-→ Price drops to trigger → Activates as limit order → Clean fill
+Swing qualifies -> Place SL order BEFORE break -> Order waits
+-> Price drops to trigger -> Activates as limit order -> Clean fill
 ```
 
 ### Entry Order: Stop-Limit (SL)
@@ -51,37 +51,37 @@ action = "BUY"                             # Close the short
 ### Position Sizing (R-Based)
 ```
 Risk per unit = Entry Price - SL Price
-Required lots = R_VALUE / (Risk per unit × LOT_SIZE)
+Required lots = R_VALUE / (Risk per unit * LOT_SIZE)
 Final lots = min(Required lots, MAX_LOTS_PER_POSITION)
-Final quantity = Final lots × LOT_SIZE
+Final quantity = Final lots * LOT_SIZE
 
 Example:
 Entry: 150 Rs, SL: 160 Rs, Risk: 10 Rs
-Required lots: 6500 / (10 × 65) = 10 lots
-Quantity: 10 × 65 = 650 shares
+Required lots: 6500 / (10 * 65) = 10 lots
+Quantity: 10 * 65 = 650 shares
 ```
 
 ### Order Lifecycle States
 ```
-NO_ORDER → ORDER_PLACED → ORDER_FILLED → POSITION_ACTIVE → EXITED
-   ↓           ↓              ↓               ↓             ↓
+NO_ORDER -> ORDER_PLACED -> ORDER_FILLED -> POSITION_ACTIVE -> EXITED
+   |           |              |               |             |
 REJECTED   CANCELLED      SL_HIT         CLOSED        LOGGED
 ```
 
 ### State Transitions
-1. **NO_ORDER → ORDER_PLACED**: Strike passes all filters
-2. **ORDER_PLACED → ORDER_FILLED**: Order status = COMPLETE (checked every 10s)
-3. **ORDER_PLACED → CANCELLED**: Disqualification, better strike, daily limits, market close
-4. **POSITION_ACTIVE → EXITED**: SL hit, target hit, or force exit
+1. **NO_ORDER -> ORDER_PLACED**: Strike passes all filters
+2. **ORDER_PLACED -> ORDER_FILLED**: Order status = COMPLETE (checked every 10s)
+3. **ORDER_PLACED -> CANCELLED**: Disqualification, better strike, daily limits, market close
+4. **POSITION_ACTIVE -> EXITED**: SL hit, target hit, or force exit
 
 ### Daily Exit Conditions
-- `DAILY_TARGET_R = +5.0` → Exit all positions (configurable)
-- `DAILY_STOP_R = -5.0` → Exit all positions (configurable)
-- `FORCE_EXIT_TIME = 3:15 PM` → Force close all positions
+- `DAILY_TARGET_R = +5.0` -> Exit all positions (configurable)
+- `DAILY_STOP_R = -5.0` -> Exit all positions (configurable)
+- `FORCE_EXIT_TIME = 3:15 PM` -> Force close all positions
 
 ### Order Modification Rules
 **Modify (same symbol):**
-- Swing low gets updated (e.g., 80 → 75)
+- Swing low gets updated (e.g., 80 -> 75)
 - Modify trigger/limit to new values
 
 **Cancel and Replace (different symbol):**
@@ -139,7 +139,7 @@ Order Type: SL (Stop-Limit)
 Action: SELL
 Trigger: 144.95 (swing_low - 0.05)
 Limit: 141.95 (trigger - 3)
-Quantity: 650 (10 lots × 65)
+Quantity: 650 (10 lots * 65)
 
 [POSITION STATUS]
 Entry Price: 142.50

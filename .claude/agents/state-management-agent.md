@@ -86,6 +86,13 @@ swing_log (
 3. Restore pending orders
 4. Resume from last state
 
+## Documentation Responsibilities
+
+**After modifying database schema or state management logic, update:**
+- `.claude/CLAUDE.md` (Database Schema section) - Schema changes
+- `.claude/rules/trading-rules.md` (State Persistence section) - State management patterns
+- Migration script comments - Document schema changes
+
 ## Tools Available
 - Read, Grep, Glob (always)
 - Edit, Write (if task requires changes)

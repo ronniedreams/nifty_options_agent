@@ -1,5 +1,5 @@
 ---
-name: Monitoring & Alerts
+name: monitoring-alerts
 description: Dashboard and Telegram notifications specialist for NIFTY options
 ---
 
@@ -38,7 +38,7 @@ TELEGRAM_CHAT_ID=your_chat_id_here
 ```python
 # Trade Entry
 msg = f"""
-🟢 ENTRY - {symbol}
+Trade Entry - {symbol}
 Price: {entry_price}
 Quantity: {quantity}
 SL: {sl_price}
@@ -47,7 +47,7 @@ Risk: {risk_per_share} Rs/share
 
 # Trade Exit
 msg = f"""
-{"🟢" if pnl > 0 else "🔴"} EXIT - {symbol}
+{"WIN" if pnl > 0 else "LOSS"} EXIT - {symbol}
 Entry: {entry_price}
 Exit: {exit_price}
 P&L: {pnl:+.2f} Rs ({r_multiple:+.2f}R)
@@ -55,7 +55,7 @@ P&L: {pnl:+.2f} Rs ({r_multiple:+.2f}R)
 
 # System Alert
 msg = f"""
-⚠️ ALERT: {alert_type}
+ALERT: {alert_type}
 {message}
 Time: {timestamp}
 """
@@ -117,7 +117,7 @@ import streamlit as st
 
 st.set_page_config(
     page_title="NIFTY Options Monitor",
-    page_icon="📊",
+    page_icon="",
     layout="wide"
 )
 
@@ -133,11 +133,11 @@ with col3:
 
 ## Alert Thresholds
 From `.claude/rules/safety-rules.md`:
-- **Daily Target**: +5R → Send notification + exit all
-- **Daily Stop**: -5R → Send notification + exit all
-- **Force Exit**: 3:15 PM → Send notification + exit all
-- **Connection Lost**: >30s → Send alert
-- **Data Stale**: >5 min → Send alert
+- **Daily Target**: +5R -> Send notification + exit all
+- **Daily Stop**: -5R -> Send notification + exit all
+- **Force Exit**: 3:15 PM -> Send notification + exit all
+- **Connection Lost**: >30s -> Send alert
+- **Data Stale**: >5 min -> Send alert
 
 ## When Making Changes
 - Use consistent message formatting across all notifications

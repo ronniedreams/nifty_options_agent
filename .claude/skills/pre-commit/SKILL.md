@@ -1,5 +1,5 @@
 ---
-name: Pre-Commit
+name: pre-commit
 description: Quality checks workflow before committing code changes
 ---
 
@@ -11,36 +11,36 @@ You orchestrate the pre-commit quality checks for the NIFTY options trading syst
 ## Workflow Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    PRE-COMMIT WORKFLOW                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  1. IDENTIFY CHANGES                                            │
-│     └─ git diff --name-only                                     │
-│                                                                 │
-│  2. CODE REVIEW (code-reviewer)                                 │
-│     ├─ Safety rule violations                                   │
-│     ├─ Pattern consistency                                      │
-│     └─ Potential bugs                                           │
-│                                                                 │
-│  3. INTEGRATION CHECK (integration-checker)                     │
-│     ├─ Affected modules                                         │
-│     ├─ Interface contracts                                      │
-│     └─ Data flow consistency                                    │
-│                                                                 │
-│  4. SYSTEM VALIDATION (test-runner)                             │
-│     ├─ python -m baseline_v1_live.check_system                  │
-│     └─ Configuration verification                               │
-│                                                                 │
-│  5. E2E VERIFICATION (e2e-workflow) [if trading logic]          │
-│     ├─ Trace affected workflows                                 │
-│     └─ Validate pipeline integrity                              │
-│                                                                 │
-│  6. REPORT & COMMIT                                             │
-│     ├─ Summarize findings                                       │
-│     └─ Commit if all checks pass                                │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
++------------------------------------------------------------------+
+|                    PRE-COMMIT WORKFLOW                            |
++------------------------------------------------------------------+
+|                                                                   |
+|  1. IDENTIFY CHANGES                                              |
+|     +-- git diff --name-only                                      |
+|                                                                   |
+|  2. CODE REVIEW (code-reviewer)                                   |
+|     +-- Safety rule violations                                    |
+|     +-- Pattern consistency                                       |
+|     +-- Potential bugs                                            |
+|                                                                   |
+|  3. INTEGRATION CHECK (integration-checker)                       |
+|     +-- Affected modules                                          |
+|     +-- Interface contracts                                       |
+|     +-- Data flow consistency                                     |
+|                                                                   |
+|  4. SYSTEM VALIDATION (test-runner)                               |
+|     +-- python -m baseline_v1_live.check_system                   |
+|     +-- Configuration verification                                |
+|                                                                   |
+|  5. E2E VERIFICATION (e2e-workflow) [if trading logic]            |
+|     +-- Trace affected workflows                                  |
+|     +-- Validate pipeline integrity                               |
+|                                                                   |
+|  6. REPORT & COMMIT                                               |
+|     +-- Summarize findings                                        |
+|     +-- Commit if all checks pass                                 |
+|                                                                   |
++------------------------------------------------------------------+
 ```
 
 ## Step-by-Step Execution
@@ -116,12 +116,12 @@ python -m baseline_v1_live.check_system
 Invoke `/e2e-workflow` skill:
 
 **Validate**:
-- Tick → Bar aggregation
-- Bar → Swing detection
-- Swing → Filter qualification
-- Qualification → Order placement
-- Fill → Position creation
-- SL hit → Position exit
+- Tick -> Bar aggregation
+- Bar -> Swing detection
+- Swing -> Filter qualification
+- Qualification -> Order placement
+- Fill -> Position creation
+- SL hit -> Position exit
 
 ### Step 6: Report & Commit
 
@@ -129,37 +129,37 @@ Invoke `/e2e-workflow` skill:
 ```
 [PRE-COMMIT REPORT]
 Files Changed: 3
-├── baseline_v1_live/swing_detector.py
-├── baseline_v1_live/continuous_filter.py
-└── baseline_v1_live/config.py
++-- baseline_v1_live/swing_detector.py
++-- baseline_v1_live/continuous_filter.py
++-- baseline_v1_live/config.py
 
 [CODE REVIEW]
 Status: PASSED with warnings
-├── swing_detector.py: 2 warnings
-│   ├── Line 234: Consider type hint
-│   └── Line 256: Long line (82 chars)
-├── continuous_filter.py: CLEAN
-└── config.py: CLEAN
++-- swing_detector.py: 2 warnings
+|   +-- Line 234: Consider type hint
+|   +-- Line 256: Long line (82 chars)
++-- continuous_filter.py: CLEAN
++-- config.py: CLEAN
 
 [INTEGRATION CHECK]
 Status: PASSED
-├── Affected modules: 2
-│   ├── order_manager.py (uses swing_detector)
-│   └── baseline_v1_live.py (uses continuous_filter)
-└── No breaking changes detected
++-- Affected modules: 2
+|   +-- order_manager.py (uses swing_detector)
+|   +-- baseline_v1_live.py (uses continuous_filter)
++-- No breaking changes detected
 
 [SYSTEM VALIDATION]
 Status: PASSED
-├── OpenAlgo: Connected
-├── WebSocket: OK
-├── Database: Valid
-└── Config: Valid
++-- OpenAlgo: Connected
++-- WebSocket: OK
++-- Database: Valid
++-- Config: Valid
 
 [E2E WORKFLOW]
 Status: PASSED
-├── Swing detection: Verified
-├── Filter pipeline: Verified
-└── Order flow: Verified
++-- Swing detection: Verified
++-- Filter pipeline: Verified
++-- Order flow: Verified
 
 [OVERALL VERDICT]
 READY TO COMMIT

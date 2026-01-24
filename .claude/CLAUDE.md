@@ -789,17 +789,19 @@ The system uses specialized sub-agents to handle different functional domains. T
 
 **Skills** (Slash Commands) - Interactive work with specialized context. User stays in conversation.
 - Invoke with `/skill-name` (e.g., `/trading-strategy`, `/pre-commit`)
-- Located in `.claude/skills/`
+- Located in `.claude/skills/<skill-name>/SKILL.md`
 
-**Task Agents** - Autonomous delegation. Agent works independently and returns results.
+**Subagents** - Autonomous delegation. Agent works independently and returns results.
 - Invoke via Task tool with `subagent_type` parameter
 - Located in `.claude/agents/`
+- Built-in: `Explore`, `Plan`, `Bash`, `general-purpose`
+- Custom: Our domain-specific agents (e.g., `trading-strategy-agent`)
 
 ### Available Agents
 
 #### Domain Agents (6)
 
-| Agent | Skill | Task Agent | Responsibility |
+| Agent | Skill | Subagent | Responsibility |
 |-------|-------|------------|----------------|
 | Trading Strategy | `/trading-strategy` | `trading-strategy-agent` | Swing detection, filtration, tie-breakers |
 | Order Execution | `/order-execution` | `order-execution-agent` | Orders, positions, R-multiples |
@@ -810,7 +812,7 @@ The system uses specialized sub-agents to handle different functional domains. T
 
 #### Quality Agents (4)
 
-| Agent | Skill | Task Agent | Responsibility |
+| Agent | Skill | Subagent | Responsibility |
 |-------|-------|------------|----------------|
 | Code Reviewer | `/code-reviewer` | `code-reviewer-agent` | Safety, patterns, bugs |
 | Integration Checker | `/integration-checker` | `integration-checker-agent` | Cross-module impact |

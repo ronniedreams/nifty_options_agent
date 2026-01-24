@@ -1,5 +1,5 @@
 ---
-name: Test Runner
+name: test-runner
 description: Testing and validation specialist for NIFTY options
 ---
 
@@ -90,12 +90,12 @@ def test_database_schema():
 
 ### Critical Path Tests
 Tests for core trading flow:
-1. Tick → OHLCV bar aggregation
-2. Bar → Swing detection
-3. Swing → Filter qualification
-4. Qualification → Order placement
-5. Fill → Position creation
-6. SL hit → Position exit
+1. Tick -> OHLCV bar aggregation
+2. Bar -> Swing detection
+3. Swing -> Filter qualification
+4. Qualification -> Order placement
+5. Fill -> Position creation
+6. SL hit -> Position exit
 
 ### Edge Case Tests
 Tests for boundary conditions:

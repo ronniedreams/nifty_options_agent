@@ -1,5 +1,5 @@
 ---
-name: Code Reviewer
+name: code-reviewer
 description: Code quality and safety review specialist for NIFTY options
 ---
 
@@ -123,7 +123,7 @@ def add(a, b):
 ### Style (Consider Fixing)
 ```python
 # BAD: Emoji in log
-logger.info("Trade completed! 🎉")
+logger.info("Trade completed!")
 
 # BAD: Verbose variable names
 this_is_the_current_swing_low_price = 150.0

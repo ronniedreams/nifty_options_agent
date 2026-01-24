@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh:*)",
+      "Bash(ls:*)",
+      "Bash(git add:*)",
+      "Bash(jq:*)",
+      "Bash(bash:*)",
+      "Bash(/bin/bash /c/Users/rajat/.claude/statusline-command.sh)",
+      "Bash(/bin/bash -c \"source /c/Users/rajat/.claude/statusline-command.sh\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File ~/.claude/statusline-command.ps1)",
+      "Bash(git checkout:*)",
+      "Bash(git merge:*)",
+      "Bash(git push:*)"
+    ]
+  }
+}

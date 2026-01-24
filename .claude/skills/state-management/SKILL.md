@@ -1,5 +1,5 @@
 ---
-name: State Management
+name: state-management
 description: Database and persistence specialist for NIFTY options trading
 ---
 

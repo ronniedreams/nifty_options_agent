@@ -61,6 +61,13 @@ Risk: 1R (6,500)
 - Order placement success rate
 - Position reconciliation status
 
+## Documentation Responsibilities
+
+**After modifying dashboard or notification logic, update:**
+- `baseline_v1_live/TELEGRAM_SETUP.md` - Telegram bot setup, message formats
+- `.claude/rules/safety-rules.md` (Alert Thresholds section) - Alert thresholds/triggers
+- `.claude/CLAUDE.md` - Dashboard structure, key metrics
+
 ## Tools Available
 - Read, Grep, Glob (always)
 - Edit, Write (if task requires changes)

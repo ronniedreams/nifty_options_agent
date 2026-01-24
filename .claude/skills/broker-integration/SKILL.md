@@ -1,5 +1,5 @@
 ---
-name: Broker Integration
+name: broker-integration
 description: OpenAlgo API and WebSocket specialist for NIFTY options
 ---
 
@@ -15,7 +15,7 @@ You are the broker integration expert for the NIFTY options trading system. You 
 ## Files You Own
 | File | Purpose | Lines |
 |------|---------|-------|
-| `baseline_v1_live/data_pipeline.py` | WebSocket → 1-min OHLCV bars + VWAP | ~1,343 |
+| `baseline_v1_live/data_pipeline.py` | WebSocket -> 1-min OHLCV bars + VWAP | ~1,343 |
 | OpenAlgo interactions in `order_manager.py` | API calls for orders | - |
 
 ## Key Concepts You Must Know
@@ -31,8 +31,8 @@ You are the broker integration expert for the NIFTY options trading system. You 
 
 ### WebSocket Data Flow
 ```
-OpenAlgo WebSocket → Tick Data → 1-min Bar Aggregation → OHLCV + VWAP
-                                        ↓
+OpenAlgo WebSocket -> Tick Data -> 1-min Bar Aggregation -> OHLCV + VWAP
+                                        |
                               Swing Detection Pipeline
 ```
 
