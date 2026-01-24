@@ -220,17 +220,21 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("Option Price Chart")
 
-    # Get available symbols for default values
-    available_symbols = read_df("SELECT DISTINCT symbol FROM bars LIMIT 100")
-
-    if not available_symbols.empty:
-        # Extract default expiry from first symbol
-        first_symbol = available_symbols['symbol'].iloc[0]
-        import re
-        default_expiry_match = re.search(r'NIFTY(\d{2}[A-Z]{3}\d{2})', first_symbol)
-        default_expiry = default_expiry_match.group(1) if default_expiry_match else "30DEC25"
+    # Get current expiry from daily_state (set by baseline strategy)
+    expiry_result = read_df(q.NEAREST_EXPIRY)
+    if not expiry_result.empty and expiry_result['expiry'].iloc[0]:
+        default_expiry = expiry_result['expiry'].iloc[0]
     else:
-        default_expiry = "30DEC25"
+        # Fallback: Extract from available symbols if daily_state doesn't have it yet
+        fallback_query = """
+        SELECT DISTINCT substr(symbol, 6, 7) as expiry
+        FROM bars
+        WHERE symbol LIKE 'NIFTY%'
+        ORDER BY expiry DESC
+        LIMIT 1
+        """
+        fallback_result = read_df(fallback_query)
+        default_expiry = fallback_result['expiry'].iloc[0] if not fallback_result.empty else "30JAN26"
 
     # Create input controls
     col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
@@ -333,9 +337,21 @@ with tabs[5]:
 with tabs[6]:
     st.subheader("🔍 Bar Viewer - Full Session (9:15 AM onwards) with Swing Labels")
 
-    # Get nearest expiry as default
+    # Get current expiry from daily_state (set by baseline strategy)
     expiry_result = read_df(q.NEAREST_EXPIRY)
-    default_expiry = expiry_result['expiry'].iloc[0] if not expiry_result.empty else "30DEC25"
+    if not expiry_result.empty and expiry_result['expiry'].iloc[0]:
+        default_expiry = expiry_result['expiry'].iloc[0]
+    else:
+        # Fallback: Extract from available symbols if daily_state doesn't have it yet
+        fallback_query = """
+        SELECT DISTINCT substr(symbol, 6, 7) as expiry
+        FROM bars
+        WHERE symbol LIKE 'NIFTY%'
+        ORDER BY expiry DESC
+        LIMIT 1
+        """
+        fallback_result = read_df(fallback_query)
+        default_expiry = fallback_result['expiry'].iloc[0] if not fallback_result.empty else "30JAN26"
 
     # Create input controls
     col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
