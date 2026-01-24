@@ -165,6 +165,7 @@ class StateManager:
                 daily_exit_reason TEXT,
                 total_pnl REAL,
                 total_positions INTEGER,
+                expiry TEXT,
                 updated_at TEXT
             )
         ''')
@@ -303,11 +304,7 @@ class StateManager:
         """Apply database migrations for schema changes"""
         cursor = self.conn.cursor()
 
-        # Check if all_swings_log has unique constraint
-        cursor.execute("PRAGMA table_info(all_swings_log)")
-        columns = cursor.fetchall()
-
-        # Check if constraint exists by trying to get index info
+        # Migration 1: Add unique constraint to all_swings_log
         cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='all_swings_log'")
         table_sql = cursor.fetchone()
 
@@ -356,6 +353,18 @@ class StateManager:
                        f"(kept {new_count} unique swings)")
         else:
             logger.debug("all_swings_log table already has unique constraint")
+
+        # Migration 2: Add expiry column to daily_state
+        cursor.execute("PRAGMA table_info(daily_state)")
+        columns = {col[1]: col for col in cursor.fetchall()}
+
+        if 'expiry' not in columns:
+            logger.info("Migrating daily_state table to add expiry column...")
+            cursor.execute("ALTER TABLE daily_state ADD COLUMN expiry TEXT")
+            self.conn.commit()
+            logger.info("Migration complete: Added expiry column to daily_state")
+        else:
+            logger.debug("daily_state table already has expiry column")
 
     @atomic_transaction
     def save_positions(self, positions: List[Dict]):
@@ -472,9 +481,9 @@ class StateManager:
     def save_daily_state(self, state: Dict):
         """Save daily state (cumulative R, exit status, etc.) with atomic transaction"""
         cursor = self.conn.cursor()
-        
+
         cursor.execute('''
-            INSERT OR REPLACE INTO daily_state VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO daily_state VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             datetime.now(IST).date().isoformat(),
             state.get('cumulative_R', 0),
@@ -482,9 +491,10 @@ class StateManager:
             state.get('daily_exit_reason'),
             state.get('total_pnl', 0),
             state.get('total_positions', 0),
+            state.get('expiry'),
             datetime.now(IST).isoformat()
         ))
-        
+
         # Commit handled by @atomic_transaction decorator
     
     def load_daily_state(self) -> Optional[Dict]:

@@ -174,11 +174,10 @@ AND DATE(timestamp) = DATE('now', 'localtime')
 ORDER BY timestamp ASC
 """
 
-# Get nearest expiry from available symbols
+# Get current expiry from daily_state (set by baseline strategy)
 NEAREST_EXPIRY = """
-SELECT DISTINCT substr(symbol, 6, 7) as expiry
-FROM bars
-WHERE symbol LIKE 'NIFTY%'
-ORDER BY expiry
+SELECT expiry
+FROM daily_state
+WHERE trade_date = DATE('now', 'localtime')
 LIMIT 1
 """

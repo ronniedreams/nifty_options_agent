@@ -870,6 +870,7 @@ class BaselineV1Live:
         
         # Save daily state
         summary = self.position_tracker.get_position_summary()
+        summary['expiry'] = self.expiry_date  # Add expiry for dashboard
         self.state_manager.save_daily_state(summary)
         
         # Log completed trades
@@ -980,28 +981,58 @@ def main():
     """Main entry point"""
     # Register signal handler for Ctrl+C
     signal.signal(signal.SIGINT, signal_handler)
-    
+
     parser = argparse.ArgumentParser(
         description='Baseline V1 Live Trading - Options Swing Break Strategy'
     )
+
+    # Add --auto flag
+    parser.add_argument(
+        '--auto',
+        action='store_true',
+        help='Auto-detect ATM and expiry (waits until 9:16 AM, fetches NIFTY spot, selects nearest expiry)'
+    )
+
+    # Make --expiry and --atm optional when --auto is used
     parser.add_argument(
         '--expiry',
-        required=True,
-        help='Expiry date (e.g., 26DEC24)'
+        required=False,
+        help='Expiry date (e.g., 26DEC24) - Required if --auto not used'
     )
     parser.add_argument(
         '--atm',
         type=int,
-        required=True,
-        help='ATM strike price (e.g., 18000)'
+        required=False,
+        help='ATM strike price (e.g., 18000) - Required if --auto not used'
     )
-    
+
     args = parser.parse_args()
-    
+
+    # Determine ATM and expiry based on mode
+    if args.auto:
+        # Auto mode - detect ATM and expiry
+        logger.info("[AUTO] Auto-detection mode enabled")
+
+        from .auto_detector import AutoDetector
+        from .config import OPENALGO_API_KEY, OPENALGO_HOST
+
+        detector = AutoDetector(api_key=OPENALGO_API_KEY, host=OPENALGO_HOST)
+        atm_strike, expiry_date = detector.auto_detect()
+
+        logger.info(f"[AUTO] Detected ATM: {atm_strike}, Expiry: {expiry_date}")
+    else:
+        # Manual mode - require --expiry and --atm
+        if not args.expiry or not args.atm:
+            parser.error("--expiry and --atm are required when --auto is not used")
+
+        atm_strike = args.atm
+        expiry_date = args.expiry
+        logger.info(f"[MANUAL] Using provided ATM: {atm_strike}, Expiry: {expiry_date}")
+
     # Create and start strategy
     strategy = BaselineV1Live(
-        expiry_date=args.expiry,
-        atm_strike=args.atm
+        expiry_date=expiry_date,
+        atm_strike=atm_strike
     )
     
     try:
