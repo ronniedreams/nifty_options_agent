@@ -9,8 +9,8 @@ import os
 import sqlite3
 from datetime import datetime
 
-# Add baseline_v1_live to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'baseline_v1_live'))
+# Add baseline_v1_live to path (go up one level from tests/ folder)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'baseline_v1_live'))
 
 print("="*80)
 print("TESTING FAILURE HANDLING IMPLEMENTATION")
@@ -21,8 +21,8 @@ print("\n[TEST 1] Checking database schema...")
 print("-"*80)
 
 try:
-    # Check if database exists
-    db_path = os.path.join(os.path.dirname(__file__), 'baseline_v1_live', 'test_state.db')
+    # Check if database exists (in tests/ folder)
+    db_path = os.path.join(os.path.dirname(__file__), 'test_state.db')
 
     # Create test database
     conn = sqlite3.connect(db_path)
@@ -182,8 +182,8 @@ print("\n[TEST 4] Validating configuration...")
 print("-"*80)
 
 try:
-    # Read config file
-    config_path = os.path.join(os.path.dirname(__file__), 'baseline_v1_live', 'config.py')
+    # Read config file (go up one level from tests/ folder)
+    config_path = os.path.join(os.path.dirname(__file__), '..', 'baseline_v1_live', 'config.py')
 
     with open(config_path, 'r') as f:
         config_content = f.read()
@@ -234,7 +234,7 @@ try:
 
     missing_files = []
     for file_path in required_files:
-        full_path = os.path.join(os.path.dirname(__file__), file_path)
+        full_path = os.path.join(os.path.dirname(__file__), '..', file_path)
         if not os.path.exists(full_path):
             missing_files.append(file_path)
         else:
@@ -255,7 +255,7 @@ print("-"*80)
 
 try:
     # Check notification_manager.py
-    nm_path = os.path.join(os.path.dirname(__file__), 'baseline_v1_live', 'notification_manager.py')
+    nm_path = os.path.join(os.path.dirname(__file__), '..', 'baseline_v1_live', 'notification_manager.py')
     with open(nm_path, 'r') as f:
         nm_content = f.read()
 
@@ -275,7 +275,7 @@ try:
             sys.exit(1)
 
     # Check startup_health_check.py
-    shc_path = os.path.join(os.path.dirname(__file__), 'baseline_v1_live', 'startup_health_check.py')
+    shc_path = os.path.join(os.path.dirname(__file__), '..', 'baseline_v1_live', 'startup_health_check.py')
     with open(shc_path, 'r') as f:
         shc_content = f.read()
 
@@ -296,7 +296,7 @@ try:
             sys.exit(1)
 
     # Check baseline_v1_live.py
-    bl_path = os.path.join(os.path.dirname(__file__), 'baseline_v1_live', 'baseline_v1_live.py')
+    bl_path = os.path.join(os.path.dirname(__file__), '..', 'baseline_v1_live', 'baseline_v1_live.py')
     with open(bl_path, 'r', encoding='utf-8') as f:
         bl_content = f.read()
 
