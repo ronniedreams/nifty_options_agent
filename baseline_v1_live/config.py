@@ -204,6 +204,29 @@ NOTIFY_ON_ERROR = True
 NOTIFY_ON_BEST_STRIKE_CHANGE = True  # Notify when best strike changes (not every tick)
 
 # ============================================================================
+# STARTUP & FAILURE HANDLING
+# ============================================================================
+
+# Startup Health Checks
+MAX_STARTUP_RETRIES = 3
+STARTUP_RETRY_DELAY_BASE = 30  # seconds (30s, 60s, 90s with exponential backoff)
+
+# Notification Throttling (seconds)
+NOTIFICATION_THROTTLE_STARTUP = 3600      # 1 hour
+NOTIFICATION_THROTTLE_WEBSOCKET = 3600    # 1 hour
+NOTIFICATION_THROTTLE_BROKER = 1800       # 30 minutes
+NOTIFICATION_THROTTLE_DATABASE = 3600     # 1 hour
+NOTIFICATION_AGGREGATION_WINDOW = 60      # Aggregate errors within 60s
+
+# Waiting Mode Behavior
+WAITING_MODE_CHECK_INTERVAL = 300         # Check every 5 minutes
+WAITING_MODE_SEND_HOURLY_STATUS = True    # Send hourly "still waiting" updates
+
+# Graceful Shutdown
+SHUTDOWN_TIMEOUT = 9                      # Must complete in 9 seconds
+SHUTDOWN_FORCE_MARKET_ORDERS = True       # Use MARKET orders for fast exit
+
+# ============================================================================
 # DEVELOPMENT/TESTING
 # ============================================================================
 
