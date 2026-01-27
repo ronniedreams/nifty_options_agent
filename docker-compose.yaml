@@ -47,8 +47,7 @@ services:
     restart: unless-stopped
     command: >
       python -m baseline_v1_live.baseline_v1_live
-      --expiry ${EXPIRY:-30JAN26}
-      --atm ${ATM:-23500}
+      --auto
     logging:
       driver: "json-file"
       options:
