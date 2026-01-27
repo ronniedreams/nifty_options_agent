@@ -72,29 +72,32 @@ class TelegramNotifier:
                 self.enabled = False
             else:
                 logger.info("Telegram notifications enabled")
-                self.send_message("🤖 Baseline V1 Live Trading started")
+                self.send_message("Baseline V1 Live Trading started", parse_mode=None)
     
-    def send_message(self, message: str, parse_mode: str = 'HTML') -> bool:
+    def send_message(self, message: str, parse_mode: Optional[str] = 'HTML') -> bool:
         """
         Send message to Telegram
-        
+
         Args:
-            message: Message text (supports HTML formatting)
-            parse_mode: 'HTML' or 'Markdown'
-        
+            message: Message text (supports HTML formatting if parse_mode='HTML')
+            parse_mode: 'HTML', 'Markdown', or None for plain text
+
         Returns:
             True if sent successfully
         """
         if not self.enabled:
             return False
-        
+
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        
+
         payload = {
             'chat_id': self.chat_id,
             'text': message,
-            'parse_mode': parse_mode,
         }
+
+        # Only add parse_mode if specified
+        if parse_mode:
+            payload['parse_mode'] = parse_mode
         
         try:
             response = requests.post(url, json=payload, timeout=10)

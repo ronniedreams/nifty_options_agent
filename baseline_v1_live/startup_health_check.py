@@ -162,7 +162,11 @@ class StartupHealthCheck:
             # Test API key with funds endpoint
             response = requests.post(
                 f"{OPENALGO_HOST}/api/v1/funds",
-                headers={"Authorization": f"Bearer {OPENALGO_API_KEY}"},
+                headers={
+                    "Authorization": f"Bearer {OPENALGO_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={},
                 timeout=5
             )
 
@@ -202,7 +206,11 @@ class StartupHealthCheck:
             # Get broker session status from OpenAlgo
             response = requests.post(
                 f"{OPENALGO_HOST}/api/v1/funds",
-                headers={"Authorization": f"Bearer {OPENALGO_API_KEY}"},
+                headers={
+                    "Authorization": f"Bearer {OPENALGO_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={},
                 timeout=5
             )
 
