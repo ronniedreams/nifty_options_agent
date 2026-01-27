@@ -36,9 +36,10 @@ services:
     volumes:
       - ./.env:/app/.env:ro  # Read-only secrets (root-level .env)
       - ./logs:/app/logs  # Persist logs on host
-      - trading_state:/app/baseline_v1_live  # Persist SQLite state
+      - trading_state:/app/state  # Persist SQLite state
     environment:
       - PYTHONUNBUFFERED=1
+      - STATE_DB_PATH=/app/state/live_state.db
       - OPENALGO_HOST=http://openalgo:5000
       - OPENALGO_WS_URL=ws://openalgo:8765
       - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-true}
@@ -65,9 +66,9 @@ services:
     ports:
       - "8050:8050"
     volumes:
-      - trading_state:/app/baseline_v1_live:ro  # Read-only access to state
+      - trading_state:/app/state:ro  # Read-only access to state
     environment:
-      - DB_PATH=/app/baseline_v1_live/live_state.db
+      - DB_PATH=/app/state/live_state.db
     restart: unless-stopped
 
 volumes:
