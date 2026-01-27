@@ -27,6 +27,7 @@ This reduces API calls, broker RMS flags, and ensures order is ready if price re
 """
 
 import logging
+import copy
 from typing import Dict, List, Optional
 from datetime import datetime
 
@@ -205,8 +206,9 @@ class ContinuousFilterEngine:
                 f"replaced by new swing @ Rs.{swing_price:.2f}"
             )
 
-        # Add new swing to candidates
-        self.swing_candidates[symbol] = swing_info
+        # Add new swing to candidates (make a copy to avoid reference issues)
+        # CRITICAL: Use deepcopy() to prevent modifications to swing_info from affecting stored value
+        self.swing_candidates[symbol] = copy.deepcopy(swing_info)
 
         # Clear any previous evaluation state for this symbol (new swing detected)
         if symbol in self.last_evaluation_state:
@@ -221,9 +223,9 @@ class ContinuousFilterEngine:
             if s.get('symbol') != symbol
         ]
 
-        # Add this swing to the pool
-        swing_info['symbol'] = symbol  # Ensure symbol is in swing_info
-        self.stage1_swings_by_type[option_type].append(swing_info)
+        # Add this swing to the pool (add symbol to the copy we stored, not the original)
+        self.swing_candidates[symbol]['symbol'] = symbol  # Ensure symbol is in swing_info
+        self.stage1_swings_by_type[option_type].append(self.swing_candidates[symbol])
 
         logger.info(
             f"[VWAP-QUALIFIED] {symbol}: Swing @ Rs.{swing_price:.2f} "
