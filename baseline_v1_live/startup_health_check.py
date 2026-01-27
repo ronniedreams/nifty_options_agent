@@ -166,7 +166,7 @@ class StartupHealthCheck:
                     "Authorization": f"Bearer {OPENALGO_API_KEY}",
                     "Content-Type": "application/json"
                 },
-                json={},
+                json={"apikey": OPENALGO_API_KEY},
                 timeout=5
             )
 
@@ -210,7 +210,7 @@ class StartupHealthCheck:
                     "Authorization": f"Bearer {OPENALGO_API_KEY}",
                     "Content-Type": "application/json"
                 },
-                json={},
+                json={"apikey": OPENALGO_API_KEY},
                 timeout=5
             )
 
