@@ -10,6 +10,44 @@
 
 ---
 
+## 🔧 Development & Git Workflow (READ FIRST!)
+
+**MANDATORY SOP for all code changes:** See `.claude/GIT_SOP.md`
+
+**Branch Structure:**
+- `main` → Production only (EC2 runs this)
+- `experiment/feature-X` → Your feature development
+- `draft/feature-X` → Isolated test (main + feature)
+
+**Quick Workflow:**
+```bash
+# 1. Start feature
+git checkout main && git pull
+git checkout -b experiment/my-feature
+
+# 2. Build & test locally
+# (Commit freely, break things if needed)
+
+# 3. Before market (9:15 AM):
+git checkout main
+git checkout -b draft/my-feature
+git merge experiment/my-feature
+git tag pre-market-YYYYMMDD-my-feature
+git push --tags
+
+# 4. After market (3:30 PM):
+# If good: git checkout main && git merge experiment/my-feature && git push
+# If bad: git branch -D draft/my-feature experiment/my-feature && git push origin --delete draft/my-feature experiment/my-feature
+```
+
+**Hard Rules:**
+- ❌ Never code during market hours (9:15 AM - 3:30 PM)
+- ❌ Never test directly on main
+- ❌ Never delete tags
+- ❌ Never deploy draft/experiment to EC2
+
+---
+
 ## 📋 Architecture at a Glance (3 minutes)
 
 ```
@@ -908,6 +946,20 @@ Each agent loads specific context before working:
 ---
 
 ## Code Change Guidelines
+
+**⚠️ CRITICAL: Git Workflow SOP**
+
+**ALWAYS follow the Git SOP for safe feature development:** See `.claude/GIT_SOP.md`
+
+**TL;DR:**
+- `main` = Production only (safe)
+- `experiment/feature-X` = Development (your work)
+- `draft/feature-X` = Isolated test (main + your work)
+- Pre-market: Tag with `pre-market-YYYYMMDD-feature-X`
+- Post-market: Merge to main if good, delete if failed
+- ❌ Never code during market hours (9:15 AM - 3:30 PM)
+- ❌ Never test directly on main
+- ❌ Never delete tags
 
 **When modifying core files:**
 - `order_manager.py`
