@@ -540,8 +540,8 @@ class StateManager:
             state.get('daily_exit_reason'),
             state.get('total_pnl', 0),
             state.get('total_positions', 0),
-            state.get('expiry'),
-            datetime.now(IST).isoformat()
+            datetime.now(IST).isoformat(),
+            state.get('expiry')
         ))
 
         # Commit handled by @atomic_transaction decorator

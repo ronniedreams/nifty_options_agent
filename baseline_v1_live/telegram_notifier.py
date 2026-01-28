@@ -72,7 +72,8 @@ class TelegramNotifier:
                 self.enabled = False
             else:
                 logger.info("Telegram notifications enabled")
-                self.send_message("Baseline V1 Live Trading started", parse_mode=None)
+                # Startup message disabled to prevent spam
+                # self.send_message("Baseline V1 Live Trading started", parse_mode=None)
     
     def send_message(self, message: str, parse_mode: Optional[str] = 'HTML') -> bool:
         """
