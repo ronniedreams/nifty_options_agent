@@ -11,7 +11,21 @@
       "Bash(powershell -ExecutionPolicy Bypass -File ~/.claude/statusline-command.ps1)",
       "Bash(git checkout:*)",
       "Bash(git merge:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(git show-branch:*)",
+      "Bash(python -m baseline_v1_live.check_system:*)",
+      "Bash(git branch:*)",
+      "Bash(git pull:*)",
+      "Bash(git cherry-pick:*)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(git commit:*)",
+      "Bash(git tag:*)",
+      "Bash(sqlite3:*)",
+      "Bash(grep:*)",
+      "Bash(wmic process:*)",
+      "Bash(findstr:*)",
+      "Bash(tasklist /FI \"IMAGENAME eq python.exe\" /FO LIST)"
     ]
   }
 }
