@@ -15,7 +15,7 @@ Safely develop, test, and promote trading system features without mixing experim
   - Always safe
 
 ### Short-lived (Disposable)
-- **experiment/*** → Feature development branches
+- **feature/*** → Feature development branches
 - **draft/*** → Isolated draft builds for market testing
 
 **Rule:** Only main lives long. Everything else can be deleted without regret.
@@ -27,7 +27,7 @@ Safely develop, test, and promote trading system features without mixing experim
 | Branch | Meaning |
 |--------|---------|
 | `main` | "This code is safe." Production only. |
-| `experiment/X` | "I am building feature X." Development, can break things. |
+| `feature/X` | "I am building feature X." Development, can break things. |
 | `draft/X` | "This is main + X, temporarily, for testing." Pre-market snapshot. |
 
 ---
@@ -39,26 +39,26 @@ Safely develop, test, and promote trading system features without mixing experim
 ```bash
 git checkout main
 git pull origin main
-git checkout -b experiment/feature-X
+git checkout -b feature/feature-X
 ```
 
 **Rules:**
-- Work freely on experiment branch
+- Work freely on feature branch
 - Commit normally
 - Break things if needed - this is development
-- Experiment is isolated from everything else
+- Feature is isolated from everything else
 
 ### Step 2: Create an Isolated Draft for Testing
 
 ```bash
 git checkout main
 git checkout -b draft/feature-X
-git merge experiment/feature-X
+git merge feature/feature-X
 ```
 
 **Result:**
 - `draft/feature-X` = `main` + `feature-X`
-- No other experiments included
+- No other features included
 - Guaranteed isolation for testing
 
 ### Step 3: Pre-Market Freeze (Before 9:15 AM)
@@ -82,15 +82,15 @@ git push origin --tags
 ```bash
 git checkout main
 git pull origin main
-git merge experiment/feature-X
+git merge feature/feature-X
 git tag stable-YYYYMMDD-feature-X
 git push origin main
 git push origin --tags
 
 # Cleanup
-git branch -D experiment/feature-X
+git branch -D feature/feature-X
 git branch -D draft/feature-X
-git push origin --delete experiment/feature-X draft/feature-X
+git push origin --delete feature/feature-X draft/feature-X
 ```
 
 Feature is now officially part of production.
@@ -99,38 +99,38 @@ Feature is now officially part of production.
 
 ```bash
 git branch -D draft/feature-X
-git branch -D experiment/feature-X
-git push origin --delete draft/feature-X experiment/feature-X
+git branch -D feature/feature-X
+git push origin --delete draft/feature-X feature/feature-X
 ```
 
 Nothing else is affected. `main` remains clean. Delete and move on.
 
 ---
 
-## Testing Multiple Experiments (No Confusion)
+## Testing Multiple Features (No Confusion)
 
-Each experiment gets its own isolated draft:
+Each feature gets its own isolated draft:
 
 ```
-experiment/exp1  →  draft/exp1
-experiment/exp2  →  draft/exp2
-experiment/exp3  →  draft/exp3
+feature/exp1  →  draft/exp1
+feature/exp2  →  draft/exp2
+feature/exp3  →  draft/exp3
 ```
 
 **Rules:**
 - Never mix drafts unless intentionally testing combinations
 - One draft = one idea = one test
-- Each draft is purely main + one experiment
+- Each draft is purely main + one feature
 
 ---
 
 ## Hard Rules (Non-Negotiable)
 
 ❌ **Never test directly on main**
-❌ **Never stack multiple experiments in one draft**
+❌ **Never stack multiple features in one draft**
 ❌ **Never change code during market hours** (9:15 AM - 3:30 PM IST)
 ❌ **Never delete tags** (tags = time machines)
-❌ **Never "fix quickly" on EC2** (use experiment/draft workflow)
+❌ **Never "fix quickly" on EC2** (use feature/draft workflow)
 
 ---
 
@@ -159,19 +159,19 @@ git push origin main --force-with-lease  # Only if absolutely necessary
 ```bash
 # List all draft branches
 git branch --list "draft/*"
-git branch --list "experiment/*"
+git branch --list "feature/*"
 
 # If a branch has no future → delete it
 git branch -D draft/old-feature
-git branch -D experiment/old-feature
-git push origin --delete draft/old-feature experiment/old-feature
+git branch -D feature/old-feature
+git push origin --delete draft/old-feature feature/old-feature
 ```
 
 ---
 
 ## Mental Model (Pin This)
 
-**experiment builds ideas, draft tests ideas, main trusts ideas.**
+**feature builds ideas, draft tests ideas, main trusts ideas.**
 
 ---
 
@@ -190,7 +190,7 @@ git push origin --delete draft/old-feature experiment/old-feature
 
 ## Three-Way Sync (Laptop ↔ GitHub ↔ EC2)
 
-### Before Starting Experiment
+### Before Starting Feature
 
 ```bash
 # Laptop: Start fresh from main
@@ -198,14 +198,14 @@ git checkout main
 git pull origin main
 
 # EC2: Keep on main (production)
-# DO NOT pull experiment or draft branches to EC2
+# DO NOT pull feature or draft branches to EC2
 ```
 
 ### During Development (Before Market)
 
 ```bash
-# Laptop: Work on experiment/X and draft/X
-git push origin experiment/feature-X
+# Laptop: Work on feature/X and draft/X
+git push origin feature/feature-X
 git push origin draft/feature-X
 git push origin --tags
 
@@ -215,10 +215,10 @@ git push origin --tags
 ### Post-Market Merge (After 3:30 PM)
 
 ```bash
-# Laptop: Merge experiment/X to main if successful
+# Laptop: Merge feature/X to main if successful
 git checkout main
 git pull origin main
-git merge experiment/feature-X
+git merge feature/feature-X
 git push origin main
 git push origin --tags
 
@@ -239,7 +239,7 @@ docker-compose down && docker-compose up -d --build
 ```bash
 # 1. Start experiment
 git checkout main && git pull
-git checkout -b experiment/new-filter
+git checkout -b feature/new-filter
 
 # 2. Edit continuous_filter.py, commit, test locally
 git commit -am "Implement new filter logic"
@@ -247,7 +247,7 @@ git commit -am "Implement new filter logic"
 # 3. Create draft before market
 git checkout main
 git checkout -b draft/new-filter
-git merge experiment/new-filter
+git merge feature/new-filter
 git tag pre-market-20260128-new-filter
 git push origin draft/new-filter --tags
 
@@ -265,22 +265,22 @@ git push origin draft/new-filter --tags
 
 ```bash
 # DO NOT: Branch from main and expect to keep it
-# INSTEAD: Handle in post-market experiment workflow
+# INSTEAD: Handle in post-market feature workflow
 
 # Example: Bug found at 2 PM
 # → Log it
-# → Create experiment/bugfix-X after market
+# → Create feature/bugfix-X after market
 # → Test in draft/bugfix-X pre-market next day
 ```
 
-### Scenario 3: Failed Experiment
+### Scenario 3: Failed Feature
 
 ```bash
 # If draft fails during pre-market testing
 git checkout main
 git branch -D draft/feature-X
-git branch -D experiment/feature-X
-git push origin --delete draft/feature-X experiment/feature-X
+git branch -D feature/feature-X
+git push origin --delete draft/feature-X feature/feature-X
 
 # main is untouched. Try again tomorrow.
 ```
@@ -300,7 +300,7 @@ docker-compose build
 docker-compose up -d
 ```
 
-Never deploy draft or experiment branches to EC2 (unless explicitly testing specific market data, which is documented separately).
+Never deploy draft or feature branches to EC2 (unless explicitly testing specific market data, which is documented separately).
 
 ---
 
@@ -321,19 +321,19 @@ Examples:
 
 ## Weekly Checklist
 
-- [ ] Review `git branch -a` - are there old experiment/* branches?
-- [ ] Delete completed experiments
+- [ ] Review `git branch -a` - are there old feature/* branches?
+- [ ] Delete completed features
 - [ ] Check `git tag -l` - is history preserved?
 - [ ] Verify main is at latest stable-* tag
 - [ ] EC2 is running latest main
 - [ ] Backup .env and live_state.db (not in git)
-- [ ] Document any failed experiments (lessons learned)
+- [ ] Document any failed features (lessons learned)
 
 ---
 
 ## Questions to Ask Before Any Code Change
 
-1. **Is this on main or experiment/?** → Should be experiment/X for new features
+1. **Is this on main or feature/?** → Should be feature/X for new features
 2. **Is market open?** → No code changes during 9:15 AM - 3:30 PM
 3. **Have I created a draft/** → Needed before testing in market
 4. **Is this pushed to GitHub?** → Required for rollback capability
