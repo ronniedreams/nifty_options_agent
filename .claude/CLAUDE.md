@@ -976,6 +976,46 @@ Each agent loads specific context before working:
 4. Verify system runs without errors after changes
 5. Test in paper trading mode first
 
+**⚠️ MANDATORY Commit Workflow:**
+
+**NEVER commit code without following these steps in order:**
+
+1. **Show implementation first**
+   - Present all code changes to the user
+   - Explain what was changed and why
+   - Wait for user feedback
+
+2. **Get approval to run /pre-commit checks**
+   - Ask: "Should I run /pre-commit checks on these changes?"
+   - Wait for explicit permission
+
+3. **Run /pre-commit checks**
+   - Execute: `/pre-commit`
+   - Review all check results
+   - Fix any issues found
+
+4. **Ask for permission to commit**
+   - Ask: "All checks passed. Should I commit these changes?"
+   - Provide commit message preview
+   - Wait for explicit permission
+
+5. **Commit only if given permission**
+   - Only after explicit "yes" from user
+   - Never rush to commit
+   - Never skip steps 1-4
+
+**Example:**
+```
+[After implementing changes]
+"I've updated ui_components.py to format timestamps. Here are the changes: [show code].
+Should I run /pre-commit checks on these changes?"
+
+[After checks pass]
+"All checks passed. Should I commit with message: 'Fix: Format timestamps to human-readable display'?"
+
+[Only commit after user says yes]
+```
+
 **Verification Steps:**
 ```bash
 cd D:\nifty_options_agent

@@ -36,8 +36,9 @@ def format_timestamp(timestamp_str):
         # Format: YYYY-MM-DD | HH:MM AM/PM IST
         date_part = dt.strftime('%Y-%m-%d')
         time_part = dt.strftime('%I:%M %p')  # 12-hour format with AM/PM
+        tz_abbrev = dt.strftime('%Z')  # Extract timezone abbreviation (e.g., "IST")
 
-        return f"{date_part} | {time_part} IST"
+        return f"{date_part} | {time_part} {tz_abbrev}"
 
     except Exception as e:
         # If formatting fails, return original string
