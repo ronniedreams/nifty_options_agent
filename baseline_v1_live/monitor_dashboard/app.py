@@ -12,7 +12,7 @@ import pytz
 import plotly.express as px
 
 from db import read_df
-from ui_components import kpi, df_table, candlestick_chart, build_symbol
+from ui_components import kpi, df_table, candlestick_chart, build_symbol, format_timestamp
 import queries as q
 from config import STRATEGY_NAME, FAST_REFRESH
 
@@ -34,7 +34,7 @@ st.set_page_config(
 # HEADER
 # ─────────────────────────────────────────────
 now_dt = datetime.now(IST)
-now = f"{now_dt.strftime('%Y-%m-%d')} | {now_dt.strftime('%I:%M %p')} IST"
+now = f"{now_dt.strftime('%Y-%m-%d')} | {now_dt.strftime('%I:%M %p')} {now_dt.strftime('%Z')}"
 
 st.markdown(
     f"""
@@ -441,7 +441,7 @@ with tabs[6]:
             # Display bar data table with swing labels
             st.subheader("📋 Bar Data with Swing Labels")
             table_display = display_df.copy()
-            table_display['timestamp'] = table_display['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+            table_display['timestamp'] = table_display['timestamp'].apply(format_timestamp)
             # Reorder columns to show swing_label after timestamp
             cols = ['timestamp', 'swing_label', 'open', 'high', 'low', 'close', 'volume']
             st.dataframe(table_display[cols], use_container_width=True, height=600)
@@ -450,7 +450,7 @@ with tabs[6]:
             if not swings_df.empty:
                 st.subheader("🔄 Swing Summary")
                 swing_summary = swings_df[['swing_time', 'swing_type', 'swing_price', 'vwap']].copy()
-                swing_summary['swing_time'] = swing_summary['swing_time'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                swing_summary['swing_time'] = swing_summary['swing_time'].apply(format_timestamp)
                 st.dataframe(swing_summary, use_container_width=True)
 
 # ─────────────────────────────────────────────

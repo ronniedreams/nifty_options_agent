@@ -342,6 +342,66 @@ Examples:
 
 ---
 
+---
+
+## ⚠️ MANDATORY Commit Workflow (Claude Code)
+
+**NEVER commit code without following these steps in order:**
+
+1. **Show implementation first**
+   - Present all code changes to the user
+   - Explain what was changed and why
+   - Wait for user feedback
+
+2. **Get approval to run /pre-commit checks**
+   - Ask: "Should I run /pre-commit checks on these changes?"
+   - Wait for explicit permission
+
+3. **Run /pre-commit checks**
+   - Execute: `/pre-commit`
+   - Review all check results
+   - Fix any issues found
+
+4. **Ask for permission to commit**
+   - Ask: "All checks passed. Should I commit these changes?"
+   - Provide commit message preview
+   - Wait for explicit permission
+
+5. **Commit only if given permission**
+   - Only after explicit "yes" from user
+   - Never rush to commit
+   - Never skip steps 1-4
+
+**Why This Matters:**
+- Prevents accidental commits without review
+- Ensures quality checks are run
+- Gives user control over git history
+- Avoids rushing to commit without approval
+
+**Example Flow:**
+```
+[After implementing changes]
+"I've updated continuous_filter.py to fix tie-breaker logic. Here are the changes:
+[show code diff]
+
+Should I run /pre-commit checks on these changes?"
+
+[User: yes]
+[Run /pre-commit]
+
+"All checks passed:
+✓ Code review: No issues
+✓ Integration check: No cross-module impacts
+✓ Tests: All passed
+
+Should I commit with message: 'Fix: Tie-breaker now prefers strikes multiple of 100'?"
+
+[User: yes]
+[Commit and push]
+```
+
+---
+
 ## Contact Points
 
 - **Workflow questions:** See this document
