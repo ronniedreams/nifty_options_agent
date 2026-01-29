@@ -521,14 +521,14 @@ class ContinuousFilterEngine:
 
 1. **Start OpenAlgo**
    ```powershell
-   cd d:\marketcalls\openalgo
+   cd d:\nifty_options_agent\openalgo-zerodha\openalgo
    python app.py
    ```
 
 2. **Run System Check**
    ```powershell
-   cd d:\marketcalls\options_agent\live
-   python check_system.py
+   cd d:\nifty_options_agent
+   python -m baseline_v1_live.check_system
    ```
 
 3. **Expected Output:**
@@ -658,8 +658,8 @@ Test these scenarios:
 
 ```powershell
 # Run manually
-cd d:\marketcalls\options_agent\live
-python baseline_v1_live.py --expiry 26DEC24 --atm 24200
+cd d:\nifty_options_agent
+python -m baseline_v1_live.baseline_v1_live --expiry 26DEC24 --atm 24200
 ```
 
 **Pros:**

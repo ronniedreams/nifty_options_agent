@@ -42,8 +42,8 @@ TELEGRAM_CHAT_ID=<your_chat_id>
 
 ### 2.1 Run System Checks
 ```powershell
-cd d:\marketcalls\options_agent\live
-python check_system.py
+cd d:\nifty_options_agent
+python -m baseline_v1_live.check_system
 ```
 
 **Expected Output**:
@@ -82,8 +82,8 @@ python test_simple_flow.py
 ### 3.1 Pre-Market (9:00 AM)
 ```powershell
 # Start system with paper trading
-cd d:\marketcalls\options_agent\live
-d:\marketcalls\venv\Scripts\python.exe baseline_v1_live.py --expiry 26DEC24 --atm 18000
+cd d:\nifty_options_agent
+python -m baseline_v1_live.baseline_v1_live --expiry 26DEC24 --atm 18000
 ```
 
 **Monitor**:
@@ -268,11 +268,11 @@ DAILY_STOP_R = -5.0           # -5R stop ✓
 
 ### 7.2 Launch Command
 ```powershell
-cd d:\marketcalls\options_agent\live
-d:\marketcalls\venv\Scripts\python.exe baseline_v1_live.py --expiry <DATE> --atm <STRIKE>
+cd d:\nifty_options_agent
+python -m baseline_v1_live.baseline_v1_live --expiry <DATE> --atm <STRIKE>
 
 # Example:
-d:\marketcalls\venv\Scripts\python.exe baseline_v1_live.py --expiry 26DEC24 --atm 18000
+python -m baseline_v1_live.baseline_v1_live --expiry 26DEC24 --atm 18000
 ```
 
 ### 7.3 First Hour Monitoring (9:15 - 10:15 AM)
