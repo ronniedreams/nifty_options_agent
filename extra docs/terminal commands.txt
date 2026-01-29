@@ -1,0 +1,286 @@
+● Everyday Terminal Commands - Quick Reference
+
+  Local Development (Windows PowerShell)
+
+  OpenAlgo
+
+  # Start OpenAlgo
+  cd D:\nifty_options_agent\openalgo-zerodha\openalgo
+  python app.py
+
+  # Stop OpenAlgo
+  # Press Ctrl+C in the terminal
+
+  # Access Dashboard
+  # http://127.0.0.1:5000
+
+  Baseline Trading Strategy
+
+  # Navigate to project
+  cd D:\nifty_options_agent
+
+  # Run system check (ALWAYS run before starting)
+  python -m baseline_v1_live.check_system
+
+  # Start trading (paper mode)
+  python -m baseline_v1_live.baseline_v1_live --expiry 30JAN25 --atm 23500
+
+  # Stop trading
+  # Press Ctrl+C in the terminal
+
+  Git Workflow (Local → GitHub → EC2)
+
+  # Check status
+  git status
+
+  # Stage all changes
+  git add .
+
+  # Commit
+  git commit -m "your message here"
+
+  # Push to GitHub
+  git push origin feature/docker-ec2-fixes
+
+  # Pull latest from GitHub
+  git pull origin feature/docker-ec2-fixes
+
+  ---
+  EC2 Production (Ubuntu)
+
+  SSH Access
+
+  # Connect to EC2
+  ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15
+
+  # Exit EC2
+  exit
+  # or press Ctrl+D
+
+  Docker Services (Primary Method)
+
+  # Navigate to project
+  cd ~/nifty_options_agent
+
+  # View all container status
+  docker-compose ps
+
+  # Start all services
+  docker-compose up -d
+
+  # Stop all services
+  docker-compose down
+
+  # Restart all services
+  docker-compose restart
+
+  # Restart single service
+  docker-compose restart trading_agent
+  docker-compose restart openalgo
+  docker-compose restart monitor_dashboard
+
+  View Logs
+
+  # Live logs (all services)
+  docker-compose logs -f
+
+  # Live logs (specific service)
+  docker-compose logs -f trading_agent
+  docker-compose logs -f openalgo
+  docker-compose logs -f monitor_dashboard
+
+  # Last 100 lines
+  docker-compose logs --tail=100 trading_agent
+
+  # Exit live logs
+  # Press Ctrl+C
+
+  Deploy Updates from GitHub
+
+  # SSH into EC2
+  ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15
+
+  # Run deploy script (pulls latest code, rebuilds, restarts)
+  cd ~/nifty_options_agent
+  ./deploy.sh
+
+  Git Workflow (EC2)
+
+  # Check status
+  cd ~/nifty_options_agent
+  git status
+
+  # Pull latest
+  git pull origin feature/docker-ec2-fixes
+
+  # Commit and push changes made on EC2
+  git add .
+  git commit -m "your message"
+  git push origin feature/docker-ec2-fixes
+
+  Database Access (EC2)
+
+  # Access SQLite database
+  cd ~/nifty_options_agent
+  docker-compose exec trading_agent sqlite3 /app/baseline_v1_live/live_state.db
+
+  # Quick queries inside sqlite3
+  .tables                                    # List all tables
+  SELECT * FROM positions;                   # View positions
+  SELECT * FROM daily_summary ORDER BY date DESC LIMIT 5;
+  .quit                                      # Exit sqlite3
+
+  System Monitoring
+
+  # Check disk space
+  df -h
+
+  # Check memory usage
+  free -h
+
+  # Check running processes
+  htop
+  # Press 'q' to quit
+
+  # Check Docker resource usage
+  docker stats
+  # Press Ctrl+C to exit
+
+  Nginx (Web Server)
+
+  # Check nginx status
+  sudo systemctl status nginx
+
+  # Restart nginx
+  sudo systemctl restart nginx
+
+  # View nginx logs
+  sudo tail -f /var/log/nginx/access.log
+  sudo tail -f /var/log/nginx/error.log
+
+  # Test nginx configuration
+  sudo nginx -t
+
+  ---
+  Production URLs
+
+  # OpenAlgo Dashboard
+  https://openalgo.ronniedreams.in
+
+  # Monitor Dashboard
+  https://monitor.ronniedreams.in
+
+  # Credentials
+  Username: admin
+  Password: your-dashboard-password
+
+  ---
+  Useful One-Liners
+
+  Local
+
+  # Quick start (system check + trading)
+  cd D:\nifty_options_agent; python -m baseline_v1_live.check_system; python -m baseline_v1_live.baseline_v1_live --expiry 30JAN25 --atm 23500
+
+  # Check if OpenAlgo is running
+  curl http://127.0.0.1:5000
+
+  EC2
+
+  # Deploy and view logs
+  cd ~/nifty_options_agent && ./deploy.sh && docker-compose logs -f trading_agent
+
+  # Stop, pull latest, restart
+  cd ~/nifty_options_agent && docker-compose down && git pull && docker-compose up -d
+
+  # View last 50 lines of trading agent logs
+  docker-compose logs --tail=50 trading_agent
+
+  # Check if services are responding
+  curl -I https://openalgo.ronniedreams.in
+  curl -I https://monitor.ronniedreams.in
+
+  # Find container IDs
+  docker ps
+
+  # Execute command inside container
+  docker-compose exec trading_agent bash
+
+  ---
+  Emergency Commands
+
+  Kill Hung Processes (Local)
+
+  # Find Python processes
+  Get-Process python
+
+  # Kill specific process by PID
+  Stop-Process -Id <PID> -Force
+
+  Emergency Stop (EC2)
+
+  # Stop all containers immediately
+  cd ~/nifty_options_agent
+  docker-compose down
+
+  # Force remove containers
+  docker-compose down --remove-orphans
+
+  # Nuclear option (stop all Docker containers)
+  docker stop $(docker ps -q)
+
+  Check Service Health (EC2)
+
+  # Check if trading agent is running
+  docker-compose ps | grep trading_agent
+
+  # Check last restart time
+  docker inspect trading_agent | grep StartedAt
+
+  # View container resource usage
+  docker stats trading_agent --no-stream
+
+  ---
+  Daily Workflow
+
+  Morning Startup (Local Development)
+
+  # 1. Start OpenAlgo
+  cd D:\nifty_options_agent\openalgo-zerodha\openalgo
+  python app.py
+
+  # 2. In new terminal - Run system check
+  cd D:\nifty_options_agent
+  python -m baseline_v1_live.check_system
+
+  # 3. Start trading
+  python -m baseline_v1_live.baseline_v1_live --expiry 30JAN25 --atm 23500
+
+  Morning Startup (EC2 Production)
+
+  # SSH into EC2
+  ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15
+
+  # Check services are running
+  cd ~/nifty_options_agent
+  docker-compose ps
+
+  # If not running, start them
+  docker-compose up -d
+
+  # View live logs
+  docker-compose logs -f trading_agent
+
+  End of Day
+
+  # Services auto-stop at 3:15 PM (FORCE_EXIT_TIME)
+  # But you can manually check:
+
+  # EC2
+  docker-compose logs --tail=100 trading_agent | grep "Daily limit"
+  docker-compose logs --tail=100 trading_agent | grep "Force exit"
+
+  # Local - check terminal output for exit messages
+
+  ---
+  Bookmark this file for quick access!

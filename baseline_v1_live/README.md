@@ -54,8 +54,8 @@ final_lots = min(required_lots, 10)  # Cap at 10
 ### Setup
 
 ```powershell
-# Navigate to options_agent directory
-cd d:\marketcalls\options_agent
+# Navigate to nifty_options_agent directory
+cd d:\nifty_options_agent
 
 # Activate virtual environment (or create one)
 ..\venv\Scripts\Activate.ps1

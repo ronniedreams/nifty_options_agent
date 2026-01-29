@@ -28,9 +28,8 @@ http://127.0.0.1:5000
 
 ### 3️⃣ Activate Virtual Environment
 ```powershell
-cd D:\marketcalls
+cd D:\nifty_options_agent
 .\venv\Scripts\activate
-cd options_agent\live
 ```
 
 ---
