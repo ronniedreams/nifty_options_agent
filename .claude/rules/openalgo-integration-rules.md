@@ -65,7 +65,7 @@ DOCKER_ENV=true
 
 ```bash
 # Terminal 1: Start OpenAlgo
-cd D:\marketcalls\openalgo
+cd D:\nifty_options_agent\openalgo-zerodha\openalgo
 python app.py
 ```
 
@@ -641,7 +641,7 @@ docker stats
 2. Is broker connected? Check dashboard Status
 3. Check available margin: `client.get_account()`
 4. Verify symbol exists: `client.search_symbol(symbol)`
-5. Check logs: `D:\marketcalls\openalgo\logs/`
+5. Check logs: `D:\nifty_options_agent\openalgo-zerodha\openalgo\logs/`
 
 **Debug (EC2):**
 1. Check container status: `docker-compose ps`

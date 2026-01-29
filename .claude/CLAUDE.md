@@ -507,7 +507,7 @@ REJECTED   CANCELLED      SL_HIT         CLOSED        LOGGED
 
 ### Start OpenAlgo First
 ```powershell
-cd D:\marketcalls\openalgo
+cd D:\nifty_options_agent\openalgo-zerodha\openalgo
 python app.py
 ```
 
@@ -763,7 +763,7 @@ Note: Backtest files are maintained separately. This folder focuses on live trad
 
 ## Related Projects
 
-- **OpenAlgo** (`D:\marketcalls\openalgo`) - Broker integration platform (must be running for live trading)
+- **OpenAlgo** (`D:\nifty_options_agent\openalgo-zerodha\openalgo`) - Broker integration platform (must be running for live trading)
 
 ---
 
