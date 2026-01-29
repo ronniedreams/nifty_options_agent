@@ -33,11 +33,12 @@ st.set_page_config(
 # ─────────────────────────────────────────────
 # HEADER
 # ─────────────────────────────────────────────
-now = datetime.now(IST).strftime("%H:%M:%S IST")
+now_dt = datetime.now(IST)
+now = f"{now_dt.strftime('%Y-%m-%d')} | {now_dt.strftime('%I:%M %p')} IST"
 
 st.markdown(
     f"""
-    # 🧠 {STRATEGY_NAME} – Live Dashboard  
+    # 🧠 {STRATEGY_NAME} – Live Dashboard
     **Time:** {now}
     ---
     """

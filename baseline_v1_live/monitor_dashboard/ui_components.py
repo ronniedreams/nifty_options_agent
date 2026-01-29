@@ -3,6 +3,46 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
 import re
+import pytz
+
+IST = pytz.timezone('Asia/Kolkata')
+
+
+def format_timestamp(timestamp_str):
+    """
+    Format ISO timestamp to human-readable format
+
+    Input: 2026-01-29T12:29:00+05:30 or 2026-01-29 12:29:00+05:30
+    Output: 2026-01-29 | 12:29 PM IST
+    """
+    if pd.isna(timestamp_str) or timestamp_str == '' or timestamp_str is None:
+        return ''
+
+    try:
+        # Parse the timestamp
+        if isinstance(timestamp_str, str):
+            dt = pd.to_datetime(timestamp_str)
+        elif isinstance(timestamp_str, pd.Timestamp):
+            dt = timestamp_str
+        else:
+            return str(timestamp_str)
+
+        # Ensure timezone awareness
+        if dt.tzinfo is None:
+            dt = IST.localize(dt)
+        else:
+            dt = dt.astimezone(IST)
+
+        # Format: YYYY-MM-DD | HH:MM AM/PM IST
+        date_part = dt.strftime('%Y-%m-%d')
+        time_part = dt.strftime('%I:%M %p')  # 12-hour format with AM/PM
+
+        return f"{date_part} | {time_part} IST"
+
+    except Exception as e:
+        # If formatting fails, return original string
+        return str(timestamp_str)
+
 
 def kpi(label, value, color="#2c3e50"):
     st.markdown(
@@ -22,10 +62,35 @@ def kpi(label, value, color="#2c3e50"):
     )
 
 def df_table(df: pd.DataFrame, height=400):
+    """
+    Display DataFrame with formatted timestamps
+
+    Automatically detects and formats timestamp columns to human-readable format:
+    2026-01-29T12:29:00+05:30 -> 2026-01-29 | 12:29 PM IST
+    """
     if df is None or df.empty:
         st.info("No data available")
     else:
-        st.dataframe(df, height=height, use_container_width=True)
+        # Create a copy to avoid modifying original
+        df_display = df.copy()
+
+        # Auto-detect and format timestamp columns
+        timestamp_cols = []
+
+        for col in df_display.columns:
+            # Check if column name suggests it's a timestamp
+            col_lower = col.lower()
+            if any(keyword in col_lower for keyword in ['time', 'timestamp', 'date']):
+                timestamp_cols.append(col)
+            # Also check if column dtype is datetime
+            elif pd.api.types.is_datetime64_any_dtype(df_display[col]):
+                timestamp_cols.append(col)
+
+        # Format all detected timestamp columns
+        for col in timestamp_cols:
+            df_display[col] = df_display[col].apply(format_timestamp)
+
+        st.dataframe(df_display, height=height, use_container_width=True)
 
 
 def build_symbol(expiry: str, strike: int, option_type: str) -> str:
