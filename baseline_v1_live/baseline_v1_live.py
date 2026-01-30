@@ -90,6 +90,13 @@ class BaselineV1Live:
         logger.info("="*80)
         logger.info("Baseline V1 Live Trading - Initialization")
         logger.info("="*80)
+
+        # Instance identification for dual-instance setup (local vs EC2)
+        instance_name = os.getenv("INSTANCE_NAME", "UNKNOWN")
+        db_path = os.getenv("STATE_DB_PATH", "UNKNOWN")
+
+        logger.info(f"Instance: {instance_name}")
+        logger.info(f"Database: {db_path}")
         logger.info(f"Expiry: {expiry_date}, ATM Strike: {atm_strike}")
         logger.info(f"Paper Trading: {PAPER_TRADING}")
         logger.info(f"Market Hours: {MARKET_START_TIME} - {MARKET_END_TIME}")
