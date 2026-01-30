@@ -652,7 +652,7 @@ class ContinuousFilterEngine:
         
         # Log selected strike
         logger.info(
-            f"✅ SELECTED: {selected_symbol}\n"
+            f"[SELECTED] SELECTED: {selected_symbol}\n"
             f"   Entry Price:    Rs.{selected_candidate['swing_low']:.2f}\n"
             f"   Current Price:  Rs.{selected_candidate['current_price']:.2f}\n"
             f"   SL Price:       Rs.{selected_candidate['sl_price']:.2f}\n"
@@ -708,7 +708,7 @@ class ContinuousFilterEngine:
         
         # Log rejected candidates
         if rejected_candidates:
-            logger.info(f"\n❌ REJECTED CANDIDATES ({len(rejected_candidates)}):")
+            logger.info(f"\n[REJECTED] REJECTED CANDIDATES ({len(rejected_candidates)}):")
             for rej in rejected_candidates:
                 reasons_str = ", ".join(rej['reasons'])
                 logger.info(

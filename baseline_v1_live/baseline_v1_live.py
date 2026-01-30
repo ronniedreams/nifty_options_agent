@@ -46,6 +46,7 @@ from .config import (
     LOG_DIR,
     LOG_LEVEL,
     PAPER_TRADING,
+    STATE_DB_PATH,
 )
 from .data_pipeline import DataPipeline
 from .swing_detector import MultiSwingDetector
@@ -93,7 +94,7 @@ class BaselineV1Live:
 
         # Instance identification for dual-instance setup (local vs EC2)
         instance_name = os.getenv("INSTANCE_NAME", "UNKNOWN")
-        db_path = os.getenv("STATE_DB_PATH", "UNKNOWN")
+        db_path = STATE_DB_PATH  # From config.py (has proper default)
 
         logger.info(f"Instance: {instance_name}")
         logger.info(f"Database: {db_path}")
@@ -340,7 +341,7 @@ class BaselineV1Live:
                         reconnect_success = self.data_pipeline.reconnect()
 
                         if reconnect_success:
-                            logger.info("[WATCHDOG] ✅ Reconnection successful, reconciling orders...")
+                            logger.info("[WATCHDOG] [OK] Reconnection successful, reconciling orders...")
 
                             # 🔧 CRITICAL: Reconcile orders with broker after reconnection
                             # This ensures local state matches broker reality
@@ -392,7 +393,7 @@ class BaselineV1Live:
                                     )
 
                                     self.telegram.send_message(
-                                        f"❌ [EMERGENCY] Shutting down due to missing SL orders\n"
+                                        f"[ERROR] [EMERGENCY] Shutting down due to missing SL orders\n"
                                         f"Check broker manually for positions:\n"
                                         f"{', '.join(reconcile_results['sl_orders_missing'])}"
                                     )
@@ -400,7 +401,7 @@ class BaselineV1Live:
                                     self.handle_emergency_shutdown()
                                     raise SystemExit("Missing SL orders after reconnect")
 
-                                logger.info("[WATCHDOG] ✅ Order reconciliation complete")
+                                logger.info("[WATCHDOG] [OK] Order reconciliation complete")
 
                             except SystemExit:
                                 raise  # Re-raise SystemExit
@@ -416,7 +417,7 @@ class BaselineV1Live:
 
                             # Send success notification
                             self.telegram.send_message(
-                                f"✅ [WATCHDOG] RECONNECTION SUCCESSFUL\n\n"
+                                f"[OK] [WATCHDOG] RECONNECTION SUCCESSFUL\n\n"
                                 f"WebSocket reconnected and operational.\n"
                                 f"Orders reconciled with broker.\n"
                                 f"Trading system continuing normally."
@@ -428,13 +429,13 @@ class BaselineV1Live:
                         else:
                             # Reconnection failed - trigger emergency shutdown
                             logger.critical(
-                                f"[WATCHDOG] ❌ Reconnection failed after multiple attempts - "
+                                f"[WATCHDOG] [ERROR] Reconnection failed after multiple attempts - "
                                 f"initiating emergency shutdown"
                             )
 
                             # Send critical Telegram alert
                             self.telegram.send_message(
-                                f"❌ [WATCHDOG CRITICAL] RECONNECTION FAILED\n\n"
+                                f"[ERROR] [WATCHDOG CRITICAL] RECONNECTION FAILED\n\n"
                                 f"Reason: {stale_reason}\n"
                                 f"Reconnection attempts: All failed\n\n"
                                 f"🚨 Emergency shutdown initiated...\n"
@@ -769,7 +770,7 @@ class BaselineV1Live:
                 
                 # Send success confirmation
                 self.telegram.send_message(
-                    f"✅ Emergency exit order placed\n\n"
+                    f"[OK] Emergency exit order placed\n\n"
                     f"Symbol: {symbol}\n"
                     f"Order ID: {emergency_order_id}\n"
                     f"Type: MARKET (force close)\n\n"
@@ -789,7 +790,7 @@ class BaselineV1Live:
                 
                 # Send critical failure alert
                 self.telegram.send_message(
-                    f"❌ EMERGENCY EXIT FAILED\n\n"
+                    f"[ERROR] EMERGENCY EXIT FAILED\n\n"
                     f"Symbol: {symbol}\n"
                     f"Qty: {quantity}\n\n"
                     f"🚨 MANUAL BROKER INTERVENTION REQUIRED!\n"

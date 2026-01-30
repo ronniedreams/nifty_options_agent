@@ -432,7 +432,7 @@ class OrderManager:
                 
                 if not position_exists:
                     logger.warning(
-                        f"⚠️ Emergency exit cancelled: No open position for {symbol}. "
+                        f"[WARNING] Emergency exit cancelled: No open position for {symbol}. "
                         f"Prevents opening reverse long position."
                     )
                     return None
@@ -461,7 +461,7 @@ class OrderManager:
                     order_id = response.get('orderid')
                     
                     logger.critical(
-                        f"✅ Emergency exit successful: order {order_id} | "
+                        f"[OK] Emergency exit successful: order {order_id} | "
                         f"Attempt {attempt + 1}/{EMERGENCY_EXIT_RETRY_COUNT}"
                     )
                     
@@ -610,7 +610,7 @@ class OrderManager:
                     continue
                 
                 if order_details['status'] == 'complete':
-                    # ✅ Use FILLED QUANTITY from broker, not intended quantity
+                    # [OK] Use FILLED QUANTITY from broker, not intended quantity
                     filled_qty = order_details['filled_quantity']
                     fill_price = order_details['average_price'] or order_info['limit_price']
                     
@@ -618,7 +618,7 @@ class OrderManager:
                         'symbol': symbol,
                         'order_id': order_id,
                         'fill_price': fill_price,
-                        'quantity': filled_qty,  # ✅ Actual filled quantity
+                        'quantity': filled_qty,  # [OK] Actual filled quantity
                         'filled_at': datetime.now(IST),
                         'candidate_info': order_info['candidate_info'],
                     }
@@ -813,6 +813,9 @@ class OrderManager:
         """
         Place stop-limit (SL) order via broker API with retry logic
 
+        DUPLICATE PREVENTION: Before retrying, checks if order already exists at broker.
+        Prevents placing duplicate orders when API response is delayed/malformed.
+
         Args:
             symbol: Option symbol (e.g., NIFTY30DEC2526000CE)
             trigger_price: Price at which order becomes active (swing_low - tick_size)
@@ -848,16 +851,137 @@ class OrderManager:
                 else:
                     error_msg = response.get('message', 'Unknown error')
                     logger.error(f"SL order failed (attempt {attempt + 1}/{MAX_ORDER_RETRIES}): {error_msg}")
+
+                    # CRITICAL FIX: Before retrying, check if order already exists at broker
+                    # Prevents duplicates when API response is delayed but order was actually placed
                     if attempt < MAX_ORDER_RETRIES - 1:
+                        logger.info(f"[DUPLICATE-CHECK] Checking if order already exists for {symbol} before retry {attempt + 2}")
+                        existing_order_id = self._check_existing_order_at_broker(symbol, trigger_price, limit_price, quantity)
+                        if existing_order_id:
+                            logger.warning(f"[DUPLICATE-PREVENTED] Order {existing_order_id} already exists for {symbol} - using existing instead of retry")
+                            return existing_order_id
+
                         time.sleep(ORDER_RETRY_DELAY)
 
             except Exception as e:
                 logger.error(f"Exception placing SL order (attempt {attempt + 1}/{MAX_ORDER_RETRIES}): {e}")
+
+                # CRITICAL FIX: Before retrying after exception, check if order exists
                 if attempt < MAX_ORDER_RETRIES - 1:
+                    logger.info(f"[DUPLICATE-CHECK] Checking if order already exists for {symbol} before retry {attempt + 2}")
+                    existing_order_id = self._check_existing_order_at_broker(symbol, trigger_price, limit_price, quantity)
+                    if existing_order_id:
+                        logger.warning(f"[DUPLICATE-PREVENTED] Order {existing_order_id} already exists for {symbol} - using existing instead of retry")
+                        return existing_order_id
+
                     time.sleep(ORDER_RETRY_DELAY)
 
         logger.error(f"Failed to place SL order after {MAX_ORDER_RETRIES} attempts")
         return None
+
+    def _check_existing_order_at_broker(
+        self,
+        symbol: str,
+        trigger_price: float,
+        limit_price: float,
+        quantity: int
+    ) -> Optional[str]:
+        """
+        Check if an order with matching parameters already exists at broker
+
+        Used to prevent duplicate orders when API response is delayed/malformed
+        but order was actually placed at broker.
+
+        Args:
+            symbol: Option symbol
+            trigger_price: Expected trigger price
+            limit_price: Expected limit price
+            quantity: Expected quantity
+
+        Returns:
+            Order ID if matching order found (OPEN/PENDING status), None otherwise
+        """
+        try:
+            response = self.client.orderbook()
+
+            if response.get('status') != 'success':
+                logger.debug(f"[DUPLICATE-CHECK] Orderbook API failed: {response}")
+                return None
+
+            broker_orders = response.get('data', [])
+
+            # CRITICAL FIX: Handle nested orderbook structure (same as check_fills_by_type)
+            if not isinstance(broker_orders, list):
+                logger.debug(f"[DUPLICATE-CHECK] Orderbook data is not a list: {type(broker_orders)}")
+
+                # Try to extract list from nested structure (some brokers nest it)
+                if isinstance(broker_orders, dict):
+                    # Try common nested keys
+                    for key in ['orders', 'data', 'orderbook']:
+                        if key in broker_orders and isinstance(broker_orders[key], list):
+                            logger.debug(f"[DUPLICATE-CHECK] Found orders list in nested key '{key}'")
+                            broker_orders = broker_orders[key]
+                            break
+                    else:
+                        # No valid list found in nested structure
+                        logger.debug(f"[DUPLICATE-CHECK] Could not find orders list in dict keys: {list(broker_orders.keys())}")
+                        return None
+                else:
+                    # Not a dict either, cannot recover
+                    logger.debug(f"[DUPLICATE-CHECK] Orderbook data is not dict or list")
+                    return None
+
+            # Search for matching order in last 5 minutes (recent orders)
+            now = datetime.now(IST)
+            price_tolerance = 0.10  # Allow 10 paisa difference due to rounding
+
+            for order in broker_orders:
+                if not isinstance(order, dict):
+                    continue
+
+                # Check symbol matches
+                if order.get('symbol') != symbol:
+                    continue
+
+                # Check order type is SL
+                if order.get('price_type') != 'SL':
+                    continue
+
+                # Check status is OPEN or PENDING (not completed/rejected)
+                status = order.get('order_status', '').lower()
+                if status not in ['open', 'pending', 'trigger pending']:
+                    continue
+
+                # Check trigger price matches (within tolerance)
+                order_trigger = float(order.get('trigger_price', 0))
+                if abs(order_trigger - trigger_price) > price_tolerance:
+                    continue
+
+                # Check limit price matches (within tolerance)
+                order_limit = float(order.get('price', 0))
+                if abs(order_limit - limit_price) > price_tolerance:
+                    continue
+
+                # Check quantity matches
+                order_qty = int(order.get('quantity', 0))
+                if order_qty != quantity:
+                    continue
+
+                # Found matching order!
+                order_id = order.get('orderid')
+                logger.info(
+                    f"[DUPLICATE-CHECK] Found existing order {order_id} for {symbol} "
+                    f"(trigger={order_trigger:.2f}, limit={order_limit:.2f}, qty={order_qty})"
+                )
+                return order_id
+
+            # No matching order found
+            logger.debug(f"[DUPLICATE-CHECK] No existing order found for {symbol}")
+            return None
+
+        except Exception as e:
+            logger.error(f"[DUPLICATE-CHECK] Error checking orderbook: {e}")
+            return None
 
     def _place_broker_limit_order(self, symbol: str, price: float, quantity: int) -> Optional[str]:
         """Place limit order via broker API with retry logic"""
@@ -1036,7 +1160,7 @@ class OrderManager:
                     continue
 
                 if status == 'complete':
-                    # ✅ Use FILLED QUANTITY and average price from broker
+                    # [OK] Use FILLED QUANTITY and average price from broker
                     filled_qty = int(broker_order.get('filled_quantity', pending['quantity']))
                     fill_price = float(broker_order.get('average_price') or broker_order.get('price', pending['limit_price']))
 
@@ -1045,7 +1169,7 @@ class OrderManager:
                         'symbol': pending['symbol'],
                         'order_id': order_id,
                         'fill_price': fill_price,
-                        'quantity': filled_qty,  # ✅ Use actual filled quantity
+                        'quantity': filled_qty,  # [OK] Use actual filled quantity
                         'candidate_info': pending['candidate_info'],
                         'fill_time': datetime.now(IST)
                     }
@@ -1264,7 +1388,7 @@ class OrderManager:
             # ═══════════════════════════════════════════════════════════
 
             logger.info(
-                f"[RECONCILE] ✅ Reconciliation complete:\n"
+                f"[RECONCILE] [OK] Reconciliation complete:\n"
                 f"  - Limit orders removed: {len(results['limit_orders_removed'])}\n"
                 f"  - Limit orders filled: {len(results['limit_orders_filled'])}\n"
                 f"  - SL orders missing: {len(results['sl_orders_missing'])}\n"

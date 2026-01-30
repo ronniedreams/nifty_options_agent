@@ -65,13 +65,14 @@ class TelegramNotifier:
         self.enabled = TELEGRAM_ENABLED
         self.bot_token = TELEGRAM_BOT_TOKEN
         self.chat_id = TELEGRAM_CHAT_ID
-        
+        self.instance_name = os.getenv("INSTANCE_NAME", "UNKNOWN")
+
         if self.enabled:
             if not self.bot_token or not self.chat_id:
                 logger.warning("Telegram enabled but token/chat_id not configured")
                 self.enabled = False
             else:
-                logger.info("Telegram notifications enabled")
+                logger.info(f"Telegram notifications enabled for instance: {self.instance_name}")
                 # Startup message disabled to prevent spam
                 # self.send_message("Baseline V1 Live Trading started", parse_mode=None)
     
@@ -145,6 +146,7 @@ class TelegramNotifier:
         sl_points = candidate['sl_points']
         
         message = f"""
+<b>[{self.instance_name}]</b>
 🟢 <b>TRADE ENTRY</b>
 
 Symbol: <code>{symbol}</code>
@@ -189,6 +191,7 @@ Time: {datetime.now(IST).strftime('%H:%M:%S')}
         reason_text = reason_map.get(exit_reason, exit_reason)
         
         message = f"""
+<b>[{self.instance_name}]</b>
 {emoji} <b>TRADE EXIT</b>
 
 Symbol: <code>{symbol}</code>
@@ -221,6 +224,7 @@ Time: {datetime.now(IST).strftime('%H:%M:%S')}
         emoji = "🎯" if cumulative_R > 0 else "🛑"
         
         message = f"""
+<b>[{self.instance_name}]</b>
 {emoji} <b>DAILY TARGET HIT!</b>
 
 Cumulative R: <b>{cumulative_R:+.2f}R</b>
@@ -254,6 +258,7 @@ Time: {datetime.now(IST).strftime('%H:%M:%S')}
             emoji = "📉"
         
         message = f"""
+<b>[{self.instance_name}]</b>
 {emoji} <b>DAILY SUMMARY</b>
 
 Date: {datetime.now(IST).strftime('%d %b %Y')}
@@ -278,6 +283,7 @@ Trading session ended.
             return
         
         message = f"""
+<b>[{self.instance_name}]</b>
 ⚠️ <b>ERROR</b>
 
 {error_msg}
@@ -303,6 +309,7 @@ Please check logs.
         unrealized_pnl = summary.get('unrealized_pnl', 0)
 
         message = f"""
+<b>[{self.instance_name}]</b>
 📈 <b>POSITION UPDATE</b>
 
 Open: {total_positions} ({ce_positions} CE, {pe_positions} PE)
@@ -340,6 +347,7 @@ Time: {datetime.now(IST).strftime('%H:%M:%S')}
         action = "SELECTED" if is_new else "UPDATED"
 
         message = f"""
+<b>[{self.instance_name}]</b>
 {emoji} <b>BEST {option_type} {action}</b>
 
 Symbol: <code>{symbol}</code>
