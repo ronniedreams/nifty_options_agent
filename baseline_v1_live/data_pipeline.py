@@ -161,8 +161,7 @@ class DataPipeline:
             self.client = api(
                 api_key=OPENALGO_API_KEY,
                 host=OPENALGO_HOST,
-                ws_url=OPENALGO_WS_URL,
-                verbose=0  # Disable verbose - system working
+                ws_url=OPENALGO_WS_URL
             )
             
             connected = self.client.connect()
