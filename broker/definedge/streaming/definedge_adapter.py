@@ -221,7 +221,7 @@ class DefinedgeWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 self.logger.info(
                     f"Connecting to DefinEdge WebSocket (attempt {self.reconnect_attempts + 1})"
                 )
-                if self.ws_client and self.ws_client.connect():
+                if self.ws_client and self.ws_client.connect(ssl_verify=False):
                     self.reconnect_attempts = 0  # Reset attempts on successful connection
                     self.connected = True
                     break
