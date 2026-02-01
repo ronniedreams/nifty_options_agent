@@ -12,10 +12,12 @@ Position Sizing:
 
 import os
 from datetime import time
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file in the same directory as this config file
+env_path = Path(__file__).parent / '.env'
+load_dotenv(dotenv_path=env_path)
 
 # ============================================================================
 # CAPITAL & POSITION SIZING
