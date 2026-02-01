@@ -15,9 +15,17 @@ from datetime import time
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from .env file in the same directory as this config file
-env_path = Path(__file__).parent / '.env'
-load_dotenv(dotenv_path=env_path)
+# Load environment variables from .env file
+# Try parent directory first (Docker: /app/.env), then same directory (local: baseline_v1_live/.env)
+env_path_docker = Path(__file__).parent.parent / '.env'
+env_path_local = Path(__file__).parent / '.env'
+
+if env_path_docker.exists():
+    load_dotenv(dotenv_path=env_path_docker)
+elif env_path_local.exists():
+    load_dotenv(dotenv_path=env_path_local)
+else:
+    load_dotenv()  # Fallback to default behavior
 
 # ============================================================================
 # CAPITAL & POSITION SIZING
