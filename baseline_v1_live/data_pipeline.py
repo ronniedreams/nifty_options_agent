@@ -539,21 +539,36 @@ class DataPipeline:
         logger.info(f"Sample symbols: {symbols[:3]}")  # Debug: show first 3 symbols
         return symbols
     
-    def subscribe_options(self, symbols):
+    def subscribe_options(self, symbols, spot_symbol=None):
         """
-        Subscribe to option symbols via WebSocket
+        Subscribe to option symbols and NIFTY spot via WebSocket
 
         Args:
             symbols: List of option symbols to subscribe
+            spot_symbol: Optional NIFTY spot symbol (e.g., "Nifty 50")
         """
         if not self.is_connected:
             logger.error("Cannot subscribe: WebSocket not connected")
             return
 
+        all_symbols = list(symbols)
+
+        # Add spot symbol if provided
+        if spot_symbol:
+            all_symbols.append(spot_symbol)
+            logger.info(f"Including NIFTY spot symbol: {spot_symbol}")
+
         instruments = [
             {"exchange": EXCHANGE, "symbol": symbol}
             for symbol in symbols
         ]
+
+        # Add spot instrument with NSE exchange
+        if spot_symbol:
+            instruments.append({
+                "exchange": "NSE",  # Spot is on NSE, not NFO
+                "symbol": spot_symbol
+            })
 
         try:
             # Subscribe to quote mode (LTP, OHLC, Volume)
@@ -563,9 +578,9 @@ class DataPipeline:
             )
 
             with self.lock:
-                self.subscribed_symbols.update(symbols)
+                self.subscribed_symbols.update(all_symbols)
 
-            logger.info(f"Subscribed to {len(symbols)} option symbols")
+            logger.info(f"Subscribed to {len(symbols)} option symbols + {1 if spot_symbol else 0} spot symbol")
 
             # Start connection monitoring thread if not already running
             if not self.monitor_running:
@@ -874,15 +889,66 @@ class DataPipeline:
         """Check if data for symbol is stale (no recent ticks)"""
         with self.lock:
             return self._is_data_stale_unlocked(symbol, max_age_seconds)
-    
+
     def _is_data_stale_unlocked(self, symbol, max_age_seconds=MAX_TICK_AGE_SECONDS):
         """Internal version without lock - must be called with lock held"""
         last_tick = self.last_tick_time.get(symbol)
         if last_tick is None:
             return True
-        
+
         age = (datetime.now(IST) - last_tick).total_seconds()
         return age > max_age_seconds
+
+    def get_spot_price(self, spot_symbol="Nifty 50"):
+        """
+        Get current NIFTY spot price from WebSocket (latest tick)
+
+        Args:
+            spot_symbol: Symbol for NIFTY spot (default: "Nifty 50")
+
+        Returns:
+            float: Latest LTP (last traded price) or None if unavailable
+        """
+        with self.lock:
+            # Try to get from current bar (real-time tick)
+            current_bar = self.current_bars.get(spot_symbol)
+            if current_bar and current_bar.close is not None:
+                return current_bar.close  # LTP is stored as close
+
+            # Fallback: Get from latest completed bar
+            bars = self.bars.get(spot_symbol, [])
+            if bars:
+                return bars[-1].close
+
+            return None
+
+    def get_spot_bar(self, spot_symbol="Nifty 50", bar_time=None):
+        """
+        Get NIFTY spot bar at specific timestamp (e.g., 9:16 AM candle)
+
+        Args:
+            spot_symbol: Symbol for NIFTY spot (default: "Nifty 50")
+            bar_time: datetime object for bar timestamp (e.g., 9:16 AM)
+
+        Returns:
+            BarData object or None if not found
+        """
+        if bar_time is None:
+            # Return latest completed bar
+            return self.get_latest_bar(spot_symbol)
+
+        # Normalize bar_time to minute boundary
+        if bar_time.tzinfo is None:
+            bar_time = IST.localize(bar_time)
+        target_timestamp = bar_time.replace(second=0, microsecond=0)
+
+        with self.lock:
+            bars = self.bars.get(spot_symbol, [])
+            for bar in bars:
+                if bar.timestamp == target_timestamp:
+                    return bar
+
+            return None
     
     def get_health_status(self):
         """

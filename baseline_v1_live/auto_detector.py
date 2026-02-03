@@ -20,10 +20,20 @@ IST = pytz.timezone('Asia/Kolkata')
 class AutoDetector:
     """Automatically detect ATM strike and expiry for NIFTY options"""
 
-    def __init__(self, api_key: str, host: str):
-        """Initialize with OpenAlgo credentials"""
+    def __init__(self, api_key: str, host: str, data_pipeline=None, spot_symbol="Nifty 50"):
+        """
+        Initialize with OpenAlgo credentials
+
+        Args:
+            api_key: OpenAlgo API key
+            host: OpenAlgo host URL
+            data_pipeline: Optional DataPipeline instance for WebSocket-based spot price
+            spot_symbol: NIFTY spot symbol (default: "Nifty 50")
+        """
         self.api_key = api_key
         self.host = host.rstrip('/')
+        self.data_pipeline = data_pipeline
+        self.spot_symbol = spot_symbol
 
     def wait_for_market_open(self, wait_minutes=1):
         """
@@ -42,9 +52,52 @@ class AutoDetector:
         else:
             logger.info(f"[AUTO] Already past {target_time.strftime('%H:%M:%S')}, proceeding immediately")
 
+    def fetch_spot_price_from_websocket(self):
+        """
+        Fetch NIFTY spot price from WebSocket (preferred method)
+
+        Strategy:
+        - If before 9:16 AM: Wait for 9:16 candle close
+        - If after 9:16 AM: Use current LTP from WebSocket
+
+        Returns: float (e.g., 24248.75) or None if unavailable
+        """
+        if not self.data_pipeline:
+            logger.warning("[AUTO] DataPipeline not available for WebSocket spot price")
+            return None
+
+        now = datetime.now(IST)
+        target_time = now.replace(hour=9, minute=16, second=0, microsecond=0)
+
+        # Case 1: Before 9:16 AM - wait for candle close
+        if now < target_time:
+            wait_seconds = (target_time - now).total_seconds()
+            logger.info(f"[AUTO] Waiting {wait_seconds:.0f}s for 9:16 AM candle close...")
+            time_module.sleep(wait_seconds)
+
+            # Get 9:16 bar close
+            bar = self.data_pipeline.get_spot_bar(self.spot_symbol, target_time)
+            if bar and bar.close is not None:
+                logger.info(f"[AUTO] NIFTY Spot from WebSocket (9:16 close): {bar.close}")
+                return float(bar.close)
+            else:
+                logger.warning("[AUTO] 9:16 bar not available, will try API fallback")
+                return None
+
+        # Case 2: After 9:16 AM - use current LTP
+        else:
+            logger.info(f"[AUTO] Already past 9:16 AM, using current WebSocket LTP")
+            ltp = self.data_pipeline.get_spot_price(self.spot_symbol)
+            if ltp is not None:
+                logger.info(f"[AUTO] NIFTY Spot from WebSocket (current LTP): {ltp}")
+                return float(ltp)
+            else:
+                logger.warning("[AUTO] WebSocket LTP not available, will try API fallback")
+                return None
+
     def fetch_spot_price(self):
         """
-        Fetch NIFTY spot price from OpenAlgo quotes API
+        Fetch NIFTY spot price from OpenAlgo quotes API (fallback method)
         Returns: float (e.g., 24248.75)
         """
         url = f"{self.host}/api/v1/quotes"
@@ -60,7 +113,7 @@ class AutoDetector:
         data = response.json()
         if data.get("status") == "success":
             ltp = data["data"]["ltp"]
-            logger.info(f"[AUTO] NIFTY Spot: {ltp}")
+            logger.info(f"[AUTO] NIFTY Spot from API: {ltp}")
             return float(ltp)
         else:
             raise Exception(f"Quote API failed: {data.get('message', 'Unknown error')}")
@@ -160,28 +213,37 @@ class AutoDetector:
     def auto_detect(self):
         """
         Main auto-detection method
+
+        Uses WebSocket for spot price (preferred), with API fallback if unavailable.
+
         Returns: tuple (atm_strike: int, expiry_date: str)
         """
         try:
-            # Step 1: Wait for market open (if before 9:16 AM)
-            self.wait_for_market_open(wait_minutes=1)
+            # Step 1: Fetch spot price
+            # Try WebSocket first (if data_pipeline available)
+            spot_price = None
+            if self.data_pipeline:
+                logger.info("[AUTO] Attempting WebSocket-based spot price detection...")
+                spot_price = self.fetch_spot_price_from_websocket()
 
-            # Step 2: Fetch spot price (with retry)
-            spot_price = self._api_call_with_retry(self.fetch_spot_price)
+            # Fallback to API if WebSocket failed
+            if spot_price is None:
+                logger.info("[AUTO] Using API fallback for spot price...")
+                spot_price = self._api_call_with_retry(self.fetch_spot_price)
 
-            # Step 3: Calculate ATM strike
+            # Step 2: Calculate ATM strike
             atm_strike = self.calculate_atm_strike(spot_price)
 
-            # Step 4: Fetch expiries (with retry)
+            # Step 3: Fetch expiries (with retry)
             expiries = self._api_call_with_retry(self.fetch_expiries)
 
-            # Step 5: Find nearest expiry
+            # Step 4: Find nearest expiry
             nearest_expiry = self.find_nearest_expiry(expiries)
 
-            # Step 6: Convert to system format
+            # Step 5: Convert to system format
             expiry_date = self.convert_expiry_format(nearest_expiry)
 
-            # Step 7: Validate
+            # Step 6: Validate
             self._validate(atm_strike, expiry_date)
 
             logger.info(f"[AUTO] Auto-detection complete: ATM={atm_strike}, Expiry={expiry_date}")

@@ -1017,14 +1017,39 @@ def main():
 
     # Determine ATM and expiry based on mode
     if args.auto:
-        # Auto mode - detect ATM and expiry
-        logger.info("[AUTO] Auto-detection mode enabled")
+        # Auto mode - detect ATM and expiry using WebSocket
+        logger.info("[AUTO] Auto-detection mode enabled (WebSocket + API fallback)")
 
         from .auto_detector import AutoDetector
         from .config import OPENALGO_API_KEY, OPENALGO_HOST
+        from .data_pipeline import DataPipeline
 
-        detector = AutoDetector(api_key=OPENALGO_API_KEY, host=OPENALGO_HOST)
+        # Create temporary data pipeline for spot price detection
+        temp_pipeline = DataPipeline()
+        logger.info("[AUTO] Connecting to WebSocket for spot price...")
+        temp_pipeline.connect()
+
+        # Subscribe to NIFTY spot symbol
+        spot_symbol = "Nifty 50"  # Default broker symbol for NIFTY spot
+        logger.info(f"[AUTO] Subscribing to NIFTY spot: {spot_symbol}")
+        temp_pipeline.subscribe_options([], spot_symbol=spot_symbol)
+
+        # Wait a moment for WebSocket to establish and receive first tick
+        import time
+        time.sleep(3)  # Give WebSocket time to receive data
+
+        # Run auto-detection with WebSocket support
+        detector = AutoDetector(
+            api_key=OPENALGO_API_KEY,
+            host=OPENALGO_HOST,
+            data_pipeline=temp_pipeline,
+            spot_symbol=spot_symbol
+        )
         atm_strike, expiry_date = detector.auto_detect()
+
+        # Clean up temporary pipeline
+        logger.info("[AUTO] Cleaning up temporary WebSocket connection...")
+        temp_pipeline.disconnect()
 
         logger.info(f"[AUTO] Detected ATM: {atm_strike}, Expiry: {expiry_date}")
     else:
