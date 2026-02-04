@@ -532,7 +532,10 @@ class StateManager:
         cursor = self.conn.cursor()
 
         cursor.execute('''
-            INSERT OR REPLACE INTO daily_state VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO daily_state
+            (trade_date, cumulative_R, daily_exit_triggered, daily_exit_reason,
+             total_pnl, total_positions, expiry, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             datetime.now(IST).date().isoformat(),
             state.get('cumulative_R', 0),
@@ -540,8 +543,8 @@ class StateManager:
             state.get('daily_exit_reason'),
             state.get('total_pnl', 0),
             state.get('total_positions', 0),
-            datetime.now(IST).isoformat(),
-            state.get('expiry')
+            state.get('expiry'),
+            datetime.now(IST).isoformat()
         ))
 
         # Commit handled by @atomic_transaction decorator
