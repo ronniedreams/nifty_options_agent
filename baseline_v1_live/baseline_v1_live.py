@@ -1024,21 +1024,26 @@ def main():
         from .config import OPENALGO_API_KEY, OPENALGO_HOST
         from .data_pipeline import DataPipeline
 
-        # Create temporary data pipeline for spot price detection
-        temp_pipeline = DataPipeline()
-        logger.info("[AUTO] Connecting to WebSocket for spot price...")
-        temp_pipeline.connect()
+        # Try WebSocket for spot price, fall back to API if it fails
+        temp_pipeline = None
+        spot_symbol = "Nifty 50"
 
-        # Subscribe to NIFTY spot symbol
-        spot_symbol = "Nifty 50"  # Default broker symbol for NIFTY spot
-        logger.info(f"[AUTO] Subscribing to NIFTY spot: {spot_symbol}")
-        temp_pipeline.subscribe_options([], spot_symbol=spot_symbol)
+        try:
+            temp_pipeline = DataPipeline()
+            logger.info("[AUTO] Connecting to WebSocket for spot price...")
+            temp_pipeline.connect()
 
-        # Wait a moment for WebSocket to establish and receive first tick
-        import time
-        time.sleep(3)  # Give WebSocket time to receive data
+            logger.info(f"[AUTO] Subscribing to NIFTY spot: {spot_symbol}")
+            temp_pipeline.subscribe_options([], spot_symbol=spot_symbol)
 
-        # Run auto-detection with WebSocket support
+            # Give WebSocket time to receive first tick
+            time.sleep(3)
+        except Exception as e:
+            logger.warning(f"[AUTO] WebSocket connection failed: {e}")
+            logger.info("[AUTO] Will use API fallback for spot price")
+            temp_pipeline = None  # Signal AutoDetector to skip WebSocket
+
+        # Run auto-detection (WebSocket if connected, else API fallback)
         detector = AutoDetector(
             api_key=OPENALGO_API_KEY,
             host=OPENALGO_HOST,
@@ -1047,9 +1052,10 @@ def main():
         )
         atm_strike, expiry_date = detector.auto_detect()
 
-        # Clean up temporary pipeline
-        logger.info("[AUTO] Cleaning up temporary WebSocket connection...")
-        temp_pipeline.disconnect()
+        # Clean up if WebSocket was used
+        if temp_pipeline:
+            logger.info("[AUTO] Cleaning up temporary WebSocket connection...")
+            temp_pipeline.disconnect()
 
         logger.info(f"[AUTO] Detected ATM: {atm_strike}, Expiry: {expiry_date}")
     else:
