@@ -115,10 +115,15 @@ class BaselineV1Live:
         # State manager must be initialized first
         self.state_manager = StateManager()
         
-        # 🔧 CRITICAL: Reset dashboard data for new trading day
-        # This clears yesterday's best_strikes, swing_candidates, etc.
-        # Prevents stale data from showing in monitor dashboard
-        self.state_manager.reset_daily_dashboard_data()
+        # FIX: Only reset dashboard data if it's a new day
+        last_state = self.state_manager.load_daily_state()
+        today = datetime.now(IST).date().isoformat()
+        
+        if last_state is None or last_state.get('trade_date') != today:
+            logger.info(f"[NEW-DAY] Resetting dashboard data for new trading day: {today}")
+            self.state_manager.reset_daily_dashboard_data()
+        else:
+            logger.info(f"[RESTART] Same day restart detected ({today}), keeping dashboard data")
         
         # Swing detector with callback for new swings
         self.swing_detector = MultiSwingDetector(
@@ -163,8 +168,97 @@ class BaselineV1Live:
         # Last bar update time
         self.last_bar_update = None
 
+        # FIX: Load previous state from database (CRITICAL for crash recovery)
+        self.load_state()
+
         logger.info("Initialization complete")
     
+    def load_state(self):
+        """Restore strategy state from database after crash/restart"""
+        logger.info("[RECOVERY] Restoring state from database...")
+
+        try:
+            # 1. Load daily state (cumulative R, exit status)
+            daily_state = self.state_manager.load_daily_state()
+
+            # 2. Load open positions
+            open_positions_data = self.state_manager.load_open_positions()
+
+            # 3. Restore to PositionTracker
+            self.position_tracker.restore_state(open_positions_data, daily_state)
+
+            # 4. Load pending and active orders
+            pending_limit, active_sl = self.state_manager.load_orders()
+
+            # 5. Restore to OrderManager
+            self.order_manager.restore_state(pending_limit, active_sl)
+
+            logger.info(
+                f"[RECOVERY] State recovery complete. Restored {len(open_positions_data)} positions "
+                f"and {len(pending_limit) + len(active_sl)} orders."
+            )
+            # NOTE: Order reconciliation against broker (step 6) is deferred to
+            # start(), after data_pipeline is connected and bars are loaded.
+            # get_all_latest_bars() returns empty before that point.
+
+        except Exception as e:
+            logger.error(f"[RECOVERY] Failed to restore state: {e}", exc_info=True)
+            # Strategy will continue with fresh state if recovery fails
+
+    def _reconcile_restored_orders(self):
+        """Reconcile orders that were restored from DB against the live broker.
+
+        Must be called AFTER data_pipeline is connected and historical bars
+        are loaded -- get_all_latest_bars() is empty before that point.
+
+        Handles three scenarios that can occur during a crash:
+        - Entry order filled at broker but not recorded locally -> creates
+          position and places exit SL immediately.
+        - Entry order rejected/cancelled by broker -> already cleaned up by
+          reconcile_orders_with_broker.
+        - Exit SL order missing for an open position -> fires critical alert.
+        """
+        if not self.order_manager.pending_limit_orders and not self.order_manager.active_sl_orders:
+            return
+
+        logger.info("[RECOVERY] Reconciling restored orders with broker...")
+        try:
+            open_positions = self.position_tracker.open_positions
+            reconcile_results = self.order_manager.reconcile_orders_with_broker(
+                open_positions
+            )
+
+            # Process any fills discovered during the crash window
+            if reconcile_results['limit_orders_filled']:
+                logger.warning(
+                    f"[RECOVERY] Found {len(reconcile_results['limit_orders_filled'])} "
+                    f"orders filled during crash window"
+                )
+
+                latest_bars = self.data_pipeline.get_all_latest_bars()
+                current_prices = {symbol: bar.close for symbol, bar in latest_bars.items()}
+
+                for fill_info in reconcile_results['limit_orders_filled']:
+                    logger.warning(
+                        f"[RECOVERY] Processing fill from crash window: "
+                        f"{fill_info['symbol']} @ {fill_info['fill_price']:.2f}"
+                    )
+                    self.handle_order_fill(fill_info, current_prices)
+
+            # Alert on missing SL orders (positions without stop-loss)
+            if reconcile_results['sl_orders_missing']:
+                critical_msg = (
+                    f"[CRITICAL] MISSING SL ORDERS after crash recovery. "
+                    f"Positions without SL: {', '.join(reconcile_results['sl_orders_missing'])}. "
+                    f"MANUAL BROKER CHECK REQUIRED."
+                )
+                logger.critical(critical_msg)
+                self.telegram.send_message(critical_msg)
+
+        except Exception as e:
+            logger.error(f"[RECOVERY] Order reconciliation failed: {e}", exc_info=True)
+            # Non-fatal: system continues but operator should verify broker state
+
     def start(self):
         """Start live trading"""
         logger.info("="*80)
@@ -320,9 +414,16 @@ class BaselineV1Live:
         # From now on, swings will be logged to database automatically
         self.swing_detector.enable_live_mode()
         logger.info("[HIST] Live mode enabled - new swings will auto-log to database")
-        
+
+        # CRITICAL: Reconcile any orders restored from DB against broker.
+        # Deferred from load_state() because get_all_latest_bars() requires
+        # the data pipeline to be connected and bars to be loaded.
+        # Orders may have filled, been rejected, or triggered during the crash.
+        # An unreconciled fill leaves a position at the broker with no exit SL.
+        self._reconcile_restored_orders()
+
         logger.info("="*80)
-        
+
         # Wait for live data stream to stabilize
         logger.info("Waiting for live WebSocket stream to stabilize...")
         time.sleep(10)
@@ -944,12 +1045,10 @@ class BaselineV1Live:
         # Save final state
         self.save_state()
         
-        # Save daily summary
-        # Send Telegram notification
-        self.telegram.notify_daily_target(summary)
-        
+        # Save daily summary and notify
         summary = self.position_tracker.get_position_summary()
         self.state_manager.save_daily_summary(summary)
+        self.telegram.notify_daily_target(summary)
         
         logger.info(f"Daily Summary: {summary}")
         logger.info("Trading stopped for the day")

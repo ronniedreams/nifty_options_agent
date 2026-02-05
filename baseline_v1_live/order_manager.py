@@ -75,6 +75,22 @@ class OrderManager:
         self.emergency_exit_triggered = False
         
         logger.info("OrderManager initialized (option-type based tracking)")
+
+    def restore_state(self, pending_limit: Dict, active_sl: Dict):
+        """
+        Restore order state from database
+        
+        Args:
+            pending_limit: Dict of pending limit orders
+            active_sl: Dict of active SL orders
+        """
+        self.pending_limit_orders = pending_limit
+        self.active_sl_orders = active_sl
+        
+        if pending_limit:
+            logger.info(f"Restored {len(pending_limit)} pending limit orders: {list(pending_limit.keys())}")
+        if active_sl:
+            logger.info(f"Restored {len(active_sl)} active SL orders: {list(active_sl.keys())}")
     
     def place_limit_order(
         self,
@@ -753,7 +769,9 @@ class OrderManager:
         swing_low = candidate.get('swing_low')
         tick_size = candidate.get('tick_size', 0.05)
         trigger_price = swing_low - tick_size
-        limit_price_entry = trigger_price - 3  # 3 rupee buffer for entry
+        
+        # limit_price is guaranteed non-None here (guard on line 759 returns early otherwise)
+        limit_price_entry = limit_price
         
         # Case 2: No existing order - place new
         if not existing:
@@ -1001,27 +1019,25 @@ class OrderManager:
                 return fills
 
             if not isinstance(broker_orders, list):
-                # Log the actual structure to debug
-                logger.error(
-                    f"[CHECK-FILLS] Orderbook data is not a list: {type(broker_orders)}. "
-                    f"Data: {broker_orders}"
-                )
-            
                 # Try to extract list from nested structure (some brokers nest it)
                 # Common patterns: {"orders": [...]} or {"data": [...]}
                 if isinstance(broker_orders, dict):
                     # Try common nested keys
                     for key in ['orders', 'data', 'orderbook']:
                         if key in broker_orders and isinstance(broker_orders[key], list):
-                            logger.info(f"[CHECK-FILLS] Found orders list in nested key '{key}'")
+                            logger.debug(f"[CHECK-FILLS] Found orders list in nested key '{key}'")
                             broker_orders = broker_orders[key]
                             break
                     else:
                         # No valid list found
-                        logger.error(f"[CHECK-FILLS] Could not find orders list in dict keys: {list(broker_orders.keys())}")
+                        logger.error(
+                            f"[CHECK-FILLS] Orderbook data is not a list and no nested list found. "
+                            f"Type: {type(broker_orders)}, Keys: {list(broker_orders.keys())}"
+                        )
                         return fills
                 else:
                     # Not a dict either, cannot recover
+                    logger.error(f"[CHECK-FILLS] Orderbook data is not a list or dict: {type(broker_orders)}")
                     return fills
 
             logger.debug(f"[CHECK-FILLS] Processing {len(broker_orders)} broker orders")
@@ -1068,7 +1084,7 @@ class OrderManager:
                     logger.error(
                         f"[CHECK-FILLS] Order {order_id} REJECTED: {broker_order.get('rejected_reason', 'Unknown')}"
                     )
-                    self.pending_limit_orders[option_type] = None
+                    del self.pending_limit_orders[option_type]
                     continue
 
                 if status == 'complete':
@@ -1127,7 +1143,7 @@ class OrderManager:
 
     def reconcile_orders_with_broker(self, open_positions: Dict) -> Dict:
         """
-        🔧 CRITICAL: Reconcile local order state with broker after reconnection
+        CRITICAL: Reconcile local order state with broker after reconnection
 
         After WebSocket reconnect, orders may have:
         - Filled while we were disconnected
@@ -1223,7 +1239,7 @@ class OrderManager:
                     # Remove from pending
                     del self.pending_limit_orders[option_type]
 
-                elif status in ['REJECTED', 'CANCELLED']:
+                elif status in ['rejected', 'cancelled']:
                     logger.warning(
                         f"[RECONCILE] Limit order {order_id} ({symbol}) was {status} - removing"
                     )
@@ -1238,7 +1254,7 @@ class OrderManager:
             for symbol in open_positions.keys():
                 if symbol not in self.active_sl_orders:
                     logger.critical(
-                        f"[RECONCILE] [WARNING]️ CRITICAL: Position {symbol} has NO SL ORDER in local state!"
+                        f"[RECONCILE] CRITICAL: Position {symbol} has NO SL ORDER in local state!"
                     )
                     results['sl_orders_missing'].append(symbol)
 
@@ -1251,7 +1267,7 @@ class OrderManager:
 
                 if broker_order is None:
                     logger.critical(
-                        f"[RECONCILE] [WARNING]️ CRITICAL: SL order {order_id} ({symbol}) not found at broker!"
+                        f"[RECONCILE] CRITICAL: SL order {order_id} ({symbol}) not found at broker!"
                     )
 
                     # Check if position still exists
@@ -1284,7 +1300,7 @@ class OrderManager:
                 elif status in ['rejected', 'cancelled']:
                     if symbol in open_positions:
                         logger.critical(
-                            f"[RECONCILE] [WARNING]️ CRITICAL: SL order {order_id} ({symbol}) was {status} "
+                            f"[RECONCILE] CRITICAL: SL order {order_id} ({symbol}) was {status} "
                             f"but position still open - MANUAL INTERVENTION REQUIRED!"
                         )
                         results['sl_orders_missing'].append(symbol)
@@ -1300,7 +1316,7 @@ class OrderManager:
             # ═══════════════════════════════════════════════════════════
 
             logger.info(
-                f"[RECONCILE] ✅ Reconciliation complete:\n"
+                f"[RECONCILE] Reconciliation complete:\n"
                 f"  - Limit orders removed: {len(results['limit_orders_removed'])}\n"
                 f"  - Limit orders filled: {len(results['limit_orders_filled'])}\n"
                 f"  - SL orders missing: {len(results['sl_orders_missing'])}\n"
