@@ -306,6 +306,20 @@ Never deploy draft or feature branches to EC2 (unless explicitly testing specifi
 
 ## Tags Naming Convention
 
+### Standard Release Tags (After Market Close)
+
+For general stable releases (no specific feature):
+```
+stable-YYYY-MM-DD
+```
+
+Examples:
+- `stable-2026-02-05` (general release after testing)
+- `stable-2026-02-06` (daily stable snapshot)
+
+### Feature-Specific Tags (During Development)
+
+For pre-market testing and feature releases:
 ```
 pre-market-YYYYMMDD-feature-name
 stable-YYYYMMDD-feature-name
@@ -316,6 +330,10 @@ Examples:
 - `stable-20260128-new-filter`
 - `pre-market-20260129-market-order-fix`
 - `stable-20260129-market-order-fix`
+
+**When to use which:**
+- Use `stable-YYYY-MM-DD` for daily stable releases (recommended for production)
+- Use `stable-YYYYMMDD-feature-X` when you want to mark a specific feature as stable
 
 ---
 
