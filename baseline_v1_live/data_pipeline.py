@@ -224,7 +224,23 @@ class DataPipeline:
                     end_date=end_date
                 )
                 
-                if df.empty:
+                # Handle dictionary response (error or empty)
+                if isinstance(df, dict):
+                    if df.get('status') == 'error':
+                        logger.error(f"API error for {symbol}: {df.get('message')}")
+                        failed += 1
+                        continue
+                    # If it's a dict but not error, check if it has data
+                    if not df.get('data'):
+                        logger.warning(f"No historical data for {symbol}")
+                        failed += 1
+                        continue
+                    # If we reach here, it might be a list of records in 'data'?
+                    # OpenAlgo usually returns DataFrame if successful, but just in case:
+                    import pandas as pd
+                    df = pd.DataFrame(df['data'])
+                
+                if df is None or df.empty:
                     logger.warning(f"No historical data for {symbol}")
                     failed += 1
                     continue
@@ -401,7 +417,17 @@ class DataPipeline:
                     end_date=end_date
                 )
                 
-                if df.empty:
+                # Handle dictionary response
+                if isinstance(df, dict):
+                    if df.get('status') == 'error':
+                        failed_count += 1
+                        continue
+                    if not df.get('data'):
+                        continue
+                    import pandas as pd
+                    df = pd.DataFrame(df['data'])
+
+                if df is None or df.empty:
                     continue
                 
                 # Filter to bars after last_bar_minute
@@ -1259,7 +1285,17 @@ class DataPipeline:
                     end_date=end_date
                 )
                 
-                if df.empty:
+                # Handle dictionary response
+                if isinstance(df, dict):
+                    if df.get('status') == 'error':
+                        failed_count += 1
+                        continue
+                    if not df.get('data'):
+                        continue
+                    import pandas as pd
+                    df = pd.DataFrame(df['data'])
+
+                if df is None or df.empty:
                     continue
                 
                 # Filter to bars after last_bar_time
