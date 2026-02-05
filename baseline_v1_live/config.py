@@ -98,6 +98,10 @@ MAX_SL_FAILURE_COUNT = 3  # Halt trading after 3 consecutive SL failures
 EMERGENCY_EXIT_RETRY_COUNT = 5  # Retry emergency market exit 5 times
 EMERGENCY_EXIT_RETRY_DELAY = 2  # Wait 2 seconds between emergency exit retries
 
+# Order Modification Settings
+MODIFICATION_THRESHOLD = 0.50  # Rs - min price change to trigger order modification
+EXIT_LIMIT_BUFFER_PERCENT = 0.05  # 5% buffer for exit limit orders
+
 # ============================================================================
 # TRADING HOURS (IST)
 # ============================================================================
