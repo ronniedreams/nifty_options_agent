@@ -39,6 +39,7 @@ from .config import (
     EMERGENCY_EXIT_RETRY_COUNT,
     EMERGENCY_EXIT_RETRY_DELAY,
     DRY_RUN,
+    MODIFICATION_THRESHOLD,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,22 @@ class OrderManager:
         self.emergency_exit_triggered = False
         
         logger.info("OrderManager initialized (option-type based tracking)")
+
+    def restore_state(self, pending_limit: Dict, active_sl: Dict):
+        """
+        Restore order state from database
+        
+        Args:
+            pending_limit: Dict of pending limit orders
+            active_sl: Dict of active SL orders
+        """
+        self.pending_limit_orders = pending_limit
+        self.active_sl_orders = active_sl
+        
+        if pending_limit:
+            logger.info(f"Restored {len(pending_limit)} pending limit orders: {list(pending_limit.keys())}")
+        if active_sl:
+            logger.info(f"Restored {len(active_sl)} active SL orders: {list(active_sl.keys())}")
     
     def place_limit_order(
         self,
@@ -752,7 +769,9 @@ class OrderManager:
         swing_low = candidate.get('swing_low')
         tick_size = candidate.get('tick_size', 0.05)
         trigger_price = swing_low - tick_size
-        limit_price_entry = trigger_price - 3  # 3 rupee buffer for entry
+        
+        # limit_price is guaranteed non-None here (guard on line 759 returns early otherwise)
+        limit_price_entry = limit_price
         
         # Case 2: No existing order - place new
         if not existing:
@@ -773,8 +792,20 @@ class OrderManager:
             return 'failed'
 
         # Case 3: Different symbol - cancel old, place new
+        # CRITICAL FIX: Check cancel result BEFORE placing new order to prevent duplicates
         if existing['symbol'] != symbol:
-            self._cancel_broker_order(existing['order_id'])
+            cancel_success = self._cancel_broker_order(existing['order_id'])
+
+            if not cancel_success:
+                # Cancel failed - old order may be triggered/filled at broker
+                # DO NOT place new order to avoid having positions in multiple symbols
+                logger.warning(
+                    f"[SKIP-SWITCH-{option_type}] Cancel failed for {existing['symbol']} order {existing['order_id']} "
+                    f"(may be triggered/filled). NOT switching to {symbol} to prevent duplicates."
+                )
+                return 'kept'
+
+            # Cancel succeeded - safe to place new order for new symbol
             order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
             if order_id:
                 self.pending_limit_orders[option_type] = {
@@ -787,26 +818,49 @@ class OrderManager:
                     'placed_at': datetime.now(IST),
                     'candidate_info': candidate
                 }
-                logger.info(f"[MODIFY-{option_type}] {existing['symbol']} -> {symbol} trigger {trigger_price:.2f} limit {limit_price_entry:.2f}")
+                logger.info(f"[SWITCH-{option_type}] {existing['symbol']} -> {symbol} trigger {trigger_price:.2f} limit {limit_price_entry:.2f}")
                 return 'modified'
             return 'failed'
         
-        # Case 4: Same symbol, check if trigger or limit price changed
-        if abs(existing['trigger_price'] - trigger_price) > 0.01 or abs(existing['limit_price'] - limit_price_entry) > 0.01:
-            # Price changed - cancel old and place new SL order
-            self._cancel_broker_order(existing['order_id'])
+        # Case 4: Same symbol, check if trigger or limit price changed significantly
+        # CRITICAL FIX: Use MODIFICATION_THRESHOLD (0.50 Rs) instead of 0.01 to reduce
+        # unnecessary order modifications that can cause duplicate orders
+        trigger_diff = abs(existing['trigger_price'] - trigger_price)
+        limit_diff = abs(existing['limit_price'] - limit_price_entry)
+
+        if trigger_diff > MODIFICATION_THRESHOLD or limit_diff > MODIFICATION_THRESHOLD:
+            # Price changed significantly - try to cancel old and place new SL order
+            # CRITICAL FIX: Check cancel result BEFORE placing new order to prevent duplicates
+            cancel_success = self._cancel_broker_order(existing['order_id'])
+
+            if not cancel_success:
+                # Cancel failed - order may be triggered/filled at broker
+                # DO NOT place new order to avoid duplicates
+                logger.warning(
+                    f"[SKIP-MODIFY-{option_type}] Cancel failed for order {existing['order_id']} "
+                    f"(may be triggered/filled). Keeping existing order to prevent duplicates."
+                )
+                return 'kept'
+
+            # Cancel succeeded - safe to place new order
             order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
             if order_id:
                 existing['order_id'] = order_id
                 existing['trigger_price'] = trigger_price
                 existing['limit_price'] = limit_price_entry
                 existing['placed_at'] = datetime.now(IST)
-                logger.info(f"[MODIFY-{option_type}] {symbol} trigger {trigger_price:.2f} limit {limit_price_entry:.2f}")
+                logger.info(
+                    f"[MODIFY-{option_type}] {symbol} trigger {trigger_price:.2f} limit {limit_price_entry:.2f} "
+                    f"(diff: trigger={trigger_diff:.2f}, limit={limit_diff:.2f})"
+                )
                 return 'modified'
             return 'failed'
 
-        # Case 5: Same symbol, same price - keep existing order
-        logger.debug(f"[KEEP-{option_type}] {symbol} unchanged (trigger={trigger_price:.2f}, limit={limit_price_entry:.2f})")
+        # Case 5: Same symbol, price change within threshold - keep existing order
+        logger.debug(
+            f"[KEEP-{option_type}] {symbol} price change below threshold "
+            f"(trigger_diff={trigger_diff:.2f}, limit_diff={limit_diff:.2f}, threshold={MODIFICATION_THRESHOLD})"
+        )
         return 'kept'
 
     def _place_broker_stop_limit_order(self, symbol: str, trigger_price: float, limit_price: float, quantity: int) -> Optional[str]:
@@ -965,27 +1019,25 @@ class OrderManager:
                 return fills
 
             if not isinstance(broker_orders, list):
-                # Log the actual structure to debug
-                logger.error(
-                    f"[CHECK-FILLS] Orderbook data is not a list: {type(broker_orders)}. "
-                    f"Data: {broker_orders}"
-                )
-            
                 # Try to extract list from nested structure (some brokers nest it)
                 # Common patterns: {"orders": [...]} or {"data": [...]}
                 if isinstance(broker_orders, dict):
                     # Try common nested keys
                     for key in ['orders', 'data', 'orderbook']:
                         if key in broker_orders and isinstance(broker_orders[key], list):
-                            logger.info(f"[CHECK-FILLS] Found orders list in nested key '{key}'")
+                            logger.debug(f"[CHECK-FILLS] Found orders list in nested key '{key}'")
                             broker_orders = broker_orders[key]
                             break
                     else:
                         # No valid list found
-                        logger.error(f"[CHECK-FILLS] Could not find orders list in dict keys: {list(broker_orders.keys())}")
+                        logger.error(
+                            f"[CHECK-FILLS] Orderbook data is not a list and no nested list found. "
+                            f"Type: {type(broker_orders)}, Keys: {list(broker_orders.keys())}"
+                        )
                         return fills
                 else:
                     # Not a dict either, cannot recover
+                    logger.error(f"[CHECK-FILLS] Orderbook data is not a list or dict: {type(broker_orders)}")
                     return fills
 
             logger.debug(f"[CHECK-FILLS] Processing {len(broker_orders)} broker orders")
@@ -1032,7 +1084,7 @@ class OrderManager:
                     logger.error(
                         f"[CHECK-FILLS] Order {order_id} REJECTED: {broker_order.get('rejected_reason', 'Unknown')}"
                     )
-                    self.pending_limit_orders[option_type] = None
+                    del self.pending_limit_orders[option_type]
                     continue
 
                 if status == 'complete':
@@ -1091,7 +1143,7 @@ class OrderManager:
 
     def reconcile_orders_with_broker(self, open_positions: Dict) -> Dict:
         """
-        🔧 CRITICAL: Reconcile local order state with broker after reconnection
+        CRITICAL: Reconcile local order state with broker after reconnection
 
         After WebSocket reconnect, orders may have:
         - Filled while we were disconnected
@@ -1187,7 +1239,7 @@ class OrderManager:
                     # Remove from pending
                     del self.pending_limit_orders[option_type]
 
-                elif status in ['REJECTED', 'CANCELLED']:
+                elif status in ['rejected', 'cancelled']:
                     logger.warning(
                         f"[RECONCILE] Limit order {order_id} ({symbol}) was {status} - removing"
                     )
@@ -1202,7 +1254,7 @@ class OrderManager:
             for symbol in open_positions.keys():
                 if symbol not in self.active_sl_orders:
                     logger.critical(
-                        f"[RECONCILE] [WARNING]️ CRITICAL: Position {symbol} has NO SL ORDER in local state!"
+                        f"[RECONCILE] CRITICAL: Position {symbol} has NO SL ORDER in local state!"
                     )
                     results['sl_orders_missing'].append(symbol)
 
@@ -1215,7 +1267,7 @@ class OrderManager:
 
                 if broker_order is None:
                     logger.critical(
-                        f"[RECONCILE] [WARNING]️ CRITICAL: SL order {order_id} ({symbol}) not found at broker!"
+                        f"[RECONCILE] CRITICAL: SL order {order_id} ({symbol}) not found at broker!"
                     )
 
                     # Check if position still exists
@@ -1248,7 +1300,7 @@ class OrderManager:
                 elif status in ['rejected', 'cancelled']:
                     if symbol in open_positions:
                         logger.critical(
-                            f"[RECONCILE] [WARNING]️ CRITICAL: SL order {order_id} ({symbol}) was {status} "
+                            f"[RECONCILE] CRITICAL: SL order {order_id} ({symbol}) was {status} "
                             f"but position still open - MANUAL INTERVENTION REQUIRED!"
                         )
                         results['sl_orders_missing'].append(symbol)
@@ -1264,7 +1316,7 @@ class OrderManager:
             # ═══════════════════════════════════════════════════════════
 
             logger.info(
-                f"[RECONCILE] ✅ Reconciliation complete:\n"
+                f"[RECONCILE] Reconciliation complete:\n"
                 f"  - Limit orders removed: {len(results['limit_orders_removed'])}\n"
                 f"  - Limit orders filled: {len(results['limit_orders_filled'])}\n"
                 f"  - SL orders missing: {len(results['sl_orders_missing'])}\n"

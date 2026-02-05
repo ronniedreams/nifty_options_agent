@@ -31,6 +31,7 @@ import logging
 import argparse
 import sys
 import time
+import asyncio
 import signal
 from datetime import datetime, time as dt_time
 from typing import Dict, Optional
@@ -46,6 +47,9 @@ from .config import (
     LOG_DIR,
     LOG_LEVEL,
     PAPER_TRADING,
+    SHUTDOWN_TIMEOUT,
+    WAITING_MODE_CHECK_INTERVAL,
+    WAITING_MODE_SEND_HOURLY_STATUS,
 )
 from .data_pipeline import DataPipeline
 from .swing_detector import MultiSwingDetector
@@ -55,6 +59,8 @@ from .order_manager import OrderManager
 from .position_tracker import PositionTracker
 from .state_manager import StateManager
 from .telegram_notifier import get_notifier
+from .notification_manager import NotificationManager
+from .startup_health_check import StartupHealthCheck
 
 # Setup logging
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -73,7 +79,9 @@ IST = pytz.timezone('Asia/Kolkata')
 
 class BaselineV1Live:
     """
-    Main orchestrator for baseline_v1 live trading
+    Main orchestrator for baseline_v1 live trading (async version)
+
+    Uses asyncio for non-blocking main loop to enable future async order management.
     """
     
     def __init__(self, expiry_date: str, atm_strike: int):
@@ -107,10 +115,15 @@ class BaselineV1Live:
         # State manager must be initialized first
         self.state_manager = StateManager()
         
-        # 🔧 CRITICAL: Reset dashboard data for new trading day
-        # This clears yesterday's best_strikes, swing_candidates, etc.
-        # Prevents stale data from showing in monitor dashboard
-        self.state_manager.reset_daily_dashboard_data()
+        # FIX: Only reset dashboard data if it's a new day
+        last_state = self.state_manager.load_daily_state()
+        today = datetime.now(IST).date().isoformat()
+        
+        if last_state is None or last_state.get('trade_date') != today:
+            logger.info(f"[NEW-DAY] Resetting dashboard data for new trading day: {today}")
+            self.state_manager.reset_daily_dashboard_data()
+        else:
+            logger.info(f"[RESTART] Same day restart detected ({today}), keeping dashboard data")
         
         # Swing detector with callback for new swings
         self.swing_detector = MultiSwingDetector(
@@ -128,6 +141,14 @@ class BaselineV1Live:
         self.position_tracker = PositionTracker(order_manager=self.order_manager)
         self.telegram = get_notifier()
         
+        # Initialize failure handling components
+        self.notification_manager = NotificationManager(self.telegram, self.state_manager)
+        self.startup_checker = StartupHealthCheck(self.notification_manager)
+        self.shutdown_requested = False
+
+        # Register initial state
+        self.state_manager.update_operational_state('STARTING')
+
         # Generate option symbols to monitor
         self.symbols = self.data_pipeline.generate_option_symbols(atm_strike, expiry_date)
         logger.info(f"Monitoring {len(self.symbols)} option symbols")
@@ -147,13 +168,131 @@ class BaselineV1Live:
         # Last bar update time
         self.last_bar_update = None
 
+        # FIX: Load previous state from database (CRITICAL for crash recovery)
+        self.load_state()
+
         logger.info("Initialization complete")
     
+    def load_state(self):
+        """Restore strategy state from database after crash/restart"""
+        logger.info("[RECOVERY] Restoring state from database...")
+
+        try:
+            # 1. Load daily state (cumulative R, exit status)
+            daily_state = self.state_manager.load_daily_state()
+
+            # 2. Load open positions
+            open_positions_data = self.state_manager.load_open_positions()
+
+            # 3. Restore to PositionTracker
+            self.position_tracker.restore_state(open_positions_data, daily_state)
+
+            # 4. Load pending and active orders
+            pending_limit, active_sl = self.state_manager.load_orders()
+
+            # 5. Restore to OrderManager
+            self.order_manager.restore_state(pending_limit, active_sl)
+
+            logger.info(
+                f"[RECOVERY] State recovery complete. Restored {len(open_positions_data)} positions "
+                f"and {len(pending_limit) + len(active_sl)} orders."
+            )
+            # NOTE: Order reconciliation against broker (step 6) is deferred to
+            # start(), after data_pipeline is connected and bars are loaded.
+            # get_all_latest_bars() returns empty before that point.
+
+        except Exception as e:
+            logger.error(f"[RECOVERY] Failed to restore state: {e}", exc_info=True)
+            # Strategy will continue with fresh state if recovery fails
+
+    def _reconcile_restored_orders(self):
+        """Reconcile orders that were restored from DB against the live broker.
+
+        Must be called AFTER data_pipeline is connected and historical bars
+        are loaded -- get_all_latest_bars() is empty before that point.
+
+        Handles three scenarios that can occur during a crash:
+        - Entry order filled at broker but not recorded locally -> creates
+          position and places exit SL immediately.
+        - Entry order rejected/cancelled by broker -> already cleaned up by
+          reconcile_orders_with_broker.
+        - Exit SL order missing for an open position -> fires critical alert.
+        """
+        if not self.order_manager.pending_limit_orders and not self.order_manager.active_sl_orders:
+            return
+
+        logger.info("[RECOVERY] Reconciling restored orders with broker...")
+        try:
+            open_positions = self.position_tracker.open_positions
+            reconcile_results = self.order_manager.reconcile_orders_with_broker(
+                open_positions
+            )
+
+            # Process any fills discovered during the crash window
+            if reconcile_results['limit_orders_filled']:
+                logger.warning(
+                    f"[RECOVERY] Found {len(reconcile_results['limit_orders_filled'])} "
+                    f"orders filled during crash window"
+                )
+
+                latest_bars = self.data_pipeline.get_all_latest_bars()
+                current_prices = {symbol: bar.close for symbol, bar in latest_bars.items()}
+
+                for fill_info in reconcile_results['limit_orders_filled']:
+                    logger.warning(
+                        f"[RECOVERY] Processing fill from crash window: "
+                        f"{fill_info['symbol']} @ {fill_info['fill_price']:.2f}"
+                    )
+                    self.handle_order_fill(fill_info, current_prices)
+
+            # Alert on missing SL orders (positions without stop-loss)
+            if reconcile_results['sl_orders_missing']:
+                critical_msg = (
+                    f"[CRITICAL] MISSING SL ORDERS after crash recovery. "
+                    f"Positions without SL: {', '.join(reconcile_results['sl_orders_missing'])}. "
+                    f"MANUAL BROKER CHECK REQUIRED."
+                )
+                logger.critical(critical_msg)
+                self.telegram.send_message(critical_msg)
+
+        except Exception as e:
+            logger.error(f"[RECOVERY] Order reconciliation failed: {e}", exc_info=True)
+            # Non-fatal: system continues but operator should verify broker state
+
     def start(self):
         """Start live trading"""
         logger.info("="*80)
         logger.info("Starting Baseline V1 Live Trading")
         logger.info("="*80)
+        
+        # 1. Run Startup Health Checks
+        logger.info("Running pre-flight health checks...")
+        success, error_type, error_msg = self.startup_checker.run_all_checks()
+
+        if not success:
+            logger.error(f"Startup failed: {error_type} - {error_msg}")
+            self.notification_manager.send_error_notification(
+                'STARTUP_FAILURE', 
+                f"Type: {error_type}\nError: {error_msg}",
+                is_critical=True
+            )
+
+            if error_type == 'PERMANENT':
+                logger.critical("Permanent error detected. Exiting.")
+                self.state_manager.update_operational_state('ERROR', error_msg)
+                sys.exit(1)
+            else:
+                # Transient error - enter waiting mode
+                logger.warning("Transient error detected. Entering waiting mode...")
+                self.enter_waiting_mode(error_type, error_msg)
+        
+        # 2. Update state to ACTIVE
+        self.state_manager.update_operational_state('ACTIVE')
+        self.notification_manager.send_error_notification(
+            'SYSTEM_STARTED', 
+            f"Trading Agent Started\nMode: {'PAPER' if PAPER_TRADING else 'LIVE'}\nExpiry: {self.expiry_date}",
+            is_critical=False
+        )
         
         # Connect to data pipeline
         self.data_pipeline.connect()
@@ -275,9 +414,16 @@ class BaselineV1Live:
         # From now on, swings will be logged to database automatically
         self.swing_detector.enable_live_mode()
         logger.info("[HIST] Live mode enabled - new swings will auto-log to database")
-        
+
+        # CRITICAL: Reconcile any orders restored from DB against broker.
+        # Deferred from load_state() because get_all_latest_bars() requires
+        # the data pipeline to be connected and bars to be loaded.
+        # Orders may have filled, been rejected, or triggered during the crash.
+        # An unreconciled fill leaves a position at the broker with no exit SL.
+        self._reconcile_restored_orders()
+
         logger.info("="*80)
-        
+
         # Wait for live data stream to stabilize
         logger.info("Waiting for live WebSocket stream to stabilize...")
         time.sleep(10)
@@ -297,24 +443,83 @@ class BaselineV1Live:
             logger.error(f"Error getting health status: {e}", exc_info=True)
             raise
         
-        # Main trading loop
-        logger.info("Starting main trading loop...")
-        self.run_trading_loop()
-    
-    def run_trading_loop(self):
-        """Main trading loop - runs continuously during market hours"""
-        logger.info("Entering main trading loop...")
+        # Main trading loop (async)
+        logger.info("Starting main trading loop (async)...")
+        asyncio.run(self.run_trading_loop())
+
+    def enter_waiting_mode(self, error_type: str, error_msg: str):
+        """
+        Enter waiting mode until system recovers
+
+        Args:
+            error_type: Type of error causing waiting mode
+            error_msg: Error description
+        """
+        logger.warning(f"ENTERING WAITING MODE: {error_type}")
+        self.state_manager.update_operational_state('WAITING', error_msg)
+        
+        # Send notification
+        self.notification_manager.send_error_notification(
+            error_type,
+            f"System entering WAITING mode.\nError: {error_msg}\nWill retry every {WAITING_MODE_CHECK_INTERVAL}s."
+        )
+
+        last_hourly_status = time.time()
+
+        while not self.shutdown_requested:
+            try:
+                logger.info(f"[WAITING] Checking system health (Next check in {WAITING_MODE_CHECK_INTERVAL}s)...")
+                
+                # Run health checks
+                success, new_error_type, new_error_msg = self.startup_checker.run_all_checks()
+
+                if success:
+                    logger.info("[WAITING] System recovered! Resuming normal operation.")
+                    self.notification_manager.send_error_notification(
+                        'SYSTEM_RECOVERED',
+                        "System health checks passed. Resuming trading."
+                    )
+                    self.notification_manager.mark_resolved(error_type)
+                    self.state_manager.update_operational_state('ACTIVE')
+                    return  # Exit waiting mode
+                
+                # Still failing
+                logger.warning(f"[WAITING] Check failed: {new_error_type} - {new_error_msg}")
+                
+                # Send hourly status update if configured
+                if WAITING_MODE_SEND_HOURLY_STATUS and (time.time() - last_hourly_status > 3600):
+                    self.notification_manager.send_error_notification(
+                        'WAITING_STATUS',
+                        f"System still in WAITING mode.\nLast Error: {new_error_msg}",
+                        is_critical=False
+                    )
+                    last_hourly_status = time.time()
+
+                time.sleep(WAITING_MODE_CHECK_INTERVAL)
+
+            except KeyboardInterrupt:
+                logger.info("[WAITING] Interrupted by user")
+                self.shutdown_requested = True
+                break
+            except Exception as e:
+                logger.error(f"[WAITING] Error in waiting loop: {e}")
+                time.sleep(60)
+
+    async def run_trading_loop(self):
+        """Main trading loop - runs continuously during market hours (async version)"""
+        logger.info("Entering main trading loop (async)...")
         
         tick_count = 0
         last_heartbeat = time.time()
         last_watchdog_check = time.time()
         
-        while True:
+        while not self.shutdown_requested:
             try:
                 tick_count += 1
                 
                 # [CRITICAL] WATCHDOG: Check data freshness every 30 seconds
                 if time.time() - last_watchdog_check > 30:
+
                     is_fresh, stale_reason = self.data_pipeline.check_data_freshness()
 
                     if not is_fresh:
@@ -449,7 +654,7 @@ class BaselineV1Live:
                 # Check if market is open
                 if not self.is_market_open():
                     logger.debug("Market closed, waiting...")
-                    time.sleep(60)
+                    await asyncio.sleep(60)
                     continue
 
                 # Check if force exit time reached (3:15 PM)
@@ -465,7 +670,7 @@ class BaselineV1Live:
 
                     # Continue running but don't process ticks anymore
                     logger.info("EOD exit complete - system will monitor until market close")
-                    time.sleep(60)
+                    await asyncio.sleep(60)
                     continue
 
                 # Main logic (swing detection continues until market close)
@@ -485,21 +690,30 @@ class BaselineV1Live:
                 
                 # Sleep until next check
                 logger.debug(f"Sleeping {ORDER_FILL_CHECK_INTERVAL} seconds...")
-                time.sleep(ORDER_FILL_CHECK_INTERVAL)
+                await asyncio.sleep(ORDER_FILL_CHECK_INTERVAL)
                 
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received, shutting down...")
+                self.shutdown_requested = True
                 break
             except Exception as e:
                 logger.error(f"Error in main loop: {e}", exc_info=True)
-                time.sleep(10)
-        
-        self.shutdown()
+                
+                # Use failure handling logic
+                self.notification_manager.queue_error_for_aggregation('RUNTIME_ERROR', str(e))
+                
+                # If critical connectivity error, enter waiting mode
+                if "Connection" in str(e) or "WebSocket" in str(e):
+                    self.enter_waiting_mode('CONNECTION_LOST', str(e))
+                else:
+                    await asyncio.sleep(10)
+
+        self.handle_graceful_shutdown()
     
     def _on_swing_detected(self, symbol: str, swing_info: Dict):
         """
         Callback when new swing low is detected
-        
+
         Add to continuous filter's swing candidates
         """
         logger.info(
@@ -507,6 +721,10 @@ class BaselineV1Live:
             f"(VWAP: {swing_info['vwap']:.2f})"
         )
         self.continuous_filter.add_swing_candidate(symbol, swing_info)
+
+        # Send Telegram notification for swing detection
+        if self.telegram:
+            self.telegram.notify_swing_detected(symbol, swing_info)
     
     def process_tick(self):
         """
@@ -827,12 +1045,10 @@ class BaselineV1Live:
         # Save final state
         self.save_state()
         
-        # Save daily summary
-        # Send Telegram notification
-        self.telegram.notify_daily_target(summary)
-        
+        # Save daily summary and notify
         summary = self.position_tracker.get_position_summary()
         self.state_manager.save_daily_summary(summary)
+        self.telegram.notify_daily_target(summary)
         
         logger.info(f"Daily Summary: {summary}")
         logger.info("Trading stopped for the day")
@@ -895,17 +1111,37 @@ class BaselineV1Live:
         now = datetime.now(IST).time()
         return now >= FORCE_EXIT_TIME
     
-    def shutdown(self):
-        """Graceful shutdown"""
-        logger.info("Shutting down...")
+    def handle_graceful_shutdown(self):
+        """Graceful shutdown with timeout"""
+        logger.info(f"Initiating graceful shutdown (timeout: {SHUTDOWN_TIMEOUT}s)...")
+        self.state_manager.update_operational_state('SHUTDOWN')
         
-        # Disconnect data pipeline
-        self.data_pipeline.disconnect()
+        start_time = time.time()
         
-        # Close state manager
-        self.state_manager.close()
-        
-        logger.info("Shutdown complete")
+        try:
+            # 1. Cancel pending orders (if any)
+            if self.order_manager:
+                logger.info("Cancelling pending orders...")
+                self.order_manager.cancel_all_orders()
+            
+            # 2. Close state manager (saves everything)
+            if self.state_manager:
+                logger.info("Saving state and closing database...")
+                self.save_state()
+                self.state_manager.close()
+            
+            # 3. Disconnect data pipeline
+            if self.data_pipeline:
+                logger.info("Disconnecting data pipeline...")
+                self.data_pipeline.disconnect()
+                
+            elapsed = time.time() - start_time
+            logger.info(f"Shutdown complete in {elapsed:.2f}s")
+            
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+            # Force exit if stuck
+            sys.exit(1)
     
     def handle_emergency_shutdown(self):
         """
@@ -974,20 +1210,25 @@ class BaselineV1Live:
             raise
 
 
-# Global flag for graceful shutdown
-shutdown_flag = False
+# Global reference for signal handler
+strategy_instance = None
 
 def signal_handler(signum, frame):
-    """Handle Ctrl+C signal"""
-    global shutdown_flag
-    print("\n[SHUTDOWN] Shutdown signal received. Exiting gracefully...")
-    shutdown_flag = True
-    sys.exit(0)
+    """Handle system signals for graceful shutdown"""
+    global strategy_instance
+    print(f"\n[SHUTDOWN] Signal {signum} received. Requesting shutdown...")
+    if strategy_instance:
+        strategy_instance.shutdown_requested = True
+    else:
+        sys.exit(0)
 
 def main():
     """Main entry point"""
-    # Register signal handler for Ctrl+C
+    global strategy_instance
+
+    # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     parser = argparse.ArgumentParser(
         description='Baseline V1 Live Trading - Options Swing Break Strategy'
@@ -1072,12 +1313,17 @@ def main():
         expiry_date=expiry_date,
         atm_strike=atm_strike
     )
+    strategy_instance = strategy
     
     try:
         strategy.start()
     except KeyboardInterrupt:
         print("\n[SHUTDOWN] Interrupted. Shutting down...")
-        strategy.shutdown()
+        strategy.handle_graceful_shutdown()
+    except Exception as e:
+        logger.critical(f"Fatal error: {e}", exc_info=True)
+        strategy.handle_graceful_shutdown()
+
 
 
 if __name__ == '__main__':

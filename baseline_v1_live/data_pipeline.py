@@ -224,7 +224,23 @@ class DataPipeline:
                     end_date=end_date
                 )
                 
-                if df.empty:
+                # Handle dictionary response (error or empty)
+                if isinstance(df, dict):
+                    if df.get('status') == 'error':
+                        logger.error(f"API error for {symbol}: {df.get('message')}")
+                        failed += 1
+                        continue
+                    # If it's a dict but not error, check if it has data
+                    if not df.get('data'):
+                        logger.warning(f"No historical data for {symbol}")
+                        failed += 1
+                        continue
+                    # If we reach here, it might be a list of records in 'data'?
+                    # OpenAlgo usually returns DataFrame if successful, but just in case:
+                    import pandas as pd
+                    df = pd.DataFrame(df['data'])
+                
+                if df is None or df.empty:
                     logger.warning(f"No historical data for {symbol}")
                     failed += 1
                     continue
@@ -320,7 +336,7 @@ class DataPipeline:
                         )
                     elif gap_minutes == 1:
                         logger.info(
-                            f"[HIST] ✅ No gap - last historical bar @ {last_historical_bar.timestamp.strftime('%H:%M')}, "
+                            f"[HIST]  No gap - last historical bar @ {last_historical_bar.timestamp.strftime('%H:%M')}, "
                             f"current bar @ {current_minute.strftime('%H:%M')} (in progress)"
                         )
     
@@ -361,7 +377,7 @@ class DataPipeline:
         if gap_minutes <= 1:
             # No gap or only current incomplete bar
             logger.info(
-                f"[GAP-FILL] ✅ No gap to fill (last bar @ {last_bar_minute.strftime('%H:%M')}, "
+                f"[GAP-FILL]  No gap to fill (last bar @ {last_bar_minute.strftime('%H:%M')}, "
                 f"current @ {current_minute.strftime('%H:%M')})"
             )
             return
@@ -401,7 +417,17 @@ class DataPipeline:
                     end_date=end_date
                 )
                 
-                if df.empty:
+                # Handle dictionary response
+                if isinstance(df, dict):
+                    if df.get('status') == 'error':
+                        failed_count += 1
+                        continue
+                    if not df.get('data'):
+                        continue
+                    import pandas as pd
+                    df = pd.DataFrame(df['data'])
+
+                if df is None or df.empty:
                     continue
                 
                 # Filter to bars after last_bar_minute
@@ -493,7 +519,7 @@ class DataPipeline:
         
         if filled_count > 0:
             logger.info(
-                f"[GAP-FILL] ✅ Filled gap: Added {filled_count} bars across all symbols "
+                f"[GAP-FILL]  Filled gap: Added {filled_count} bars across all symbols "
                 f"({failed_count} symbols failed)"
             )
             
@@ -1117,7 +1143,7 @@ class DataPipeline:
                         logger.warning(f"[RECONNECT] Attempt {attempt} - connect() returned False")
                         continue
 
-                    logger.info(f"[RECONNECT] ✅ WebSocket connected on attempt {attempt}")
+                    logger.info(f"[RECONNECT]  WebSocket connected on attempt {attempt}")
 
                     # 🔧 FIX B: Reset bar state to prevent frozen bars
                     with self.lock:
@@ -1156,7 +1182,7 @@ class DataPipeline:
                         with self.lock:
                             self.subscribed_symbols.update(symbols_to_resubscribe)
 
-                        logger.info(f"[RECONNECT] ✅ Resubscribed to {len(symbols_to_resubscribe)} symbols")
+                        logger.info(f"[RECONNECT]  Resubscribed to {len(symbols_to_resubscribe)} symbols")
 
                     except Exception as e:
                         logger.error(f"[RECONNECT] Resubscription failed: {e}")
@@ -1184,13 +1210,13 @@ class DataPipeline:
                             logger.error("[RECONNECT] No ticks even after all retries")
                             return False
                     else:
-                        logger.info(f"[RECONNECT] ✅ Tick flow verified ({tick_count} symbols)")
+                        logger.info(f"[RECONNECT]  Tick flow verified ({tick_count} symbols)")
 
                     # Backfill missed bars during disconnection
                     logger.info("[RECONNECT] Backfilling missed data...")
                     try:
                         self.backfill_missed_bars()
-                        logger.info("[RECONNECT] ✅ Backfill complete")
+                        logger.info("[RECONNECT]  Backfill complete")
                     except Exception as e:
                         logger.warning(f"[RECONNECT] Backfill failed (non-critical): {e}")
 
@@ -1198,7 +1224,7 @@ class DataPipeline:
                     self.reconnect_attempts = 0
                     self.reset_watchdog()
 
-                    logger.info("[RECONNECT] ✅ Reconnection complete and operational")
+                    logger.info("[RECONNECT]  Reconnection complete and operational")
                     return True
 
                 except Exception as e:
@@ -1259,7 +1285,17 @@ class DataPipeline:
                     end_date=end_date
                 )
                 
-                if df.empty:
+                # Handle dictionary response
+                if isinstance(df, dict):
+                    if df.get('status') == 'error':
+                        failed_count += 1
+                        continue
+                    if not df.get('data'):
+                        continue
+                    import pandas as pd
+                    df = pd.DataFrame(df['data'])
+
+                if df is None or df.empty:
                     continue
                 
                 # Filter to bars after last_bar_time
