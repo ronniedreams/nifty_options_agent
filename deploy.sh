@@ -11,7 +11,7 @@ echo "========================================"
 cd ~/nifty_options_agent
 
 echo "[1/4] Pulling latest code from GitHub..."
-git pull origin feature/docker-ec2-fixes
+git pull origin main
 
 echo "[2/4] Building Docker images..."
 docker-compose build

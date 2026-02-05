@@ -106,8 +106,12 @@ class AutoDetector:
             "symbol": "NIFTY",
             "exchange": "NSE_INDEX"
         }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
 
-        response = requests.post(url, json=payload, timeout=10)
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
         response.raise_for_status()
 
         data = response.json()
@@ -119,6 +123,7 @@ class AutoDetector:
             raise Exception(f"Quote API failed: {data.get('message', 'Unknown error')}")
 
     def calculate_atm_strike(self, spot_price):
+
         """
         Round spot price to nearest 100
         Examples: 24248 -> 24200, 24275 -> 24300
@@ -140,8 +145,12 @@ class AutoDetector:
             "exchange": "NFO",
             "instrumenttype": "options"
         }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
 
-        response = requests.post(url, json=payload, timeout=10)
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
         response.raise_for_status()
 
         data = response.json()

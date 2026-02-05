@@ -60,18 +60,22 @@ class TelegramNotifier:
     """
     Send trading notifications via Telegram
     """
-    
-    def __init__(self):
+
+    def __init__(self, instance_name: str = None):
         self.enabled = TELEGRAM_ENABLED
         self.bot_token = TELEGRAM_BOT_TOKEN
         self.chat_id = TELEGRAM_CHAT_ID
-        
+
+        # Instance identification for multi-instance deployments
+        # Defaults to INSTANCE_NAME env var, or "UNKNOWN" if not set
+        self.instance_name = instance_name or os.getenv("INSTANCE_NAME", "UNKNOWN")
+
         if self.enabled:
             if not self.bot_token or not self.chat_id:
                 logger.warning("Telegram enabled but token/chat_id not configured")
                 self.enabled = False
             else:
-                logger.info("Telegram notifications enabled")
+                logger.info(f"Telegram notifications enabled (instance: {self.instance_name})")
                 # Startup message disabled to prevent spam
                 # self.send_message("Baseline V1 Live Trading started", parse_mode=None)
     
@@ -89,11 +93,16 @@ class TelegramNotifier:
         if not self.enabled:
             return False
 
+        # Prefix message with instance name for multi-instance identification
+        # Format: [LOCAL] or [EC2] at the start of each message
+        instance_tag = f"[{self.instance_name}] " if self.instance_name != "UNKNOWN" else ""
+        tagged_message = f"{instance_tag}{message}"
+
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
 
         payload = {
             'chat_id': self.chat_id,
-            'text': message,
+            'text': tagged_message,
         }
 
         # Only add parse_mode if specified
@@ -352,6 +361,56 @@ Lots: {lots} ({lots * 65} qty)
 Risk: ₹{actual_R:,.0f} (1R)
 
 Time: {datetime.now(IST).strftime('%H:%M:%S')}
+        """
+
+        self.send_message(message.strip())
+
+    def notify_swing_detected(self, symbol: str, swing_info: Dict):
+        """
+        Notify when a new swing (low or high) is detected
+
+        Args:
+            symbol: Option symbol
+            swing_info: Dict with swing details including 'type', 'price', 'timestamp', 'vwap'
+        """
+        swing_type = swing_info.get('type', 'Low')  # 'Low' or 'High'
+        swing_price = swing_info.get('price', 0)
+        swing_time = swing_info.get('timestamp')  # Use 'timestamp' from swing_info
+        vwap = swing_info.get('vwap', 0)
+        option_type = swing_info.get('option_type', 'CE' if 'CE' in symbol else 'PE')
+
+        # Format swing time
+        if swing_time:
+            if hasattr(swing_time, 'strftime'):
+                time_str = swing_time.strftime('%H:%M')
+            else:
+                time_str = str(swing_time)
+        else:
+            time_str = datetime.now(IST).strftime('%H:%M')
+
+        # Calculate VWAP premium
+        vwap_premium = ((swing_price - vwap) / vwap * 100) if vwap > 0 else 0
+
+        # Use different indicators for low vs high
+        if swing_type.lower() == 'low':
+            indicator = "SWING LOW"
+            emoji = "📉"
+        else:
+            indicator = "SWING HIGH"
+            emoji = "📈"
+
+        message = f"""
+{emoji} <b>{indicator} DETECTED</b>
+
+Symbol: <code>{symbol}</code>
+Type: {option_type}
+Price: Rs.{swing_price:.2f}
+Swing Time: {time_str}
+
+VWAP: Rs.{vwap:.2f}
+Premium: {vwap_premium:.1f}%
+
+Detection: {datetime.now(IST).strftime('%H:%M:%S')}
         """
 
         self.send_message(message.strip())
