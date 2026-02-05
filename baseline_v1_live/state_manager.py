@@ -955,7 +955,7 @@ class StateManager:
         row = cursor.fetchone()
         return row[0] if row else 'STARTING'
 
-    def transition_to(self, new_state: str, reason: str = ""):
+    def update_operational_state(self, new_state: str, reason: str = ""):
         """
         Transition to new operational state
 

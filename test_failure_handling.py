@@ -64,8 +64,8 @@ try:
 
     if 'error_notifications_log' in tables and 'operational_state' in tables:
         print("[PASS] Database schema created successfully")
-        print(f"  - error_notifications_log: EXISTS")
-        print(f"  - operational_state: EXISTS")
+        print("  - error_notifications_log: EXISTS")
+        print("  - operational_state: EXISTS")
     else:
         print("[FAIL] Missing tables")
         sys.exit(1)
@@ -103,7 +103,7 @@ try:
 
     if row:
         print("[PASS] Error logged successfully")
-        print(f"  - Error type: STARTUP_FAILURE")
+        print("  - Error type: STARTUP_FAILURE")
         print(f"  - Last notification: {row[0]}")
         print(f"  - Is resolved: {row[1]}")
 
@@ -164,7 +164,7 @@ try:
     new_state = cursor.fetchone()[0]
 
     if new_state == 'ACTIVE':
-        print(f"[PASS] State transition: STARTING -> ACTIVE")
+        print("[PASS] State transition: STARTING -> ACTIVE")
     else:
         print(f"[FAIL] State transition failed: {new_state}")
         sys.exit(1)
