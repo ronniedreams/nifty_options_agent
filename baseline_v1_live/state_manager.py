@@ -501,7 +501,7 @@ class StateManager:
                 symbol,
                 'LIMIT',
                 order_info['limit_price'],
-                None,
+                order_info.get('trigger_price'),
                 order_info['quantity'],
                 order_info['status'],
                 order_info['placed_at'].isoformat(),
@@ -564,6 +564,46 @@ class StateManager:
             return dict(row)
         return None
     
+    def load_orders(self) -> tuple:
+        """
+        Load pending and active orders from database
+        
+        Returns:
+            (pending_limit: Dict, active_sl: Dict)
+        """
+        cursor = self.conn.cursor()
+        
+        cursor.execute('SELECT * FROM pending_orders')
+        rows = cursor.fetchall()
+        
+        pending_limit = {}
+        active_sl = {}
+        
+        for row in rows:
+            order_info = dict(row)
+            # Convert ISO string back to datetime
+            order_info['placed_at'] = datetime.fromisoformat(order_info['placed_at'])
+            
+            # Parse candidate_info JSON; default to empty dict if None
+            if order_info['candidate_info']:
+                order_info['candidate_info'] = json.loads(order_info['candidate_info'])
+            else:
+                order_info['candidate_info'] = {}
+
+            if order_info['order_type'] == 'LIMIT':
+                # Limit orders are keyed by option_type in OrderManager
+                # Extract option_type from candidate_info if possible
+                option_type = 'CE' if order_info['symbol'].endswith('CE') else 'PE'
+                option_type = order_info['candidate_info'].get('option_type', option_type)
+                
+                pending_limit[option_type] = order_info
+            else:
+                # SL orders are keyed by symbol
+                active_sl[order_info['symbol']] = order_info
+        
+        logger.info(f"Loaded {len(pending_limit)} limit and {len(active_sl)} SL orders from DB")
+        return pending_limit, active_sl
+
     def log_trade(self, position_dict: Dict):
         """Log completed trade to database and CSV"""
         if not position_dict['is_closed']:
@@ -576,6 +616,17 @@ class StateManager:
         
         cursor = self.conn.cursor()
         
+        # FIX: Check for duplicate entry before inserting
+        # A trade is unique by symbol and exit_time
+        cursor.execute('''
+            SELECT id FROM trade_log 
+            WHERE symbol = ? AND exit_time = ?
+        ''', (position_dict['symbol'], position_dict['exit_time']))
+        
+        if cursor.fetchone():
+            logger.debug(f"Trade for {position_dict['symbol']} already logged at {position_dict['exit_time']}")
+            return
+
         cursor.execute('''
             INSERT INTO trade_log VALUES (
                 NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?

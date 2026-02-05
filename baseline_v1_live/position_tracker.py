@@ -183,6 +183,51 @@ class PositionTracker:
 
         logger.info(f"PositionTracker reset for new day: {self.current_date}")
     
+    def restore_state(self, open_positions_data: List[Dict], daily_state: Optional[Dict]):
+        """
+        Restore tracker state from database
+        
+        Args:
+            open_positions_data: List of position dicts from DB
+            daily_state: Daily state dict from DB
+        """
+        # Restore open positions
+        for pos_data in open_positions_data:
+            symbol = pos_data['symbol']
+            
+            # Reconstruct Position object
+            # candidate_info was stored as part of the position in DB
+            # We need to extract it or mock it
+            candidate_info = {
+                'strike': pos_data.get('strike'),
+                'option_type': pos_data.get('option_type'),
+                'lots': pos_data.get('lots')
+            }
+            
+            position = Position(
+                symbol=symbol,
+                entry_price=pos_data['entry_price'],
+                sl_price=pos_data['sl_price'],
+                quantity=pos_data['quantity'],
+                actual_R=pos_data['actual_R'],
+                entry_time=datetime.fromisoformat(pos_data['entry_time']) if pos_data['entry_time'] else datetime.now(IST),
+                candidate_info=candidate_info
+            )
+            
+            # Restore current state
+            position.current_price = pos_data.get('current_price', pos_data['entry_price'])
+            position.unrealized_pnl = pos_data.get('unrealized_pnl', 0.0)
+            position.unrealized_R = pos_data.get('unrealized_R', 0.0)
+            
+            self.open_positions[symbol] = position
+            logger.info(f"Restored open position: {symbol} @ {position.entry_price}")
+
+        # Restore daily state
+        if daily_state:
+            self.daily_exit_triggered = bool(daily_state.get('daily_exit_triggered', False))
+            self.daily_exit_reason = daily_state.get('daily_exit_reason')
+            logger.info(f"Restored daily state: Exit Triggered={self.daily_exit_triggered}, Reason={self.daily_exit_reason}")
+
     def can_open_position(self, symbol: str, option_type: str) -> tuple:
         """
         Check if new position allowed
