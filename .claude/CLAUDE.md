@@ -692,6 +692,117 @@ swing_log (symbol, swing_type, price, timestamp, vwap)
 
 ---
 
+## Crash Recovery System
+
+The system automatically persists state to SQLite and recovers on same-day restart.
+
+### What Gets Persisted
+
+**Positions:**
+- Open positions with entry price, SL price, quantity
+- R-value (actual_R) for each position
+- Entry time and current P&L
+- Candidate info (strike, option_type, lots)
+
+**Orders:**
+- Pending limit orders (not yet filled)
+- Active SL orders (exit orders for open positions)
+- Order details: symbol, trigger_price, limit_price, quantity
+
+**Daily State:**
+- Daily exit triggered flag
+- Daily exit reason (target/stop)
+- Cumulative R-multiple
+- Total P&L
+
+### Recovery Flow
+
+**1. On Startup (`__init__`):**
+```python
+# Load state from database
+load_state()
+  ├─ Load open positions → Restore to position_tracker
+  ├─ Load pending orders → Restore to order_manager
+  └─ Load daily state → Restore exit flags
+```
+
+**2. After Pipeline Connects (`start()`):**
+```python
+# Reconcile with broker after data loads
+_reconcile_restored_orders()
+  ├─ Get live orderbook from broker
+  ├─ Compare with restored orders
+  ├─ Detect fills during crash window
+  ├─ Place missing SL orders
+  └─ Cancel stale orders
+```
+
+### Same-Day Restart Behavior
+
+**What's Preserved:**
+- Dashboard trade_date (no reset if same day)
+- Open positions and their P&L
+- Pending entry orders
+- Daily cumulative metrics
+
+**What's Recalculated:**
+- Swing candidates (from historical bars)
+- Filter state (from current market data)
+- In-memory bar buffers
+
+### Broker Reconciliation
+
+After crash, the system reconciles orders with broker:
+
+**Order Status Mapping:**
+```
+DB: PENDING → Broker: COMPLETE → Action: Process fill
+DB: PENDING → Broker: OPEN → Action: Keep order
+DB: PENDING → Broker: REJECTED → Action: Clean up
+DB: SL_ACTIVE → Broker: MISSING → Action: Re-place SL
+```
+
+**Fill Detection:**
+- Orders marked PENDING in DB but COMPLETE on broker = filled during crash
+- System processes fills: creates position, places SL order
+- Telegram notification sent for discovered fills
+
+**Missing SL Orders:**
+- If position exists but SL order missing on broker → Critical alert
+- System attempts to re-place SL order immediately
+- User notified via Telegram (CRITICAL tag)
+
+### Recovery Testing
+
+To test crash recovery:
+```bash
+# 1. Start strategy, let it create positions
+python -m baseline_v1_live.baseline_v1_live --auto
+
+# 2. Simulate crash (Ctrl+C)
+
+# 3. Restart same day
+python -m baseline_v1_live.baseline_v1_live --auto
+
+# Expected logs:
+# [RECOVERY] Restoring state from database...
+# [RECOVERY] Restored X positions and Y orders
+# [RECOVERY] Reconciling restored orders with broker...
+```
+
+### Database Files
+
+- **live_state.db**: Main database (SQLite with WAL mode)
+- **live_state.db-shm**: Shared memory file (auto-generated)
+- **live_state.db-wal**: Write-ahead log (auto-generated)
+
+WAL mode enabled for:
+- Better concurrency
+- Crash safety
+- Atomic commits
+
+---
+
 ## Important Patterns
 
 ### Time Handling
@@ -956,7 +1067,7 @@ Each agent loads specific context before working:
 - `feature/feature-X` = Development (your work)
 - `draft/feature-X` = Isolated test (main + your work)
 - Pre-market: Tag with `pre-market-YYYYMMDD-feature-X`
-- Post-market: Merge to main if good, delete if failed
+- Post-market: Merge to main if good, tag stable release with `stable-YYYY-MM-DD`, delete if failed
 - ❌ Never code during market hours (9:15 AM - 3:30 PM)
 - ❌ Never test directly on main
 - ❌ Never delete tags
