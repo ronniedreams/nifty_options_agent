@@ -47,6 +47,9 @@ from .config import (
     LOG_DIR,
     LOG_LEVEL,
     PAPER_TRADING,
+    SHUTDOWN_TIMEOUT,
+    WAITING_MODE_CHECK_INTERVAL,
+    WAITING_MODE_SEND_HOURLY_STATUS,
 )
 from .data_pipeline import DataPipeline
 from .swing_detector import MultiSwingDetector
@@ -56,6 +59,8 @@ from .order_manager import OrderManager
 from .position_tracker import PositionTracker
 from .state_manager import StateManager
 from .telegram_notifier import get_notifier
+from .notification_manager import NotificationManager
+from .startup_health_check import StartupHealthCheck
 
 # Setup logging
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -131,6 +136,14 @@ class BaselineV1Live:
         self.position_tracker = PositionTracker(order_manager=self.order_manager)
         self.telegram = get_notifier()
         
+        # Initialize failure handling components
+        self.notification_manager = NotificationManager(self.telegram, self.state_manager)
+        self.startup_checker = StartupHealthCheck(self.notification_manager)
+        self.shutdown_requested = False
+
+        # Register initial state
+        self.state_manager.update_operational_state('STARTING')
+
         # Generate option symbols to monitor
         self.symbols = self.data_pipeline.generate_option_symbols(atm_strike, expiry_date)
         logger.info(f"Monitoring {len(self.symbols)} option symbols")
@@ -157,6 +170,35 @@ class BaselineV1Live:
         logger.info("="*80)
         logger.info("Starting Baseline V1 Live Trading")
         logger.info("="*80)
+        
+        # 1. Run Startup Health Checks
+        logger.info("Running pre-flight health checks...")
+        success, error_type, error_msg = self.startup_checker.run_all_checks()
+
+        if not success:
+            logger.error(f"Startup failed: {error_type} - {error_msg}")
+            self.notification_manager.send_error_notification(
+                'STARTUP_FAILURE', 
+                f"Type: {error_type}\nError: {error_msg}",
+                is_critical=True
+            )
+
+            if error_type == 'PERMANENT':
+                logger.critical("Permanent error detected. Exiting.")
+                self.state_manager.update_operational_state('ERROR', error_msg)
+                sys.exit(1)
+            else:
+                # Transient error - enter waiting mode
+                logger.warning("Transient error detected. Entering waiting mode...")
+                self.enter_waiting_mode(error_type, error_msg)
+        
+        # 2. Update state to ACTIVE
+        self.state_manager.update_operational_state('ACTIVE')
+        self.notification_manager.send_error_notification(
+            'SYSTEM_STARTED', 
+            f"Trading Agent Started\nMode: {'PAPER' if PAPER_TRADING else 'LIVE'}\nExpiry: {self.expiry_date}",
+            is_critical=False
+        )
         
         # Connect to data pipeline
         self.data_pipeline.connect()
@@ -303,7 +345,65 @@ class BaselineV1Live:
         # Main trading loop (async)
         logger.info("Starting main trading loop (async)...")
         asyncio.run(self.run_trading_loop())
-    
+
+    def enter_waiting_mode(self, error_type: str, error_msg: str):
+        """
+        Enter waiting mode until system recovers
+
+        Args:
+            error_type: Type of error causing waiting mode
+            error_msg: Error description
+        """
+        logger.warning(f"ENTERING WAITING MODE: {error_type}")
+        self.state_manager.update_operational_state('WAITING', error_msg)
+        
+        # Send notification
+        self.notification_manager.send_error_notification(
+            error_type,
+            f"System entering WAITING mode.\nError: {error_msg}\nWill retry every {WAITING_MODE_CHECK_INTERVAL}s."
+        )
+
+        last_hourly_status = time.time()
+
+        while not self.shutdown_requested:
+            try:
+                logger.info(f"[WAITING] Checking system health (Next check in {WAITING_MODE_CHECK_INTERVAL}s)...")
+                
+                # Run health checks
+                success, new_error_type, new_error_msg = self.startup_checker.run_all_checks()
+
+                if success:
+                    logger.info("[WAITING] System recovered! Resuming normal operation.")
+                    self.notification_manager.send_error_notification(
+                        'SYSTEM_RECOVERED',
+                        "System health checks passed. Resuming trading."
+                    )
+                    self.notification_manager.mark_resolved(error_type)
+                    self.state_manager.update_operational_state('ACTIVE')
+                    return  # Exit waiting mode
+                
+                # Still failing
+                logger.warning(f"[WAITING] Check failed: {new_error_type} - {new_error_msg}")
+                
+                # Send hourly status update if configured
+                if WAITING_MODE_SEND_HOURLY_STATUS and (time.time() - last_hourly_status > 3600):
+                    self.notification_manager.send_error_notification(
+                        'WAITING_STATUS',
+                        f"System still in WAITING mode.\nLast Error: {new_error_msg}",
+                        is_critical=False
+                    )
+                    last_hourly_status = time.time()
+
+                time.sleep(WAITING_MODE_CHECK_INTERVAL)
+
+            except KeyboardInterrupt:
+                logger.info("[WAITING] Interrupted by user")
+                self.shutdown_requested = True
+                break
+            except Exception as e:
+                logger.error(f"[WAITING] Error in waiting loop: {e}")
+                time.sleep(60)
+
     async def run_trading_loop(self):
         """Main trading loop - runs continuously during market hours (async version)"""
         logger.info("Entering main trading loop (async)...")
@@ -312,12 +412,13 @@ class BaselineV1Live:
         last_heartbeat = time.time()
         last_watchdog_check = time.time()
         
-        while True:
+        while not self.shutdown_requested:
             try:
                 tick_count += 1
                 
                 # [CRITICAL] WATCHDOG: Check data freshness every 30 seconds
                 if time.time() - last_watchdog_check > 30:
+
                     is_fresh, stale_reason = self.data_pipeline.check_data_freshness()
 
                     if not is_fresh:
@@ -492,12 +593,21 @@ class BaselineV1Live:
                 
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received, shutting down...")
+                self.shutdown_requested = True
                 break
             except Exception as e:
                 logger.error(f"Error in main loop: {e}", exc_info=True)
-                await asyncio.sleep(10)
+                
+                # Use failure handling logic
+                self.notification_manager.queue_error_for_aggregation('RUNTIME_ERROR', str(e))
+                
+                # If critical connectivity error, enter waiting mode
+                if "Connection" in str(e) or "WebSocket" in str(e):
+                    self.enter_waiting_mode('CONNECTION_LOST', str(e))
+                else:
+                    await asyncio.sleep(10)
 
-        self.shutdown()
+        self.handle_graceful_shutdown()
     
     def _on_swing_detected(self, symbol: str, swing_info: Dict):
         """
@@ -902,17 +1012,37 @@ class BaselineV1Live:
         now = datetime.now(IST).time()
         return now >= FORCE_EXIT_TIME
     
-    def shutdown(self):
-        """Graceful shutdown"""
-        logger.info("Shutting down...")
+    def handle_graceful_shutdown(self):
+        """Graceful shutdown with timeout"""
+        logger.info(f"Initiating graceful shutdown (timeout: {SHUTDOWN_TIMEOUT}s)...")
+        self.state_manager.update_operational_state('SHUTDOWN')
         
-        # Disconnect data pipeline
-        self.data_pipeline.disconnect()
+        start_time = time.time()
         
-        # Close state manager
-        self.state_manager.close()
-        
-        logger.info("Shutdown complete")
+        try:
+            # 1. Cancel pending orders (if any)
+            if self.order_manager:
+                logger.info("Cancelling pending orders...")
+                self.order_manager.cancel_all_orders()
+            
+            # 2. Close state manager (saves everything)
+            if self.state_manager:
+                logger.info("Saving state and closing database...")
+                self.save_state()
+                self.state_manager.close()
+            
+            # 3. Disconnect data pipeline
+            if self.data_pipeline:
+                logger.info("Disconnecting data pipeline...")
+                self.data_pipeline.disconnect()
+                
+            elapsed = time.time() - start_time
+            logger.info(f"Shutdown complete in {elapsed:.2f}s")
+            
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+            # Force exit if stuck
+            sys.exit(1)
     
     def handle_emergency_shutdown(self):
         """
@@ -981,20 +1111,25 @@ class BaselineV1Live:
             raise
 
 
-# Global flag for graceful shutdown
-shutdown_flag = False
+# Global reference for signal handler
+strategy_instance = None
 
 def signal_handler(signum, frame):
-    """Handle Ctrl+C signal"""
-    global shutdown_flag
-    print("\n[SHUTDOWN] Shutdown signal received. Exiting gracefully...")
-    shutdown_flag = True
-    sys.exit(0)
+    """Handle system signals for graceful shutdown"""
+    global strategy_instance
+    print(f"\n[SHUTDOWN] Signal {signum} received. Requesting shutdown...")
+    if strategy_instance:
+        strategy_instance.shutdown_requested = True
+    else:
+        sys.exit(0)
 
 def main():
     """Main entry point"""
-    # Register signal handler for Ctrl+C
+    global strategy_instance
+
+    # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     parser = argparse.ArgumentParser(
         description='Baseline V1 Live Trading - Options Swing Break Strategy'
@@ -1079,12 +1214,17 @@ def main():
         expiry_date=expiry_date,
         atm_strike=atm_strike
     )
+    strategy_instance = strategy
     
     try:
         strategy.start()
     except KeyboardInterrupt:
         print("\n[SHUTDOWN] Interrupted. Shutting down...")
-        strategy.shutdown()
+        strategy.handle_graceful_shutdown()
+    except Exception as e:
+        logger.critical(f"Fatal error: {e}", exc_info=True)
+        strategy.handle_graceful_shutdown()
+
 
 
 if __name__ == '__main__':
