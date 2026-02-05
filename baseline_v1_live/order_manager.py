@@ -39,6 +39,7 @@ from .config import (
     EMERGENCY_EXIT_RETRY_COUNT,
     EMERGENCY_EXIT_RETRY_DELAY,
     DRY_RUN,
+    MODIFICATION_THRESHOLD,
 )
 
 logger = logging.getLogger(__name__)
@@ -773,8 +774,20 @@ class OrderManager:
             return 'failed'
 
         # Case 3: Different symbol - cancel old, place new
+        # CRITICAL FIX: Check cancel result BEFORE placing new order to prevent duplicates
         if existing['symbol'] != symbol:
-            self._cancel_broker_order(existing['order_id'])
+            cancel_success = self._cancel_broker_order(existing['order_id'])
+
+            if not cancel_success:
+                # Cancel failed - old order may be triggered/filled at broker
+                # DO NOT place new order to avoid having positions in multiple symbols
+                logger.warning(
+                    f"[SKIP-SWITCH-{option_type}] Cancel failed for {existing['symbol']} order {existing['order_id']} "
+                    f"(may be triggered/filled). NOT switching to {symbol} to prevent duplicates."
+                )
+                return 'kept'
+
+            # Cancel succeeded - safe to place new order for new symbol
             order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
             if order_id:
                 self.pending_limit_orders[option_type] = {
@@ -787,26 +800,49 @@ class OrderManager:
                     'placed_at': datetime.now(IST),
                     'candidate_info': candidate
                 }
-                logger.info(f"[MODIFY-{option_type}] {existing['symbol']} -> {symbol} trigger {trigger_price:.2f} limit {limit_price_entry:.2f}")
+                logger.info(f"[SWITCH-{option_type}] {existing['symbol']} -> {symbol} trigger {trigger_price:.2f} limit {limit_price_entry:.2f}")
                 return 'modified'
             return 'failed'
         
-        # Case 4: Same symbol, check if trigger or limit price changed
-        if abs(existing['trigger_price'] - trigger_price) > 0.01 or abs(existing['limit_price'] - limit_price_entry) > 0.01:
-            # Price changed - cancel old and place new SL order
-            self._cancel_broker_order(existing['order_id'])
+        # Case 4: Same symbol, check if trigger or limit price changed significantly
+        # CRITICAL FIX: Use MODIFICATION_THRESHOLD (0.50 Rs) instead of 0.01 to reduce
+        # unnecessary order modifications that can cause duplicate orders
+        trigger_diff = abs(existing['trigger_price'] - trigger_price)
+        limit_diff = abs(existing['limit_price'] - limit_price_entry)
+
+        if trigger_diff > MODIFICATION_THRESHOLD or limit_diff > MODIFICATION_THRESHOLD:
+            # Price changed significantly - try to cancel old and place new SL order
+            # CRITICAL FIX: Check cancel result BEFORE placing new order to prevent duplicates
+            cancel_success = self._cancel_broker_order(existing['order_id'])
+
+            if not cancel_success:
+                # Cancel failed - order may be triggered/filled at broker
+                # DO NOT place new order to avoid duplicates
+                logger.warning(
+                    f"[SKIP-MODIFY-{option_type}] Cancel failed for order {existing['order_id']} "
+                    f"(may be triggered/filled). Keeping existing order to prevent duplicates."
+                )
+                return 'kept'
+
+            # Cancel succeeded - safe to place new order
             order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
             if order_id:
                 existing['order_id'] = order_id
                 existing['trigger_price'] = trigger_price
                 existing['limit_price'] = limit_price_entry
                 existing['placed_at'] = datetime.now(IST)
-                logger.info(f"[MODIFY-{option_type}] {symbol} trigger {trigger_price:.2f} limit {limit_price_entry:.2f}")
+                logger.info(
+                    f"[MODIFY-{option_type}] {symbol} trigger {trigger_price:.2f} limit {limit_price_entry:.2f} "
+                    f"(diff: trigger={trigger_diff:.2f}, limit={limit_diff:.2f})"
+                )
                 return 'modified'
             return 'failed'
 
-        # Case 5: Same symbol, same price - keep existing order
-        logger.debug(f"[KEEP-{option_type}] {symbol} unchanged (trigger={trigger_price:.2f}, limit={limit_price_entry:.2f})")
+        # Case 5: Same symbol, price change within threshold - keep existing order
+        logger.debug(
+            f"[KEEP-{option_type}] {symbol} price change below threshold "
+            f"(trigger_diff={trigger_diff:.2f}, limit_diff={limit_diff:.2f}, threshold={MODIFICATION_THRESHOLD})"
+        )
         return 'kept'
 
     def _place_broker_stop_limit_order(self, symbol: str, trigger_price: float, limit_price: float, quantity: int) -> Optional[str]:

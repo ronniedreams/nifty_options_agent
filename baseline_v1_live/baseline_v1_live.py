@@ -31,6 +31,7 @@ import logging
 import argparse
 import sys
 import time
+import asyncio
 import signal
 from datetime import datetime, time as dt_time
 from typing import Dict, Optional
@@ -73,7 +74,9 @@ IST = pytz.timezone('Asia/Kolkata')
 
 class BaselineV1Live:
     """
-    Main orchestrator for baseline_v1 live trading
+    Main orchestrator for baseline_v1 live trading (async version)
+
+    Uses asyncio for non-blocking main loop to enable future async order management.
     """
     
     def __init__(self, expiry_date: str, atm_strike: int):
@@ -297,13 +300,13 @@ class BaselineV1Live:
             logger.error(f"Error getting health status: {e}", exc_info=True)
             raise
         
-        # Main trading loop
-        logger.info("Starting main trading loop...")
-        self.run_trading_loop()
+        # Main trading loop (async)
+        logger.info("Starting main trading loop (async)...")
+        asyncio.run(self.run_trading_loop())
     
-    def run_trading_loop(self):
-        """Main trading loop - runs continuously during market hours"""
-        logger.info("Entering main trading loop...")
+    async def run_trading_loop(self):
+        """Main trading loop - runs continuously during market hours (async version)"""
+        logger.info("Entering main trading loop (async)...")
         
         tick_count = 0
         last_heartbeat = time.time()
@@ -449,7 +452,7 @@ class BaselineV1Live:
                 # Check if market is open
                 if not self.is_market_open():
                     logger.debug("Market closed, waiting...")
-                    time.sleep(60)
+                    await asyncio.sleep(60)
                     continue
 
                 # Check if force exit time reached (3:15 PM)
@@ -465,7 +468,7 @@ class BaselineV1Live:
 
                     # Continue running but don't process ticks anymore
                     logger.info("EOD exit complete - system will monitor until market close")
-                    time.sleep(60)
+                    await asyncio.sleep(60)
                     continue
 
                 # Main logic (swing detection continues until market close)
@@ -485,21 +488,21 @@ class BaselineV1Live:
                 
                 # Sleep until next check
                 logger.debug(f"Sleeping {ORDER_FILL_CHECK_INTERVAL} seconds...")
-                time.sleep(ORDER_FILL_CHECK_INTERVAL)
+                await asyncio.sleep(ORDER_FILL_CHECK_INTERVAL)
                 
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received, shutting down...")
                 break
             except Exception as e:
                 logger.error(f"Error in main loop: {e}", exc_info=True)
-                time.sleep(10)
-        
+                await asyncio.sleep(10)
+
         self.shutdown()
     
     def _on_swing_detected(self, symbol: str, swing_info: Dict):
         """
         Callback when new swing low is detected
-        
+
         Add to continuous filter's swing candidates
         """
         logger.info(
@@ -507,6 +510,10 @@ class BaselineV1Live:
             f"(VWAP: {swing_info['vwap']:.2f})"
         )
         self.continuous_filter.add_swing_candidate(symbol, swing_info)
+
+        # Send Telegram notification for swing detection
+        if self.telegram:
+            self.telegram.notify_swing_detected(symbol, swing_info)
     
     def process_tick(self):
         """

@@ -162,6 +162,11 @@ class PositionTracker:
         # Telegram notifier
         self.telegram = get_notifier() if TELEGRAM_AVAILABLE else None
 
+        # Alert throttling: track issues we've already alerted on (reset daily)
+        # Prevents repeated Telegram alerts for the same issue every minute
+        self._alerted_orphaned_positions = set()  # symbols we've alerted as orphaned
+        self._alerted_qty_mismatches = set()  # symbols we've alerted for qty mismatch
+
         logger.info("PositionTracker initialized")
     
     def reset_for_new_day(self):
@@ -171,6 +176,11 @@ class PositionTracker:
         self.daily_exit_triggered = False
         self.daily_exit_reason = None
         self.current_date = datetime.now(IST).date()
+
+        # Reset alert throttling for new day
+        self._alerted_orphaned_positions = set()
+        self._alerted_qty_mismatches = set()
+
         logger.info(f"PositionTracker reset for new day: {self.current_date}")
     
     def can_open_position(self, symbol: str, option_type: str) -> tuple:
@@ -499,20 +509,20 @@ class PositionTracker:
             
             # === CHECK 2: Orphaned Positions (broker has, we don't track) ===
             orphaned_symbols = broker_symbols - tracked_symbols
-            
+
             for symbol in orphaned_symbols:
                 broker_pos = broker_positions_map[symbol]
                 quantity = abs(int(broker_pos.get('quantity', 0)))
                 avg_price = float(broker_pos.get('averageprice', 0))
-                
+
                 logger.critical(
                     f"[WARNING] ORPHANED POSITION DETECTED: {symbol} | "
                     f"Broker has qty={quantity} @ {avg_price:.2f}, we don't track | "
                     f"Possible missed fill notification"
                 )
-                
-                # Send critical Telegram alert
-                if self.telegram:
+
+                # Send critical Telegram alert - BUT ONLY ONCE per symbol (throttled)
+                if self.telegram and symbol not in self._alerted_orphaned_positions:
                     self.telegram.send_message(
                         f"🚨 ORPHANED POSITION ALERT\n\n"
                         f"Symbol: {symbol}\n"
@@ -523,33 +533,41 @@ class PositionTracker:
                         f"- Missed fill notification\n"
                         f"- System crash after fill\n"
                         f"- Manual broker trade\n\n"
-                        f"[WARNING]️ MANUAL INTERVENTION REQUIRED"
+                        f"[WARNING]️ MANUAL INTERVENTION REQUIRED\n\n"
+                        f"(This alert will not repeat for this symbol today)"
                     )
-                
+                    self._alerted_orphaned_positions.add(symbol)
+
                 # Don't auto-add orphaned positions - too risky
                 # (Could be manual trade, unknown SL, etc.)
                 # Just alert and require manual verification
             
             # === CHECK 3: Quantity Mismatch (both have, but different qty) ===
             common_symbols = tracked_symbols & broker_symbols
-            
+
             for symbol in common_symbols:
                 tracked_qty = self.open_positions[symbol].quantity
                 broker_qty = abs(int(broker_positions_map[symbol].get('quantity', 0)))
-                
+
                 if tracked_qty != broker_qty:
+                    # Create unique key for this mismatch (symbol + quantities)
+                    mismatch_key = f"{symbol}:{tracked_qty}:{broker_qty}"
+
                     logger.critical(
                         f"[WARNING] QUANTITY MISMATCH: {symbol} | "
                         f"Tracked: {tracked_qty}, Broker: {broker_qty}"
                     )
-                    
-                    if self.telegram:
+
+                    # Send alert - BUT ONLY ONCE per unique mismatch (throttled)
+                    if self.telegram and mismatch_key not in self._alerted_qty_mismatches:
                         self.telegram.send_message(
                             f"[WARNING]️ Quantity mismatch: {symbol}\n"
                             f"Tracked: {tracked_qty}\n"
                             f"Broker: {broker_qty}\n\n"
-                            f"Possible partial fill or manual modification"
+                            f"Possible partial fill or manual modification\n\n"
+                            f"(This alert will not repeat unless quantities change)"
                         )
+                        self._alerted_qty_mismatches.add(mismatch_key)
             
             # Log successful reconciliation
             if not phantom_symbols and not orphaned_symbols:
