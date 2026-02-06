@@ -146,6 +146,9 @@ class BaselineV1Live:
         self.startup_checker = StartupHealthCheck(self.notification_manager)
         self.shutdown_requested = False
 
+        # Track historical data loading state (to prevent notification spam)
+        self.loading_historical_data = False
+
         # Register initial state
         self.state_manager.update_operational_state('STARTING')
 
@@ -305,6 +308,10 @@ class BaselineV1Live:
         logger.info("="*80)
         logger.info("[HIST] LOADING HISTORICAL DATA (9:15 AM - Current Time)")
         logger.info("="*80)
+
+        # Set flag to suppress swing notifications during historical loading
+        self.loading_historical_data = True
+
         self.data_pipeline.load_historical_data(symbols=self.symbols)
         
         # 🔧 FIX: Fill any gap between last historical bar and current time
@@ -333,8 +340,11 @@ class BaselineV1Live:
                     self.swing_detector.update(symbol, bar_dict)
                 
                 logger.debug(f"{symbol}: {len(bars)} historical bars processed")
-        
+
         logger.info("[HIST] Historical data processing complete")
+
+        # Clear flag - now in real-time mode, send notifications normally
+        self.loading_historical_data = False
 
         # CRITICAL: Backfill all historical swings to database
         # These were detected but not logged because is_historical_processing = True
@@ -722,8 +732,8 @@ class BaselineV1Live:
         )
         self.continuous_filter.add_swing_candidate(symbol, swing_info)
 
-        # Send Telegram notification for swing detection
-        if self.telegram:
+        # Send Telegram notification for swing detection (only in real-time mode)
+        if self.telegram and not self.loading_historical_data:
             self.telegram.notify_swing_detected(symbol, swing_info)
     
     def process_tick(self):
