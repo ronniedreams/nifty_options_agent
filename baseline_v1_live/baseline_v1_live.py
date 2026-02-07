@@ -732,9 +732,9 @@ class BaselineV1Live:
         )
         self.continuous_filter.add_swing_candidate(symbol, swing_info)
 
-        # Send Telegram notification for swing detection (only in real-time mode)
-        if self.telegram and not self.loading_historical_data:
-            self.telegram.notify_swing_detected(symbol, swing_info)
+        # Swing notifications disabled - too noisy (only notify on trades, not swings)
+        # if self.telegram and not self.loading_historical_data:
+        #     self.telegram.notify_swing_detected(symbol, swing_info)
     
     def process_tick(self):
         """
