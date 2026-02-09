@@ -805,7 +805,17 @@ class OrderManager:
                 )
                 return 'kept'
 
-            # Cancel succeeded - safe to place new order for new symbol
+            # NEW: Verify cancel propagated to orderbook before placing new order (race condition fix)
+            cancel_verified = self._verify_order_cancelled(existing['order_id'])
+
+            if not cancel_verified:
+                logger.warning(
+                    f"[SKIP-SWITCH-{option_type}] Cancel verification failed for order {existing['order_id']}. "
+                    f"NOT switching to {symbol} to prevent duplicate orders."
+                )
+                return 'kept'
+
+            # Cancel succeeded and verified - safe to place new order for new symbol
             order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
             if order_id:
                 self.pending_limit_orders[option_type] = {
@@ -842,7 +852,17 @@ class OrderManager:
                 )
                 return 'kept'
 
-            # Cancel succeeded - safe to place new order
+            # NEW: Verify cancel propagated to orderbook before placing new order (race condition fix)
+            cancel_verified = self._verify_order_cancelled(existing['order_id'])
+
+            if not cancel_verified:
+                logger.warning(
+                    f"[SKIP-MODIFY-{option_type}] Cancel verification failed for order {existing['order_id']}. "
+                    f"Keeping existing order to prevent duplicate orders."
+                )
+                return 'kept'
+
+            # Cancel succeeded and verified - safe to place new order
             order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
             if order_id:
                 existing['order_id'] = order_id
@@ -957,13 +977,91 @@ class OrderManager:
         if DRY_RUN:
             logger.info(f"[DRY-RUN] Would cancel order {order_id}")
             return True
-        
+
         try:
             response = self.client.cancelorder(orderid=order_id)
             return response.get('status') == 'success'
         except Exception as e:
             logger.error(f"Error cancelling order: {e}")
             return False
+
+    def _verify_order_cancelled(self, order_id: str, max_retries: int = 3, delay: float = 0.5) -> bool:
+        """
+        Verify that order cancel has propagated to orderbook (synchronous verification)
+
+        This prevents race condition where:
+        1. Cancel API returns success
+        2. Order status update is asynchronous
+        3. New order placed immediately
+        4. Both orders exist as "open" and get executed
+
+        Args:
+            order_id: Order ID to verify
+            max_retries: Number of verification attempts (default 3)
+            delay: Seconds to wait between attempts (default 0.5s)
+
+        Returns:
+            True if order confirmed cancelled, False otherwise
+        """
+        import time
+
+        if DRY_RUN:
+            logger.info(f"[DRY-RUN] Would verify order {order_id} cancelled")
+            return True
+
+        for attempt in range(1, max_retries + 1):
+            time.sleep(delay)
+
+            try:
+                response = self.client.orderbook()
+
+                if response.get('status') != 'success':
+                    logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook fetch failed")
+                    continue
+
+                orders = response.get('data', [])
+
+                # Handle string response (API may return error message)
+                if isinstance(orders, str):
+                    logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook returned string: {orders}")
+                    continue
+
+                if not isinstance(orders, list):
+                    logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook data is not a list")
+                    continue
+
+                # Find the order in orderbook
+                target_order = None
+                for order in orders:
+                    if isinstance(order, dict) and order.get('orderid') == order_id:
+                        target_order = order
+                        break
+
+                if target_order is None:
+                    # Order not found in orderbook - likely cancelled and removed
+                    logger.info(f"[CANCEL-VERIFIED] Order {order_id} not in orderbook (attempt {attempt}/{max_retries})")
+                    return True
+
+                # Check order status
+                order_status = target_order.get('order_status', '').lower()
+
+                if order_status in ['cancelled', 'rejected']:
+                    logger.info(f"[CANCEL-VERIFIED] Order {order_id} status={order_status} (attempt {attempt}/{max_retries})")
+                    return True
+
+                if order_status in ['complete', 'filled']:
+                    logger.warning(f"[CANCEL-FAILED] Order {order_id} already filled (status={order_status})")
+                    return False
+
+                logger.debug(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Order {order_id} still {order_status}")
+
+            except Exception as e:
+                logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries} error: {e}")
+                continue
+
+        # Max retries reached without confirmation
+        logger.warning(f"[CANCEL-VERIFY-TIMEOUT] Could not verify order {order_id} cancelled after {max_retries} attempts")
+        return False
     
     def _modify_broker_order(self, order_id: str, new_price: float) -> bool:
         """Modify order price via broker API"""
