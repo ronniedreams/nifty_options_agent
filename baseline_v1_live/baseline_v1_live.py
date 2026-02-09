@@ -760,10 +760,11 @@ class BaselineV1Live:
         bars_dict = {symbol: bar.to_dict() for symbol, bar in latest_bars.items()}
         self.swing_detector.update_all(bars_dict)
         
-        # 3. Evaluate ALL swing candidates with latest data
+        # 3. Evaluate ALL swing candidates with latest data (including current incomplete bars for real-time SL% calculation)
         best_strikes = self.continuous_filter.evaluate_all_candidates(
             latest_bars,
-            self.swing_detector
+            self.swing_detector,
+            current_bars  # Include current bars for accurate highest_high tracking
         )
         
         # Log current best strikes and candidates (INFO level for visibility)
@@ -875,6 +876,44 @@ class BaselineV1Live:
             if action == 'place':
                 # Price within 1 Rs of swing - place/update order
                 limit_price = trigger['limit_price']
+
+                # Check available margin before attempting order (CRITICAL FIX #5)
+                try:
+                    # Query broker for account info
+                    account_info = self.data_pipeline.client.get_account_details()
+
+                    if account_info and account_info.get('status') == 'success':
+                        available_margin = float(account_info.get('data', {}).get('availablecash', 0))
+
+                        # Rough margin estimate: entry_price × quantity (conservative - actual may be lower)
+                        estimated_margin_required = candidate['entry_price'] * candidate['quantity']
+
+                        if available_margin < estimated_margin_required:
+                            logger.warning(
+                                f"[MARGIN-CHECK-{option_type}] INSUFFICIENT MARGIN "
+                                f"Available: ₹{available_margin:,.0f} < Required: ₹{estimated_margin_required:,.0f} "
+                                f"(Symbol: {candidate['symbol']}, Qty: {candidate['quantity']})"
+                            )
+                            # Skip order placement - insufficient margin
+                            self.order_manager.manage_limit_order_for_type(option_type, None, None)
+                            continue
+                        else:
+                            logger.debug(
+                                f"[MARGIN-CHECK-{option_type}] OK "
+                                f"Available: ₹{available_margin:,.0f} >= Required: ₹{estimated_margin_required:,.0f}"
+                            )
+                    else:
+                        # If margin check fails, log warning but proceed (don't block on API failure)
+                        logger.warning(
+                            f"[MARGIN-CHECK-{option_type}] API call failed: {account_info}. "
+                            f"Proceeding with order (margin not verified)"
+                        )
+                except Exception as e:
+                    # If margin check throws exception, log but proceed
+                    logger.warning(
+                        f"[MARGIN-CHECK-{option_type}] Exception during margin check: {e}. "
+                        f"Proceeding with order (margin not verified)"
+                    )
 
                 # Check if we can open position for this type
                 can_open, reason = self.position_tracker.can_open_position(

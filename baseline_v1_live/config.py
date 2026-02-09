@@ -87,7 +87,7 @@ SL_TRIGGER_PRICE_OFFSET = 0  # Trigger at exact SL price
 SL_LIMIT_PRICE_OFFSET = 3    # Limit 3 Rs above SL trigger
 
 # Order Monitoring
-ORDER_FILL_CHECK_INTERVAL = 10  # Check for fills every 10 seconds
+ORDER_FILL_CHECK_INTERVAL = 5  # Check for fills every 5 seconds (reduced from 10s to minimize unprotected position window)
 ORDERBOOK_POLL_INTERVAL = 5     # Poll orderbook every 5 seconds
 
 # Limit Order Timeout

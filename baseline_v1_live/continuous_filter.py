@@ -294,20 +294,22 @@ class ContinuousFilterEngine:
         logger.info(f"[STARTUP-PROTECTION] Marked {marked_count} swings as already broken in history")
         return marked_count
 
-    def evaluate_all_candidates(self, latest_bars: Dict, swing_detector) -> Dict:
+    def evaluate_all_candidates(self, latest_bars: Dict, swing_detector, current_bars: Dict = None) -> Dict:
         """
         Evaluate all swing candidates with latest bar data
-        
+
         Run EVERY bar to update best CE and PE strikes
-        
+
         Args:
             latest_bars: {symbol: BarData} - Latest completed bars
             swing_detector: MultiSwingDetector instance for getting highest_high
-        
+            current_bars: {symbol: BarData} - Current incomplete bars with real-time highs (optional)
+
         Returns:
             {'CE': best_ce_candidate, 'PE': best_pe_candidate}
             Each candidate has enriched fields: sl_price, sl_points, lots, etc.
         """
+        current_bars = current_bars or {}
         qualified = {'CE': [], 'PE': []}
 
         # Debug: Log Stage-1 pool status
@@ -384,10 +386,15 @@ class ContinuousFilterEngine:
                 detector = swing_detector.detectors.get(symbol)
                 if not detector:
                     continue
-                
+
+                # Get current incomplete bar for this symbol (if exists)
+                current_bar_for_symbol = current_bars.get(symbol)
+
                 highest_high = self._get_highest_high_since_swing(
                     detector,
-                    swing_info['index']
+                    swing_info['index'],
+                    current_bar=current_bar_for_symbol,
+                    symbol=symbol
                 )
                 
                 # Calculate dynamic metrics
@@ -482,20 +489,55 @@ class ContinuousFilterEngine:
         
         return best_strikes
     
-    def _get_highest_high_since_swing(self, detector, swing_index: int) -> float:
-        """Get highest high from all bars after swing index"""
+    def _get_highest_high_since_swing(self, detector, swing_index: int, current_bar=None, symbol: str = None) -> float:
+        """Get highest high from all bars after swing index, including current incomplete bar
+
+        Args:
+            detector: SwingDetector instance with completed bars
+            swing_index: Index of swing bar in detector.bars
+            current_bar: Current incomplete bar (optional) with real-time high
+            symbol: Symbol name for logging (optional)
+
+        Returns:
+            Highest high since swing formation, including current bar if provided
+        """
         if not detector.bars or swing_index >= len(detector.bars):
             logger.warning(f"No bars available or invalid swing_index {swing_index}")
             return 0.0
-        
+
         bars_after_swing = detector.bars[swing_index + 1:]
-        
+
         if not bars_after_swing:
-            # No bars after swing yet, use swing bar's high
-            return detector.bars[swing_index].get('high', 0.0)
-        
+            # No completed bars after swing yet, use swing bar's high
+            swing_high = detector.bars[swing_index].get('high', 0.0)
+
+            # If current bar exists, compare with swing high
+            if current_bar:
+                current_high = current_bar.get('high', 0.0)
+                return max(swing_high, current_high)
+
+            return swing_high
+
         try:
-            return max(bar.get('high', 0.0) for bar in bars_after_swing)
+            # Get highest from completed bars
+            highest_from_completed = max(bar.get('high', 0.0) for bar in bars_after_swing)
+
+            # If current bar exists, include its high (may be higher than completed bars)
+            if current_bar:
+                current_high = current_bar.get('high', 0.0)
+                final_highest = max(highest_from_completed, current_high)
+
+                # Log when current bar's high exceeds completed bar high (significant for SL% calculation)
+                if current_high > highest_from_completed and symbol:
+                    logger.debug(
+                        f"[CURRENT-HIGH] {symbol}: Current bar high {current_high:.2f} > "
+                        f"completed bars high {highest_from_completed:.2f}"
+                    )
+
+                return final_highest
+
+            return highest_from_completed
+
         except (ValueError, TypeError) as e:
             logger.error(f"Error calculating highest high: {e}")
             return detector.bars[swing_index].get('high', 0.0)
