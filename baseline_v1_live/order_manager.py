@@ -1185,8 +1185,26 @@ class OrderManager:
 
             broker_orders = response.get('data', [])
 
+            # Validate broker_orders is a list (API may return string like "No orders found")
+            if broker_orders is None:
+                logger.debug("[RECONCILE] No orders data (None)")
+                return results
+
+            if isinstance(broker_orders, str):
+                logger.warning(f"[RECONCILE] Orderbook data is string: {broker_orders}")
+                return results
+
+            if not isinstance(broker_orders, list):
+                logger.error(f"[RECONCILE] Orderbook data is not a list: {type(broker_orders)}")
+                return results
+
             # Create lookup map: order_id -> order_data
-            broker_order_map = {order.get('orderid'): order for order in broker_orders}
+            broker_order_map = {}
+            for order in broker_orders:
+                if isinstance(order, dict):
+                    broker_order_map[order.get('orderid')] = order
+                else:
+                    logger.warning(f"[RECONCILE] Skipping non-dict order entry: {type(order)}")
 
             logger.info(f"[RECONCILE] Found {len(broker_orders)} orders at broker")
 
