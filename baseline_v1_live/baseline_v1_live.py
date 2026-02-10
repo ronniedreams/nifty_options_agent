@@ -171,6 +171,14 @@ class BaselineV1Live:
         # Last bar update time
         self.last_bar_update = None
 
+        # Track the last bar timestamp sent to swing_detector per symbol.
+        # Prevents feeding the same or older bar repeatedly (e.g., during the
+        # startup window when fill_initial_gap and live-stream bars overlap).
+        self._last_sent_bar_ts = {}  # {symbol: datetime}
+
+        # Guard flags to ensure one-shot exit handlers (prevent Telegram spam)
+        self._eod_exit_done = False  # Set True after handle_eod_exit() runs once
+
         # FIX: Load previous state from database (CRITICAL for crash recovery)
         self.load_state()
 
@@ -320,6 +328,17 @@ class BaselineV1Live:
         self.data_pipeline.fill_initial_gap()
         logger.info("[GAP-FILL] Gap fill complete")
         
+        # Reset swing detectors before historical replay.
+        # On same-day restart self.bars retains the previous session's last bar,
+        # so historical replay (9:15 onward) is rejected as OUT-OF-ORDER.
+        # Setting current_date=None forces reset_for_new_day() on the first bar,
+        # clearing all stale bar/swing state before replay begins.
+        for symbol in self.symbols:
+            detector = self.swing_detector.get_detector(symbol)
+            if detector:
+                detector.current_date = None
+        logger.info("[HIST] Swing detectors reset - historical replay will start fresh")
+
         # Initialize swing detector with historical bars
         logger.info("[SWING] Processing historical bars for swing detection...")
         
@@ -342,6 +361,13 @@ class BaselineV1Live:
                 logger.debug(f"{symbol}: {len(bars)} historical bars processed")
 
         logger.info("[HIST] Historical data processing complete")
+
+        # Seed last-sent timestamps from what the swing detectors now have.
+        # This ensures the live-mode dedup filter starts from the right baseline.
+        for symbol in self.symbols:
+            detector = self.swing_detector.get_detector(symbol)
+            if detector and detector.bars:
+                self._last_sent_bar_ts[symbol] = detector.bars[-1]['timestamp']
 
         # Clear flag - now in real-time mode, send notifications normally
         self.loading_historical_data = False
@@ -669,17 +695,12 @@ class BaselineV1Live:
 
                 # Check if force exit time reached (3:15 PM)
                 if self.is_force_exit_time():
-                    logger.warning("Force exit time (3:15 PM) reached - initiating EOD exit")
-
-                    # Get current prices
-                    latest_bars = self.data_pipeline.get_all_latest_bars()
-                    current_prices = {symbol: bar.close for symbol, bar in latest_bars.items()}
-
-                    # Handle EOD exit
-                    self.handle_eod_exit()
-
-                    # Continue running but don't process ticks anymore
-                    logger.info("EOD exit complete - system will monitor until market close")
+                    if not self._eod_exit_done:
+                        logger.warning("Force exit time (3:15 PM) reached - initiating EOD exit")
+                        self._eod_exit_done = True
+                        self.handle_eod_exit()
+                        logger.info("EOD exit complete - system will monitor until market close")
+                    # Continue running (monitor mode) until market closes at 3:30 PM
                     await asyncio.sleep(60)
                     continue
 
@@ -757,8 +778,17 @@ class BaselineV1Live:
         
         # 2. Update swing detectors with latest bars
         # (This will trigger _on_swing_detected callback for new swings)
-        bars_dict = {symbol: bar.to_dict() for symbol, bar in latest_bars.items()}
-        self.swing_detector.update_all(bars_dict)
+        # Only feed bars that are strictly newer than what was last sent per symbol.
+        # This prevents the startup overlap window (fill_initial_gap vs live stream)
+        # from causing repeated OUT-OF-ORDER/DUPLICATE errors in swing_detector.
+        new_bars_dict = {}
+        for symbol, bar in latest_bars.items():
+            last_ts = self._last_sent_bar_ts.get(symbol)
+            if last_ts is None or bar.timestamp > last_ts:
+                new_bars_dict[symbol] = bar.to_dict()
+                self._last_sent_bar_ts[symbol] = bar.timestamp
+        if new_bars_dict:
+            self.swing_detector.update_all(new_bars_dict)
         
         # 3. Evaluate ALL swing candidates with latest data (including current incomplete bars for real-time SL% calculation)
         best_strikes = self.continuous_filter.evaluate_all_candidates(
@@ -962,9 +992,14 @@ class BaselineV1Live:
         self.position_tracker.update_prices(current_prices)
         
         # 8. Check for daily ±5R exit
+        # Capture flag BEFORE calling check_daily_exit() so we only call
+        # handle_daily_exit() once — on the tick that first triggers the exit.
+        # check_daily_exit() returns the reason on every subsequent call too,
+        # which would cause repeated Telegram notifications without this guard.
+        was_already_triggered = self.position_tracker.daily_exit_triggered
         exit_reason = self.position_tracker.check_daily_exit()
-        
-        if exit_reason:
+
+        if exit_reason and not was_already_triggered:
             self.handle_daily_exit(exit_reason, current_prices)
         
         # 7. Reconcile positions with broker (every 60 seconds)
