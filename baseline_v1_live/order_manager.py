@@ -262,22 +262,22 @@ class OrderManager:
             return True
         
         try:
-            response = self.client.cancelorder(orderid=order_id)
-            
+            response = self.client.cancelorder(order_id=order_id)
+
             if response.get('status') == 'success':
                 del self.pending_limit_orders[symbol]
-                
+
                 logger.info(f"Cancelled order {order_id} for {symbol}")
-                
+
                 return True
             else:
                 logger.error(f"Failed to cancel order {order_id}: {response}")
                 return False
-                
+
         except Exception as e:
             logger.error(f"Exception cancelling order {order_id}: {e}")
             return False
-    
+
     def place_sl_order(
         self,
         symbol: str,
@@ -388,8 +388,8 @@ class OrderManager:
             return True
         
         try:
-            response = self.client.cancelorder(orderid=order_id)
-            
+            response = self.client.cancelorder(order_id=order_id)
+
             if response.get('status') == 'success':
                 del self.active_sl_orders[symbol]
                 logger.info(f"Cancelled SL order {order_id} for {symbol}")
@@ -425,7 +425,7 @@ class OrderManager:
             Order ID if successful, None if all retries failed
         """
         logger.critical(
-            f"🚨 EMERGENCY MARKET EXIT: {symbol} qty={quantity} reason={reason}"
+            f"[EMERGENCY] EMERGENCY MARKET EXIT: {symbol} qty={quantity} reason={reason}"
         )
         
         if DRY_RUN:
@@ -449,7 +449,7 @@ class OrderManager:
                 
                 if not position_exists:
                     logger.warning(
-                        f"⚠️ Emergency exit cancelled: No open position for {symbol}. "
+                        f"[WARNING] Emergency exit cancelled: No open position for {symbol}. "
                         f"Prevents opening reverse long position."
                     )
                     return None
@@ -478,7 +478,7 @@ class OrderManager:
                     order_id = response.get('orderid')
                     
                     logger.critical(
-                        f"✅ Emergency exit successful: order {order_id} | "
+                        f"[SUCCESS] Emergency exit successful: order {order_id} | "
                         f"Attempt {attempt + 1}/{EMERGENCY_EXIT_RETRY_COUNT}"
                     )
                     
@@ -578,7 +578,7 @@ class OrderManager:
         """
         if self.consecutive_sl_failures >= MAX_SL_FAILURE_COUNT:
             logger.critical(
-                f"🛑 TRADING HALTED: {self.consecutive_sl_failures} consecutive "
+                f"[HALT] TRADING HALTED: {self.consecutive_sl_failures} consecutive "
                 f"SL placement failures (threshold: {MAX_SL_FAILURE_COUNT})"
             )
             return True
@@ -758,10 +758,17 @@ class OrderManager:
         # Case 1: Cancel existing order (no new candidate)
         if candidate is None or limit_price is None:
             if existing:
-                self._cancel_broker_order(existing['order_id'])
-                del self.pending_limit_orders[option_type]
-                logger.info(f"[CANCEL-{option_type}] Cancelled limit order for {existing['symbol']}")
-                return 'cancelled'
+                cancel_success = self._cancel_broker_order(existing['order_id'])
+                if cancel_success:
+                    del self.pending_limit_orders[option_type]
+                    logger.info(f"[CANCEL-{option_type}] Cancelled limit order for {existing['symbol']}")
+                    return 'cancelled'
+                else:
+                    logger.warning(
+                        f"[CANCEL-FAIL-{option_type}] Could not cancel order {existing['order_id']} "
+                        f"for {existing['symbol']} - keeping in memory to prevent orphaned open orders"
+                    )
+                    return 'kept'
             return 'none'
         
         symbol = candidate['symbol']
@@ -805,7 +812,17 @@ class OrderManager:
                 )
                 return 'kept'
 
-            # Cancel succeeded - safe to place new order for new symbol
+            # NEW: Verify cancel propagated to orderbook before placing new order (race condition fix)
+            cancel_verified = self._verify_order_cancelled(existing['order_id'])
+
+            if not cancel_verified:
+                logger.warning(
+                    f"[SKIP-SWITCH-{option_type}] Cancel verification failed for order {existing['order_id']}. "
+                    f"NOT switching to {symbol} to prevent duplicate orders."
+                )
+                return 'kept'
+
+            # Cancel succeeded and verified - safe to place new order for new symbol
             order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
             if order_id:
                 self.pending_limit_orders[option_type] = {
@@ -842,7 +859,17 @@ class OrderManager:
                 )
                 return 'kept'
 
-            # Cancel succeeded - safe to place new order
+            # NEW: Verify cancel propagated to orderbook before placing new order (race condition fix)
+            cancel_verified = self._verify_order_cancelled(existing['order_id'])
+
+            if not cancel_verified:
+                logger.warning(
+                    f"[SKIP-MODIFY-{option_type}] Cancel verification failed for order {existing['order_id']}. "
+                    f"Keeping existing order to prevent duplicate orders."
+                )
+                return 'kept'
+
+            # Cancel succeeded and verified - safe to place new order
             order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
             if order_id:
                 existing['order_id'] = order_id
@@ -957,13 +984,91 @@ class OrderManager:
         if DRY_RUN:
             logger.info(f"[DRY-RUN] Would cancel order {order_id}")
             return True
-        
+
         try:
-            response = self.client.cancelorder(orderid=order_id)
+            response = self.client.cancelorder(order_id=order_id)
             return response.get('status') == 'success'
         except Exception as e:
             logger.error(f"Error cancelling order: {e}")
             return False
+
+    def _verify_order_cancelled(self, order_id: str, max_retries: int = 3, delay: float = 0.5) -> bool:
+        """
+        Verify that order cancel has propagated to orderbook (synchronous verification)
+
+        This prevents race condition where:
+        1. Cancel API returns success
+        2. Order status update is asynchronous
+        3. New order placed immediately
+        4. Both orders exist as "open" and get executed
+
+        Args:
+            order_id: Order ID to verify
+            max_retries: Number of verification attempts (default 3)
+            delay: Seconds to wait between attempts (default 0.5s)
+
+        Returns:
+            True if order confirmed cancelled, False otherwise
+        """
+        import time
+
+        if DRY_RUN:
+            logger.info(f"[DRY-RUN] Would verify order {order_id} cancelled")
+            return True
+
+        for attempt in range(1, max_retries + 1):
+            time.sleep(delay)
+
+            try:
+                response = self.client.orderbook()
+
+                if response.get('status') != 'success':
+                    logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook fetch failed")
+                    continue
+
+                orders = response.get('data', [])
+
+                # Handle string response (API may return error message)
+                if isinstance(orders, str):
+                    logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook returned string: {orders}")
+                    continue
+
+                if not isinstance(orders, list):
+                    logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook data is not a list")
+                    continue
+
+                # Find the order in orderbook
+                target_order = None
+                for order in orders:
+                    if isinstance(order, dict) and order.get('orderid') == order_id:
+                        target_order = order
+                        break
+
+                if target_order is None:
+                    # Order not found in orderbook - likely cancelled and removed
+                    logger.info(f"[CANCEL-VERIFIED] Order {order_id} not in orderbook (attempt {attempt}/{max_retries})")
+                    return True
+
+                # Check order status
+                order_status = target_order.get('order_status', '').lower()
+
+                if order_status in ['cancelled', 'rejected']:
+                    logger.info(f"[CANCEL-VERIFIED] Order {order_id} status={order_status} (attempt {attempt}/{max_retries})")
+                    return True
+
+                if order_status in ['complete', 'filled']:
+                    logger.warning(f"[CANCEL-FAILED] Order {order_id} already filled (status={order_status})")
+                    return False
+
+                logger.debug(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Order {order_id} still {order_status}")
+
+            except Exception as e:
+                logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries} error: {e}")
+                continue
+
+        # Max retries reached without confirmation
+        logger.warning(f"[CANCEL-VERIFY-TIMEOUT] Could not verify order {order_id} cancelled after {max_retries} attempts")
+        return False
     
     def _modify_broker_order(self, order_id: str, new_price: float) -> bool:
         """Modify order price via broker API"""
@@ -1185,8 +1290,26 @@ class OrderManager:
 
             broker_orders = response.get('data', [])
 
+            # Validate broker_orders is a list (API may return string like "No orders found")
+            if broker_orders is None:
+                logger.debug("[RECONCILE] No orders data (None)")
+                return results
+
+            if isinstance(broker_orders, str):
+                logger.warning(f"[RECONCILE] Orderbook data is string: {broker_orders}")
+                return results
+
+            if not isinstance(broker_orders, list):
+                logger.error(f"[RECONCILE] Orderbook data is not a list: {type(broker_orders)}")
+                return results
+
             # Create lookup map: order_id -> order_data
-            broker_order_map = {order.get('orderid'): order for order in broker_orders}
+            broker_order_map = {}
+            for order in broker_orders:
+                if isinstance(order, dict):
+                    broker_order_map[order.get('orderid')] = order
+                else:
+                    logger.warning(f"[RECONCILE] Skipping non-dict order entry: {type(order)}")
 
             logger.info(f"[RECONCILE] Found {len(broker_orders)} orders at broker")
 

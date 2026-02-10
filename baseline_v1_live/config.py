@@ -87,7 +87,7 @@ SL_TRIGGER_PRICE_OFFSET = 0  # Trigger at exact SL price
 SL_LIMIT_PRICE_OFFSET = 3    # Limit 3 Rs above SL trigger
 
 # Order Monitoring
-ORDER_FILL_CHECK_INTERVAL = 10  # Check for fills every 10 seconds
+ORDER_FILL_CHECK_INTERVAL = 5  # Check for fills every 5 seconds (reduced from 10s to minimize unprotected position window)
 ORDERBOOK_POLL_INTERVAL = 5     # Poll orderbook every 5 seconds
 
 # Limit Order Timeout
@@ -99,7 +99,7 @@ EMERGENCY_EXIT_RETRY_COUNT = 5  # Retry emergency market exit 5 times
 EMERGENCY_EXIT_RETRY_DELAY = 2  # Wait 2 seconds between emergency exit retries
 
 # Order Modification Settings
-MODIFICATION_THRESHOLD = 0.50  # Rs - min price change to trigger order modification
+MODIFICATION_THRESHOLD = 1.00  # Rs - min price change to trigger order modification (increased from 0.50 to reduce race conditions)
 EXIT_LIMIT_BUFFER_PERCENT = 0.05  # 5% buffer for exit limit orders
 
 # ============================================================================

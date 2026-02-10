@@ -249,6 +249,20 @@ class DataPipeline:
                 # Without this, stale/future bars can corrupt swing detection
                 df = df.sort_index()
 
+                # CRITICAL FIX: Exclude the in-progress bar from history load.
+                # The history API returns the current in-progress bar with incomplete OHLCV.
+                # Keeping it causes swing detection to run on partial data, then the live
+                # stream's completed bar is rejected as a "DUPLICATE" — leaving the wrong
+                # (incomplete) bar permanently in the swing detector's window.
+                # Only load bars up to and including last_complete_bar_time.
+                last_complete_bar_time_aware = IST.localize(last_complete_bar_time) if last_complete_bar_time.tzinfo is None else last_complete_bar_time
+                df = df[df.index <= last_complete_bar_time_aware]
+
+                if df.empty:
+                    logger.info(f"[HIST] No complete bars yet for {symbol} (market just opened)")
+                    successful += 1
+                    continue
+
                 # Debug: Check what columns we have
                 if successful == 0:  # Log once
                     logger.info(f"[HIST] DataFrame columns: {df.columns.tolist()}")

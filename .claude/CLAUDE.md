@@ -41,7 +41,8 @@ git push --tags
 ```
 
 **Hard Rules:**
-- ❌ Never code during market hours (9:15 AM - 3:30 PM)
+- ❌ Never deploy to EC2 during market hours (9:15 AM - 3:30 PM) — EC2 is live production
+- ✅ Local code changes and debugging ARE allowed during market hours
 - ❌ Never test directly on main
 - ❌ Never delete tags
 - ❌ Never deploy draft/experiment to EC2

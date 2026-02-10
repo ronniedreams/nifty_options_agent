@@ -1,6 +1,7 @@
 POSITIONS = """
 SELECT * FROM positions
 WHERE is_closed = 0
+AND trade_date = DATE('now', 'localtime')
 ORDER BY entry_time DESC
 """
 
