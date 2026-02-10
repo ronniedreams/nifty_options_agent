@@ -262,22 +262,22 @@ class OrderManager:
             return True
         
         try:
-            response = self.client.cancelorder(orderid=order_id)
-            
+            response = self.client.cancelorder(order_id=order_id)
+
             if response.get('status') == 'success':
                 del self.pending_limit_orders[symbol]
-                
+
                 logger.info(f"Cancelled order {order_id} for {symbol}")
-                
+
                 return True
             else:
                 logger.error(f"Failed to cancel order {order_id}: {response}")
                 return False
-                
+
         except Exception as e:
             logger.error(f"Exception cancelling order {order_id}: {e}")
             return False
-    
+
     def place_sl_order(
         self,
         symbol: str,
@@ -388,8 +388,8 @@ class OrderManager:
             return True
         
         try:
-            response = self.client.cancelorder(orderid=order_id)
-            
+            response = self.client.cancelorder(order_id=order_id)
+
             if response.get('status') == 'success':
                 del self.active_sl_orders[symbol]
                 logger.info(f"Cancelled SL order {order_id} for {symbol}")
@@ -425,7 +425,7 @@ class OrderManager:
             Order ID if successful, None if all retries failed
         """
         logger.critical(
-            f"🚨 EMERGENCY MARKET EXIT: {symbol} qty={quantity} reason={reason}"
+            f"[EMERGENCY] EMERGENCY MARKET EXIT: {symbol} qty={quantity} reason={reason}"
         )
         
         if DRY_RUN:
@@ -449,7 +449,7 @@ class OrderManager:
                 
                 if not position_exists:
                     logger.warning(
-                        f"⚠️ Emergency exit cancelled: No open position for {symbol}. "
+                        f"[WARNING] Emergency exit cancelled: No open position for {symbol}. "
                         f"Prevents opening reverse long position."
                     )
                     return None
@@ -478,7 +478,7 @@ class OrderManager:
                     order_id = response.get('orderid')
                     
                     logger.critical(
-                        f"✅ Emergency exit successful: order {order_id} | "
+                        f"[SUCCESS] Emergency exit successful: order {order_id} | "
                         f"Attempt {attempt + 1}/{EMERGENCY_EXIT_RETRY_COUNT}"
                     )
                     
@@ -578,7 +578,7 @@ class OrderManager:
         """
         if self.consecutive_sl_failures >= MAX_SL_FAILURE_COUNT:
             logger.critical(
-                f"🛑 TRADING HALTED: {self.consecutive_sl_failures} consecutive "
+                f"[HALT] TRADING HALTED: {self.consecutive_sl_failures} consecutive "
                 f"SL placement failures (threshold: {MAX_SL_FAILURE_COUNT})"
             )
             return True
@@ -758,10 +758,17 @@ class OrderManager:
         # Case 1: Cancel existing order (no new candidate)
         if candidate is None or limit_price is None:
             if existing:
-                self._cancel_broker_order(existing['order_id'])
-                del self.pending_limit_orders[option_type]
-                logger.info(f"[CANCEL-{option_type}] Cancelled limit order for {existing['symbol']}")
-                return 'cancelled'
+                cancel_success = self._cancel_broker_order(existing['order_id'])
+                if cancel_success:
+                    del self.pending_limit_orders[option_type]
+                    logger.info(f"[CANCEL-{option_type}] Cancelled limit order for {existing['symbol']}")
+                    return 'cancelled'
+                else:
+                    logger.warning(
+                        f"[CANCEL-FAIL-{option_type}] Could not cancel order {existing['order_id']} "
+                        f"for {existing['symbol']} - keeping in memory to prevent orphaned open orders"
+                    )
+                    return 'kept'
             return 'none'
         
         symbol = candidate['symbol']
@@ -979,7 +986,7 @@ class OrderManager:
             return True
 
         try:
-            response = self.client.cancelorder(orderid=order_id)
+            response = self.client.cancelorder(order_id=order_id)
             return response.get('status') == 'success'
         except Exception as e:
             logger.error(f"Error cancelling order: {e}")

@@ -513,7 +513,7 @@ class ContinuousFilterEngine:
 
             # If current bar exists, compare with swing high
             if current_bar:
-                current_high = current_bar.get('high', 0.0)
+                current_high = current_bar.high if current_bar.high is not None else 0.0
                 return max(swing_high, current_high)
 
             return swing_high
@@ -524,7 +524,7 @@ class ContinuousFilterEngine:
 
             # If current bar exists, include its high (may be higher than completed bars)
             if current_bar:
-                current_high = current_bar.get('high', 0.0)
+                current_high = current_bar.high if current_bar.high is not None else 0.0
                 final_highest = max(highest_from_completed, current_high)
 
                 # Log when current bar's high exceeds completed bar high (significant for SL% calculation)
