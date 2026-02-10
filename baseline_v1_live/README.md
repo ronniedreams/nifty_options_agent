@@ -222,9 +222,17 @@ Output:
 
 ### Order Safeguards
 - ✅ **SL-L Orders:** Trigger at SL price, limit +3 Rs above (prevents runaway losses)
+- ✅ **Modification Threshold:** Ignores price changes < ₹0.50 to prevent order churn and broker RMS flags.
 - ✅ **Position Reconciliation:** Checks broker positions every 60s
-- ✅ **Fill Monitoring:** Polls orderbook every 10s
-- ✅ **State Persistence:** Recovers from crashes via SQLite
+- ✅ **Fill Monitoring:** Polls orderbook every 10s using OpenAlgo-specific `order_status` mapping.
+- ✅ **State Persistence:** Recovers from crashes via SQLite with WAL mode and atomic transactions.
+
+### Technical Robustness
+- **Intelligent Cancellation:** Verifies order cancellation via orderbook polling before placing replacement orders to prevent duplicates.
+- **Terminal State Handling:** Recognizes "already terminal" broker messages to skip redundant verification waits.
+- **Real-Time SL Calculation:** Tracks mid-minute "highest highs" from incomplete bars to ensure SL% filters react instantly to volatility.
+- **Data Deduplication:** Prevents out-of-order bars during the transition from historical gap-filling to live WebSocket streaming.
+- **Atomic Transactions:** Custom SQLite decorators with `BEGIN IMMEDIATE` locks and retry logic ensure data integrity during concurrent access.
 
 ### Data Quality
 - ✅ **Stale Tick Detection:** Alerts if no data for >5 seconds

@@ -29,6 +29,11 @@ from .config import (
     OPENALGO_API_KEY,
     OPENALGO_HOST,
     OPENALGO_WS_URL,
+    ANGELONE_OPENALGO_API_KEY,
+    ANGELONE_HOST,
+    ANGELONE_WS_URL,
+    FAILOVER_NO_TICK_THRESHOLD,
+    FAILOVER_SWITCHBACK_THRESHOLD,
     EXCHANGE,
     STRIKE_SCAN_RANGE,
     BAR_INTERVAL_SECONDS,
@@ -141,6 +146,14 @@ class DataPipeline:
         # ATM tracking for strike selection
         self.current_atm_strike = None
         self.spot_price = None
+
+        # Angel One backup feed
+        self.angelone_client = None
+        self.angelone_is_connected = False
+        self.active_source = 'zerodha'       # 'zerodha' or 'angelone'
+        self.is_failover_active = False
+        self.last_zerodha_tick_time = {}     # Zerodha ticks tracked even when on Angel One
+        self.zerodha_continuous_tick_start = None  # When Zerodha ticks resumed (for switchback)
 
         logger.info("DataPipeline initialized")
 
@@ -614,7 +627,7 @@ class DataPipeline:
             # Subscribe to quote mode (LTP, OHLC, Volume)
             self.client.subscribe_quote(
                 instruments,
-                on_data_received=self._on_quote_update
+                on_data_received=self._on_quote_update_zerodha
             )
 
             with self.lock:
@@ -680,8 +693,8 @@ class DataPipeline:
 
                 # Check 1: WebSocket connection status
                 if not self.is_connected:
-                    logger.warning("[MONITOR] WebSocket disconnected - triggering reconnection")
-                    self._trigger_auto_reconnect("WEBSOCKET_DISCONNECTED")
+                    logger.warning("[MONITOR] Zerodha WebSocket disconnected - triggering failover/reconnect")
+                    self._trigger_failover_or_reconnect("WEBSOCKET_DISCONNECTED")
                     continue
 
                 # Check 2 & 3: Data flow (only check if we have subscribed symbols and data has started)
@@ -698,22 +711,41 @@ class DataPipeline:
                             )
                             continue
 
-                        # 🔧 FIX D: No-tick heartbeat detection
-                        # Check if ANY ticks received recently (socket alive but no ticks = common Upstox issue)
-                        if self.last_tick_time:
-                            most_recent_tick = max(self.last_tick_time.values())
-                            seconds_since_any_tick = (now - most_recent_tick).total_seconds()
+                        # --- Zerodha tick staleness check ---
+                        # Use last_zerodha_tick_time (always updated by Zerodha callback)
+                        zerodha_tick_source = self.last_zerodha_tick_time if self.last_zerodha_tick_time else self.last_tick_time
+                        if zerodha_tick_source:
+                            most_recent_zerodha_tick = max(zerodha_tick_source.values())
+                            seconds_since_zerodha_tick = (now - most_recent_zerodha_tick).total_seconds()
 
-                            # If NO ticks at all for 15 seconds during market hours, reconnect
-                            if seconds_since_any_tick > 15:
-                                logger.warning(
-                                    f"[MONITOR] No ticks for {seconds_since_any_tick:.0f}s "
-                                    f"(socket alive but dead) - triggering reconnection"
-                                )
-                                self._trigger_auto_reconnect(f"NO_TICKS:{seconds_since_any_tick:.0f}s")
-                                continue
+                            if not self.is_failover_active:
+                                # On Zerodha: no ticks for threshold → failover to Angel One
+                                if seconds_since_zerodha_tick > FAILOVER_NO_TICK_THRESHOLD:
+                                    logger.warning(
+                                        f"[MONITOR] No Zerodha ticks for {seconds_since_zerodha_tick:.0f}s "
+                                        f"(threshold: {FAILOVER_NO_TICK_THRESHOLD}s) - triggering failover"
+                                    )
+                                    self._trigger_failover_or_reconnect(f"NO_TICKS:{seconds_since_zerodha_tick:.0f}s")
+                                    continue
+                            else:
+                                # On Angel One: check if Zerodha ticks have resumed for switchback
+                                if seconds_since_zerodha_tick <= FAILOVER_NO_TICK_THRESHOLD:
+                                    # Zerodha ticks are flowing again - track how long
+                                    if self.zerodha_continuous_tick_start is None:
+                                        self.zerodha_continuous_tick_start = now
+                                        logger.info("[MONITOR] Zerodha ticks resumed - monitoring for switchback...")
+                                    else:
+                                        seconds_flowing = (now - self.zerodha_continuous_tick_start).total_seconds()
+                                        if seconds_flowing >= FAILOVER_SWITCHBACK_THRESHOLD:
+                                            logger.info(
+                                                f"[MONITOR] Zerodha ticks stable for {seconds_flowing:.0f}s - switching back"
+                                            )
+                                            self._failback_to_zerodha()
+                                else:
+                                    # Zerodha ticks not flowing yet - reset the counter
+                                    self.zerodha_continuous_tick_start = None
 
-                        # Count fresh symbols
+                        # Count fresh symbols (from active source)
                         fresh_count = 0
                         for symbol in self.subscribed_symbols:
                             last_tick = self.last_tick_time.get(symbol)
@@ -725,13 +757,13 @@ class DataPipeline:
                         total_symbols = len(self.subscribed_symbols)
                         coverage = fresh_count / total_symbols if total_symbols > 0 else 0
 
-                        # If data coverage drops below threshold, trigger reconnection
+                        # If active source data coverage drops below threshold, trigger action
                         if coverage < MIN_DATA_COVERAGE_THRESHOLD:
                             logger.warning(
                                 f"[MONITOR] Data coverage low ({coverage:.1%}, {fresh_count}/{total_symbols} fresh) - "
-                                f"triggering reconnection"
+                                f"triggering failover/reconnect"
                             )
-                            self._trigger_auto_reconnect(f"LOW_DATA_COVERAGE:{coverage:.1%}")
+                            self._trigger_failover_or_reconnect(f"LOW_DATA_COVERAGE:{coverage:.1%}")
                             continue
 
             except Exception as e:
@@ -741,11 +773,20 @@ class DataPipeline:
         logger.info("[MONITOR] Connection monitor loop stopped")
 
     def _trigger_auto_reconnect(self, reason):
+        """Legacy wrapper - delegates to _trigger_failover_or_reconnect"""
+        self._trigger_failover_or_reconnect(reason)
+
+    def _trigger_failover_or_reconnect(self, reason):
         """
-        Trigger automatic reconnection
+        Triggered when Zerodha data fails.
+
+        If Angel One backup is available → failover to Angel One immediately,
+        then reconnect Zerodha in the background.
+
+        If Angel One is not available → fall back to plain Zerodha reconnect.
 
         Args:
-            reason: String describing why reconnection was triggered
+            reason: String describing why this was triggered
         """
         if not self.auto_reconnect_enabled:
             logger.warning(f"[MONITOR] Auto-reconnect disabled, ignoring trigger: {reason}")
@@ -755,16 +796,61 @@ class DataPipeline:
             logger.debug(f"[MONITOR] Already reconnecting, ignoring trigger: {reason}")
             return
 
-        logger.warning(f"[MONITOR] Auto-reconnection triggered: {reason}")
+        logger.warning(f"[MONITOR] Data failure detected: {reason}")
 
-        # Run reconnection in separate thread to avoid blocking monitor
-        reconnect_thread = Thread(target=self.reconnect, daemon=True)
-        reconnect_thread.start()
+        if self.angelone_is_connected and not self.is_failover_active:
+            # Angel One is ready - failover immediately
+            self._failover_to_angelone(reason)
+            # Reconnect Zerodha in background
+            reconnect_thread = Thread(target=self.reconnect, daemon=True)
+            reconnect_thread.start()
+        else:
+            # No Angel One backup available - plain reconnect
+            if not self.is_reconnecting:
+                logger.warning("[MONITOR] Angel One backup not available - attempting Zerodha reconnect")
+                reconnect_thread = Thread(target=self.reconnect, daemon=True)
+                reconnect_thread.start()
     
-    def _on_quote_update(self, data):
+    def _on_quote_update_zerodha(self, data):
         """
-        WebSocket quote update callback
-        
+        Zerodha WebSocket tick callback.
+
+        Always updates last_zerodha_tick_time (used for failover/switchback detection).
+        Only processes the tick into bars when Zerodha is the active source.
+        active_source is read inside the lock to avoid a TOCTOU race with _failover_to_angelone.
+        """
+        symbol = data.get('symbol')
+        should_process = False
+        with self.lock:
+            if symbol:
+                self.last_zerodha_tick_time[symbol] = datetime.now(IST)
+            should_process = (self.active_source == 'zerodha')
+
+        if should_process:
+            self._process_tick(data)
+
+    def _on_quote_update_angelone(self, data):
+        """
+        Angel One WebSocket tick callback.
+
+        Only processes the tick into bars when Angel One is the active source (failover mode).
+        active_source is read inside the lock to avoid a TOCTOU race with _failback_to_zerodha.
+        Does NOT update last_zerodha_tick_time - switchback detection uses that dict
+        exclusively for Zerodha ticks.
+        """
+        with self.lock:
+            should_process = (self.active_source == 'angelone')
+
+        if should_process:
+            self._process_tick(data)
+
+    def _process_tick(self, data):
+        """
+        Core tick processing - aggregates ticks into 1-min OHLCV bars.
+
+        Called by whichever source is currently active (_on_quote_update_zerodha
+        or _on_quote_update_angelone). Source switching is transparent to this method.
+
         Expected data format:
         {
             'symbol': 'NIFTY26DEC2418000CE',
@@ -780,23 +866,23 @@ class DataPipeline:
         try:
             symbol = data.get('symbol')
             quote_data = data.get('data', {})
-            
+
             ltp = quote_data.get('ltp')
             volume = quote_data.get('volume', 1)
-            
+
             if not symbol or ltp is None:
                 return
-            
+
             now = datetime.now(IST)
-            
-            # Update last tick time
+
+            # Update last tick time (active source)
             with self.lock:
                 self.last_tick_time[symbol] = now
-                
+
                 # Track first data received
                 if self.first_data_received_at is None:
                     self.first_data_received_at = now
-            
+
             # Get current minute timestamp (rounded down)
             bar_timestamp = now.replace(second=0, microsecond=0)
             
@@ -844,7 +930,7 @@ class DataPipeline:
                 current_bar.update_tick(ltp, volume)
             
         except Exception as e:
-            logger.error(f"Error processing quote update: {e}")
+            logger.error(f"[TICK] Error processing tick: {e}")
     
     def get_latest_bar(self, symbol):
         """
@@ -1166,11 +1252,15 @@ class DataPipeline:
                         self.current_bars.clear()
                         logger.info(f"[RECONNECT] Cleared {old_current_bars} incomplete bars")
 
-                        # 🔧 FIX C: Reset tick and bar timestamps (force fresh data validation)
+                        # FIX C: Reset tick and bar timestamps (force fresh data validation)
                         old_tick_count = len(self.last_tick_time)
                         old_bar_count = len(self.last_bar_timestamp)
                         self.last_tick_time.clear()
                         self.last_bar_timestamp.clear()
+                        # Also clear Zerodha tick timestamps so the monitor does not
+                        # re-trigger failover immediately after switchback due to
+                        # stale pre-disconnect timestamps
+                        self.last_zerodha_tick_time.clear()
                         logger.info(
                             f"[RECONNECT] Reset timestamps "
                             f"(ticks: {old_tick_count}, bars: {old_bar_count})"
@@ -1190,7 +1280,7 @@ class DataPipeline:
                     try:
                         self.client.subscribe_quote(
                             instruments,
-                            on_data_received=self._on_quote_update
+                            on_data_received=self._on_quote_update_zerodha
                         )
 
                         with self.lock:
@@ -1237,6 +1327,10 @@ class DataPipeline:
                     # Reset counters
                     self.reconnect_attempts = 0
                     self.reset_watchdog()
+
+                    # Switch back to Zerodha if we were on Angel One
+                    if self.is_failover_active:
+                        self._failback_to_zerodha()
 
                     logger.info("[RECONNECT]  Reconnection complete and operational")
                     return True
@@ -1412,6 +1506,115 @@ class DataPipeline:
             if pruned_count > 0:
                 logger.info(f"[CLEANUP] Memory pruning: removed {pruned_count} old bars")
     
+    # -------------------------------------------------------------------------
+    # Angel One backup feed methods
+    # -------------------------------------------------------------------------
+
+    def connect_angelone_backup(self):
+        """
+        Connect to Angel One OpenAlgo instance (always-on backup).
+        Called once during startup, runs silently in background.
+        """
+        if not ANGELONE_OPENALGO_API_KEY:
+            logger.warning("[BACKUP] ANGELONE_OPENALGO_API_KEY not set - backup feed disabled")
+            return
+
+        try:
+            self.angelone_client = api(
+                api_key=ANGELONE_OPENALGO_API_KEY,
+                host=ANGELONE_HOST,
+                ws_url=ANGELONE_WS_URL
+            )
+            connected = self.angelone_client.connect()
+            if not connected:
+                logger.error("[BACKUP] Angel One WebSocket authentication failed")
+                with self.lock:
+                    self.angelone_is_connected = False
+                return
+
+            with self.lock:
+                self.angelone_is_connected = True
+            logger.info(f"[BACKUP] Angel One connected: {ANGELONE_WS_URL}")
+
+        except Exception as e:
+            logger.error(f"[BACKUP] Failed to connect Angel One: {e}")
+            with self.lock:
+                self.angelone_is_connected = False
+
+    def subscribe_angelone_backup(self, symbols, spot_symbol=None):
+        """
+        Subscribe Angel One to the same symbols as Zerodha (silent backup).
+        Ticks are received but ignored until failover is triggered.
+        """
+        if not self.angelone_is_connected:
+            logger.warning("[BACKUP] Angel One not connected - cannot subscribe")
+            return
+
+        all_symbols = list(symbols)
+        instruments = [{"exchange": EXCHANGE, "symbol": s} for s in symbols]
+
+        if spot_symbol:
+            all_symbols.append(spot_symbol)
+            instruments.append({"exchange": "NSE", "symbol": spot_symbol})
+
+        try:
+            self.angelone_client.subscribe_quote(
+                instruments,
+                on_data_received=self._on_quote_update_angelone
+            )
+            logger.info(f"[BACKUP] Angel One subscribed to {len(all_symbols)} symbols (standby)")
+        except Exception as e:
+            logger.error(f"[BACKUP] Angel One subscription failed: {e}")
+            with self.lock:
+                self.angelone_is_connected = False
+            # Disconnect the client to avoid leaving an open WebSocket with no subscription
+            try:
+                self.angelone_client.disconnect()
+            except Exception:
+                pass
+
+    def _failover_to_angelone(self, reason):
+        """
+        Switch active data source from Zerodha to Angel One.
+        Called when Zerodha ticks stop or WebSocket disconnects.
+        """
+        if self.is_failover_active:
+            return  # Already on Angel One
+
+        if not self.angelone_is_connected:
+            logger.error("[FAILOVER] Cannot failover - Angel One not connected")
+            return
+
+        with self.lock:
+            self.active_source = 'angelone'
+            self.is_failover_active = True
+            self.zerodha_continuous_tick_start = None
+            # Clear active source tick times so fresh Angel One ticks are counted
+            self.last_tick_time.clear()
+            self.first_data_received_at = None
+
+        logger.warning(f"[FAILOVER] Switched to Angel One backup feed. Reason: {reason}")
+        logger.warning("[FAILOVER] Zerodha reconnect running in background - will auto-switchback when ready")
+
+    def _failback_to_zerodha(self):
+        """
+        Switch active data source back from Angel One to Zerodha.
+        Called when Zerodha reconnects and ticks resume.
+        """
+        if not self.is_failover_active:
+            return  # Already on Zerodha
+
+        with self.lock:
+            self.active_source = 'zerodha'
+            self.is_failover_active = False
+            self.zerodha_continuous_tick_start = None
+            # Restore Zerodha tick times as the active source
+            self.last_tick_time = dict(self.last_zerodha_tick_time)
+            if self.last_tick_time:
+                self.first_data_received_at = min(self.last_tick_time.values())
+
+        logger.info("[FAILBACK] Switched back to Zerodha primary feed")
+
     def disconnect(self):
         """Disconnect WebSocket and clean up"""
         # Stop connection monitor first
@@ -1423,9 +1626,18 @@ class DataPipeline:
                 self.last_disconnect_time = datetime.now(IST)
                 self.client.disconnect()
                 self.is_connected = False
-                logger.info("Disconnected from OpenAlgo WebSocket")
+                logger.info("Disconnected from Zerodha OpenAlgo WebSocket")
             except Exception as e:
-                logger.error(f"Error disconnecting: {e}")
+                logger.error(f"Error disconnecting Zerodha: {e}")
+
+        # Also disconnect Angel One backup
+        if self.angelone_client and self.angelone_is_connected:
+            try:
+                self.angelone_client.disconnect()
+                self.angelone_is_connected = False
+                logger.info("[BACKUP] Disconnected from Angel One OpenAlgo WebSocket")
+            except Exception as e:
+                logger.error(f"[BACKUP] Error disconnecting Angel One: {e}")
 
 
 if __name__ == '__main__':

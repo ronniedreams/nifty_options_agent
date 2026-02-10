@@ -305,11 +305,17 @@ class BaselineV1Live:
             is_critical=False
         )
         
-        # Connect to data pipeline
+        # Connect to data pipeline (Zerodha primary)
         self.data_pipeline.connect()
-        
-        # Subscribe to options
+
+        # Connect Angel One backup feed (always-on, silent standby)
+        self.data_pipeline.connect_angelone_backup()
+
+        # Subscribe to options (Zerodha primary)
         self.data_pipeline.subscribe_options(self.symbols)
+
+        # Subscribe Angel One to same symbols (backup, ticks ignored until failover)
+        self.data_pipeline.subscribe_angelone_backup(self.symbols)
         
         # Load today's historical data BEFORE starting live loop
         # This ensures swings are detected correctly even when starting mid-day

@@ -161,6 +161,15 @@ OPENALGO_API_KEY = os.getenv('OPENALGO_API_KEY', '')
 OPENALGO_HOST = os.getenv('OPENALGO_HOST', 'http://127.0.0.1:5000')
 OPENALGO_WS_URL = os.getenv('OPENALGO_WS_URL', 'ws://127.0.0.1:8765')
 
+# Angel One Backup Data Feed
+ANGELONE_OPENALGO_API_KEY = os.getenv('ANGELONE_OPENALGO_API_KEY', '')
+ANGELONE_HOST = os.getenv('ANGELONE_HOST', 'http://127.0.0.1:5001')
+ANGELONE_WS_URL = os.getenv('ANGELONE_WS_URL', 'ws://127.0.0.1:8766')
+
+# Failover thresholds
+FAILOVER_NO_TICK_THRESHOLD = 15    # Seconds of no Zerodha ticks before failover to Angel One
+FAILOVER_SWITCHBACK_THRESHOLD = 10  # Seconds of Zerodha ticks flowing before switching back
+
 # Exchange
 EXCHANGE = 'NFO'  # Options exchange
 
