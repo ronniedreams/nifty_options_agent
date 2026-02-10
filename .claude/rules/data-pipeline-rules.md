@@ -299,14 +299,83 @@ Emit bars to:
 - Calculate VWAP incrementally (don't recalculate from scratch)
 - Log data quality metrics periodically (not every bar)
 
+## Dual-Broker Failover (Angel One Backup)
+
+### Overview
+
+The data pipeline supports a hot-standby Angel One WebSocket feed that activates if Zerodha data stops.
+
+```
+Zerodha WS (port 8765) ────── [active_source = 'zerodha'] ──┐
+                                                              ↓
+Angel One WS (port 8766) ─── [active_source = 'angelone'] ──→ _process_tick()
+```
+
+### State Variables
+
+```python
+active_source = 'zerodha'        # Which feed processes ticks into bars
+is_failover_active = False       # Whether we're currently on Angel One
+last_zerodha_tick_time = {}      # Per-symbol Zerodha tick times (always tracked)
+zerodha_continuous_tick_start    # When Zerodha ticks resumed (for switchback timer)
+```
+
+### Failover Rules
+
+1. **Failover triggers** (either condition):
+   - Zerodha ticks stale for >15s (FAILOVER_NO_TICK_THRESHOLD)
+   - Zerodha WebSocket disconnects
+
+2. **Failover action**:
+   - Set `active_source = 'angelone'`
+   - Log `[FAILOVER] Switching to Angel One`
+   - Start reconnecting Zerodha in background thread
+
+3. **Switchback triggers**:
+   - Zerodha reconnects successfully AND
+   - Zerodha stable ticks for >10s (FAILOVER_SWITCHBACK_THRESHOLD)
+
+4. **Switchback action**:
+   - Set `active_source = 'zerodha'`
+   - Set `is_failover_active = False`
+   - Clear `last_zerodha_tick_time` to prevent stale re-failover
+   - Log `[FAILBACK] Switching back to Zerodha`
+
+### Tick Routing
+
+- `_on_quote_update_zerodha()`: **Always** updates `last_zerodha_tick_time`; calls `_process_tick()` only if `active_source == 'zerodha'`
+- `_on_quote_update_angelone()`: Calls `_process_tick()` only if `active_source == 'angelone'`
+- `_process_tick()`: Source-agnostic bar aggregation (unchanged from single-broker logic)
+
+### Thread Safety
+
+- `active_source` must be read/written inside `self.lock` (RLock)
+- `angelone_is_connected` must be read/written inside `self.lock`
+- Never read `active_source` outside the lock — TOCTOU race condition
+
+### Disabling Failover
+
+If `ANGELONE_OPENALGO_API_KEY` is empty, failover is silently disabled. System runs on Zerodha only.
+
+### Logging Tags
+
+```
+[ANGELONE] Connected to backup feed
+[ANGELONE] Subscribed to 22 symbols
+[FAILOVER] Switching to Angel One — Zerodha ticks stale
+[FAILBACK] Switching back to Zerodha — stable for 10s
+```
+
+---
+
 ## EC2/Docker Environment
 
 ### WebSocket URL Differences
 
-| Environment | WebSocket URL |
-|-------------|---------------|
-| Local (Laptop) | ws://127.0.0.1:8765 |
-| EC2 (Docker) | ws://openalgo:8765 (internal network) |
+| Environment | Zerodha WS URL | Angel One WS URL |
+|-------------|----------------|------------------|
+| Local (Laptop) | ws://127.0.0.1:8765 | ws://127.0.0.1:8766 |
+| EC2 (Docker) | ws://openalgo:8765 (internal network) | ws://openalgo-angelone:8766 (internal) |
 
 ### Environment-Aware Configuration
 

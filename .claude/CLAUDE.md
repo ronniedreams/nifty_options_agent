@@ -5,7 +5,8 @@
 **What:** Automated trading system for NIFTY index options using swing-break strategy
 **How:** Detect swing lows → Apply 2-stage filters → Place proactive SL (stop-limit) orders BEFORE breaks
 **Risk:** Configurable R_VALUE (default Rs.6,500 per R), daily targets configurable (default +/-5R)
-**Broker:** OpenAlgo (Local: http://127.0.0.1:5000 | EC2: https://openalgo.ronniedreams.in)
+**Broker:** OpenAlgo/Zerodha (Local: http://127.0.0.1:5000 | EC2: https://openalgo.ronniedreams.in) — orders + primary data
+**Backup Feed:** OpenAlgo/Angel One (Local: http://127.0.0.1:5001) — backup data feed with auto-failover
 **Mode:** Paper trading by default (PAPER_TRADING=true in .env)
 
 ---
@@ -53,7 +54,9 @@ git push --tags
 
 ```
 1. DATA PIPELINE (data_pipeline.py)
-   WebSocket ticks → 1-min OHLCV bars + VWAP calculation
+   Dual WebSocket feeds → 1-min OHLCV bars + VWAP calculation
+   Primary: Zerodha (ws://127.0.0.1:8765) | Backup: Angel One (ws://127.0.0.1:8766)
+   Auto-failover: Zerodha stale >15s → switch to Angel One; switchback when Zerodha recovers
 
 2. SWING DETECTION (swing_detector.py)
    Watch-based system: bars confirm past turning points
@@ -145,6 +148,13 @@ MAX_SL_PERCENT = 0.10         # 10% maximum SL
 DAILY_TARGET_R = 5.0          # Exit all at +5R (configurable)
 DAILY_STOP_R = -5.0           # Exit all at -5R (configurable)
 FORCE_EXIT_TIME = time(15, 15) # Force exit at 3:15 PM
+
+# Angel One Backup Feed (from .env)
+ANGELONE_OPENALGO_API_KEY = ''  # Leave empty to disable failover
+ANGELONE_HOST = 'http://127.0.0.1:5001'
+ANGELONE_WS_URL = 'ws://127.0.0.1:8766'
+FAILOVER_NO_TICK_THRESHOLD = 15  # Seconds before switching to Angel One
+FAILOVER_SWITCHBACK_THRESHOLD = 10  # Seconds of stable Zerodha ticks before switching back
 ```
 
 ---
@@ -506,11 +516,21 @@ REJECTED   CANCELLED      SL_HIT         CLOSED        LOGGED
 
 ## Running the System
 
-### Start OpenAlgo First
+### Start OpenAlgo Instances First
+
+**Step 1: Start Zerodha OpenAlgo (Primary — orders + data)**
 ```powershell
 cd D:\nifty_options_agent\openalgo-zerodha\openalgo
 python app.py
 ```
+
+**Step 2: Start Angel One OpenAlgo (Backup — data feed only)**
+```powershell
+cd D:\nifty_options_agent\openalgo-angelone\openalgo
+python app.py
+```
+- Angel One is optional; if not running, strategy runs on Zerodha only (no failover)
+- Log in to Angel One at http://127.0.0.1:5001 (session expires daily, must refresh)
 
 ### Run System Check
 ```powershell
@@ -870,6 +890,8 @@ Note: Backtest files are maintained separately. This folder focuses on live trad
 | Orders not placing | Verify API key, check order_manager logs |
 | Swings not detecting | Compare with backtest logic, check bar formation |
 | Position mismatch | Check reconciliation logs, verify broker dashboard |
+| Failover not triggering | Check Angel One OpenAlgo running at port 5001, verify ANGELONE_OPENALGO_API_KEY in .env |
+| Stuck on Angel One (no switchback) | Check Zerodha reconnection logs; `last_zerodha_tick_time` must update for switchback |
 
 ---
 
