@@ -2,13 +2,24 @@
 
 ## Before Market Opens (Before 9:15 AM)
 
-### 1️⃣ Check OpenAlgo is Running
+### 1️⃣ Check OpenAlgo Instances are Running
+
+**Primary (Zerodha) — orders + data feed:**
 ```powershell
 # Open browser and verify
 http://127.0.0.1:5000
 ```
 - ✅ OpenAlgo dashboard accessible
-- ✅ Broker logged in and connected
+- ✅ Zerodha broker logged in and connected
+
+**Backup (Angel One) — data feed redundancy:**
+```powershell
+# Open browser and verify
+http://127.0.0.1:5001
+```
+- ✅ Angel One OpenAlgo dashboard accessible
+- ✅ Angel One broker logged in and connected
+- ℹ️ If Angel One is not running, system works on Zerodha only (no failover protection)
 
 ---
 
@@ -82,6 +93,11 @@ Replace:
 - Positions: Active trades with P&L
 - Funds: Available margin
 
+**✅ Angel One Backup Status**
+- Look for `[ANGELONE] Connected` in terminal at startup
+- If you see `[FAILOVER] Switching to Angel One` during the day, Zerodha data stopped
+- System auto-recovers — look for `[FAILBACK] Switching back to Zerodha` when Zerodha resumes
+
 ---
 
 ## System Will Auto-Stop At:
@@ -117,6 +133,7 @@ With `--atm 24200` and ±10 strikes:
 ⚠️ **ATM Accuracy**: Set at market open, don't change mid-day
 ⚠️ **Margin Check**: Ensure ₹10L+ available for 5 positions
 ⚠️ **Telegram Working**: Test before market opens
+⚠️ **Angel One Login**: Log into Angel One at http://127.0.0.1:5001 before starting — session expires daily
 
 ---
 

@@ -9,17 +9,33 @@
 ## Phase 1: Environment Setup ✅
 
 ### 1.1 OpenAlgo Configuration
-- [ ] OpenAlgo running at http://127.0.0.1:5000
+
+**Primary (Zerodha) — orders + data feed:**
+- [ ] OpenAlgo (Zerodha) running at http://127.0.0.1:5000
 - [ ] WebSocket proxy running at ws://127.0.0.1:8765
-- [ ] Broker connected and authenticated
+- [ ] Zerodha broker connected and authenticated
 - [ ] Paper trading mode enabled initially (`PAPER_TRADING=true`)
+
+**Backup (Angel One) — data feed redundancy:**
+- [ ] OpenAlgo (Angel One) running at http://127.0.0.1:5001
+- [ ] WebSocket proxy running at ws://127.0.0.1:8766
+- [ ] Angel One broker logged in and authenticated
+- [ ] Session refreshed (Angel One sessions expire daily)
 
 ### 1.2 Environment Variables (.env)
 ```bash
 # Verify these settings
-OPENALGO_API_KEY=<your_api_key>
+
+# Primary broker (Zerodha) — orders + data
+OPENALGO_API_KEY=<your_zerodha_api_key>
 OPENALGO_HOST=http://127.0.0.1:5000
 OPENALGO_WS_URL=ws://127.0.0.1:8765
+
+# Backup broker (Angel One) — data feed failover
+ANGELONE_OPENALGO_API_KEY=<your_angelone_api_key>
+ANGELONE_HOST=http://127.0.0.1:5001
+ANGELONE_WS_URL=ws://127.0.0.1:8766
+
 PAPER_TRADING=true  # Start with paper trading!
 DRY_RUN=false
 TELEGRAM_ENABLED=true
@@ -27,7 +43,8 @@ TELEGRAM_BOT_TOKEN=<your_token>
 TELEGRAM_CHAT_ID=<your_chat_id>
 ```
 
-- [ ] API key validated
+- [ ] Zerodha API key validated
+- [ ] Angel One API key validated (or left empty to disable failover)
 - [ ] All required variables set
 - [ ] Telegram bot tested
 
@@ -217,12 +234,20 @@ SELECT * FROM daily_summary WHERE date = 'today';
 - [ ] Existing positions recovered (if any)
 - [ ] System continues normally
 
-### 5.5 WebSocket Disconnection
-- [ ] Disconnect WebSocket manually
-- [ ] System detects disconnection
+### 5.5 WebSocket Disconnection (Zerodha Only)
+- [ ] Disconnect Zerodha WebSocket manually
+- [ ] System detects disconnection within seconds
 - [ ] Reconnection logic triggers
 - [ ] Data flow resumes
 - [ ] No data loss
+
+### 5.6 Data Feed Failover (Angel One)
+- [ ] Stop Zerodha OpenAlgo (simulate outage)
+- [ ] Verify `[FAILOVER] Switching to Angel One` log within 15s
+- [ ] Confirm bars still forming (Angel One feeding data)
+- [ ] Restart Zerodha OpenAlgo
+- [ ] Verify `[FAILBACK] Switching back to Zerodha` log within 10s
+- [ ] Confirm no duplicate bars or missed bars during switchover
 
 ---
 

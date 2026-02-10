@@ -47,9 +47,10 @@ final_lots = min(required_lots, 10)  # Cap at 10
 
 ### Prerequisites
 
-1. **OpenAlgo** installed and running (http://127.0.0.1:5000)
-2. **Python 3.10+** with venv
-3. **Broker Account** connected to OpenAlgo
+1. **OpenAlgo (Zerodha)** installed and running (http://127.0.0.1:5000) — primary data feed and order execution
+2. **OpenAlgo (Angel One)** installed and running (http://127.0.0.1:5001) — backup data feed (optional but recommended)
+3. **Python 3.10+** with venv
+4. **Broker Accounts** connected to their respective OpenAlgo instances
 
 ### Setup
 
@@ -66,13 +67,18 @@ pip install -r requirements.txt
 
 ### Configuration
 
-Create `.env` file in `options_agent/live/` directory:
+Create `.env` file in `baseline_v1_live/` directory:
 
 ```bash
-# OpenAlgo Connection
-OPENALGO_API_KEY=your_api_key_here
+# OpenAlgo Connection (Zerodha — Primary: orders + data feed)
+OPENALGO_API_KEY=your_zerodha_api_key_here
 OPENALGO_HOST=http://127.0.0.1:5000
 OPENALGO_WS_URL=ws://127.0.0.1:8765
+
+# Angel One Backup Data Feed (optional but recommended)
+ANGELONE_OPENALGO_API_KEY=your_angelone_api_key_here
+ANGELONE_HOST=http://127.0.0.1:5001
+ANGELONE_WS_URL=ws://127.0.0.1:8766
 
 # Trading Mode
 PAPER_TRADING=true          # Set to 'false' for live trading
@@ -86,6 +92,8 @@ TELEGRAM_CHAT_ID=your_chat_id
 # Logging
 VERBOSE=false
 ```
+
+**Note:** Angel One is used for data feed redundancy only. All orders are always placed through Zerodha/OpenAlgo (port 5000).
 
 ## Usage
 
@@ -151,20 +159,26 @@ live/
 
 **Data Flow:**
 ```
-WebSocket (port 8765)
-    ↓
-DataPipeline (aggregate to 1-min bars)
-    ↓
-MultiSwingDetector (detect breaks per option)
-    ↓
-StrikeFilter (apply filters, select best)
-    ↓
-OrderManager (place/modify limit orders)
-    ↓
-PositionTracker (track R, check ±5R exits)
-    ↓
-StateManager (persist to SQLite)
+Zerodha WebSocket (port 8765) ─────────────────┐
+                                                ↓ (primary)
+Angel One WebSocket (port 8766) ─── [FAILOVER] → DataPipeline (aggregate to 1-min bars)
+                                                ↓
+                                    MultiSwingDetector (detect breaks per option)
+                                                ↓
+                                    StrikeFilter (apply filters, select best)
+                                                ↓
+                                    OrderManager (place/modify limit orders via Zerodha)
+                                                ↓
+                                    PositionTracker (track R, check ±5R exits)
+                                                ↓
+                                    StateManager (persist to SQLite)
 ```
+
+**Dual-Feed Failover Logic:**
+- Zerodha is the primary feed; Angel One runs always-on in the background
+- If Zerodha ticks stale for >15s OR WebSocket disconnects → switch to Angel One
+- Reconnect Zerodha in background; once stable for 10s → switch back automatically
+- Orders are always placed through Zerodha regardless of active data source
 
 ## Monitoring
 
@@ -228,6 +242,7 @@ Output:
 - ✅ **State Persistence:** Recovers from crashes via SQLite with WAL mode and atomic transactions.
 
 ### Technical Robustness
+- **Dual-Broker Failover:** Angel One WebSocket stays always-on as a hot standby; automatic switch if Zerodha ticks go stale >15s, with automatic switchback when Zerodha recovers.
 - **Intelligent Cancellation:** Verifies order cancellation via orderbook polling before placing replacement orders to prevent duplicates.
 - **Terminal State Handling:** Recognizes "already terminal" broker messages to skip redundant verification waits.
 - **Real-Time SL Calculation:** Tracks mid-minute "highest highs" from incomplete bars to ensure SL% filters react instantly to volatility.
@@ -273,6 +288,24 @@ python -c "from openalgo import api; client = api(api_key='your_key', host='http
 - Check OpenAlgo logs: `openalgo/log/`
 - Reduce subscription count (narrow `STRIKE_SCAN_RANGE`)
 - Increase `WEBSOCKET_RECONNECT_DELAY` in `config.py`
+- If Angel One backup is configured, system auto-fails over — check logs for `[FAILOVER]` tag
+
+### Issue: Failover not switching to Angel One
+
+**Cause:** Angel One OpenAlgo not running OR credentials missing
+
+**Solution:**
+```powershell
+# Verify Angel One OpenAlgo is running
+curl http://127.0.0.1:5001/api/v1/
+
+# Check .env has Angel One credentials
+ANGELONE_OPENALGO_API_KEY=<key>
+ANGELONE_HOST=http://127.0.0.1:5001
+ANGELONE_WS_URL=ws://127.0.0.1:8766
+```
+- Look for `[ANGELONE]` tags in logs at startup to confirm connection
+- If Angel One key is empty, failover is silently disabled (system still works on Zerodha only)
 
 ### Issue: Position count mismatch
 
