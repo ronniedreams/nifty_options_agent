@@ -224,8 +224,26 @@ class PositionTracker:
 
         # Restore daily state
         if daily_state:
-            self.daily_exit_triggered = bool(daily_state.get('daily_exit_triggered', False))
-            self.daily_exit_reason = daily_state.get('daily_exit_reason')
+            raw_triggered = bool(daily_state.get('daily_exit_triggered', False))
+            cumulative_r = float(daily_state.get('cumulative_R', 0.0) or 0.0)
+
+            if raw_triggered and abs(cumulative_r) < 1e-9:
+                # Sanity check: flag is True but cumulative_R is exactly zero
+                # (no trades occurred at all). This means the flag was set
+                # spuriously (e.g. a bug fired the exit handler before any
+                # trades occurred). Reset it so trading is not blocked.
+                # NOTE: threshold is 1e-9 (not 0.1) to avoid resetting a
+                # legitimate stop that fired with a small unrealized R.
+                logger.warning(
+                    "[RECOVERY] daily_exit_triggered=True but cumulative_R=0.0 - "
+                    "flag appears stale, resetting to allow trading"
+                )
+                self.daily_exit_triggered = False
+                self.daily_exit_reason = None
+            else:
+                self.daily_exit_triggered = raw_triggered
+                self.daily_exit_reason = daily_state.get('daily_exit_reason')
+
             logger.info(f"Restored daily state: Exit Triggered={self.daily_exit_triggered}, Reason={self.daily_exit_reason}")
 
     def can_open_position(self, symbol: str, option_type: str) -> tuple:
