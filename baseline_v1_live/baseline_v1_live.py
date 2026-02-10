@@ -146,6 +146,9 @@ class BaselineV1Live:
         self.startup_checker = StartupHealthCheck(self.notification_manager)
         self.shutdown_requested = False
 
+        # Track historical data loading state (to prevent notification spam)
+        self.loading_historical_data = False
+
         # Register initial state
         self.state_manager.update_operational_state('STARTING')
 
@@ -305,6 +308,10 @@ class BaselineV1Live:
         logger.info("="*80)
         logger.info("[HIST] LOADING HISTORICAL DATA (9:15 AM - Current Time)")
         logger.info("="*80)
+
+        # Set flag to suppress swing notifications during historical loading
+        self.loading_historical_data = True
+
         self.data_pipeline.load_historical_data(symbols=self.symbols)
         
         # 🔧 FIX: Fill any gap between last historical bar and current time
@@ -333,8 +340,11 @@ class BaselineV1Live:
                     self.swing_detector.update(symbol, bar_dict)
                 
                 logger.debug(f"{symbol}: {len(bars)} historical bars processed")
-        
+
         logger.info("[HIST] Historical data processing complete")
+
+        # Clear flag - now in real-time mode, send notifications normally
+        self.loading_historical_data = False
 
         # CRITICAL: Backfill all historical swings to database
         # These were detected but not logged because is_historical_processing = True
@@ -722,9 +732,9 @@ class BaselineV1Live:
         )
         self.continuous_filter.add_swing_candidate(symbol, swing_info)
 
-        # Send Telegram notification for swing detection
-        if self.telegram:
-            self.telegram.notify_swing_detected(symbol, swing_info)
+        # Swing notifications disabled - too noisy (only notify on trades, not swings)
+        # if self.telegram and not self.loading_historical_data:
+        #     self.telegram.notify_swing_detected(symbol, swing_info)
     
     def process_tick(self):
         """
@@ -750,10 +760,11 @@ class BaselineV1Live:
         bars_dict = {symbol: bar.to_dict() for symbol, bar in latest_bars.items()}
         self.swing_detector.update_all(bars_dict)
         
-        # 3. Evaluate ALL swing candidates with latest data
+        # 3. Evaluate ALL swing candidates with latest data (including current incomplete bars for real-time SL% calculation)
         best_strikes = self.continuous_filter.evaluate_all_candidates(
             latest_bars,
-            self.swing_detector
+            self.swing_detector,
+            current_bars  # Include current bars for accurate highest_high tracking
         )
         
         # Log current best strikes and candidates (INFO level for visibility)
@@ -865,6 +876,44 @@ class BaselineV1Live:
             if action == 'place':
                 # Price within 1 Rs of swing - place/update order
                 limit_price = trigger['limit_price']
+
+                # Check available margin before attempting order (CRITICAL FIX #5)
+                try:
+                    # Query broker for account info
+                    account_info = self.data_pipeline.client.get_account_details()
+
+                    if account_info and account_info.get('status') == 'success':
+                        available_margin = float(account_info.get('data', {}).get('availablecash', 0))
+
+                        # Rough margin estimate: entry_price × quantity (conservative - actual may be lower)
+                        estimated_margin_required = candidate['entry_price'] * candidate['quantity']
+
+                        if available_margin < estimated_margin_required:
+                            logger.warning(
+                                f"[MARGIN-CHECK-{option_type}] INSUFFICIENT MARGIN "
+                                f"Available: ₹{available_margin:,.0f} < Required: ₹{estimated_margin_required:,.0f} "
+                                f"(Symbol: {candidate['symbol']}, Qty: {candidate['quantity']})"
+                            )
+                            # Skip order placement - insufficient margin
+                            self.order_manager.manage_limit_order_for_type(option_type, None, None)
+                            continue
+                        else:
+                            logger.debug(
+                                f"[MARGIN-CHECK-{option_type}] OK "
+                                f"Available: ₹{available_margin:,.0f} >= Required: ₹{estimated_margin_required:,.0f}"
+                            )
+                    else:
+                        # If margin check fails, log warning but proceed (don't block on API failure)
+                        logger.warning(
+                            f"[MARGIN-CHECK-{option_type}] API call failed: {account_info}. "
+                            f"Proceeding with order (margin not verified)"
+                        )
+                except Exception as e:
+                    # If margin check throws exception, log but proceed
+                    logger.warning(
+                        f"[MARGIN-CHECK-{option_type}] Exception during margin check: {e}. "
+                        f"Proceeding with order (margin not verified)"
+                    )
 
                 # Check if we can open position for this type
                 can_open, reason = self.position_tracker.can_open_position(

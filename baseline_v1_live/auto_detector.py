@@ -57,8 +57,9 @@ class AutoDetector:
         Fetch NIFTY spot price from WebSocket (preferred method)
 
         Strategy:
-        - If before 9:16 AM: Wait for 9:16 candle close
-        - If after 9:16 AM: Use current LTP from WebSocket
+        - Use current LTP from WebSocket immediately (pre-market or live)
+        - No waiting for 9:16 AM - pre-market spot is accurate enough for ATM calculation
+          (NIFTY rarely moves >100 points from pre-market to open)
 
         Returns: float (e.g., 24248.75) or None if unavailable
         """
@@ -66,34 +67,14 @@ class AutoDetector:
             logger.warning("[AUTO] DataPipeline not available for WebSocket spot price")
             return None
 
-        now = datetime.now(IST)
-        target_time = now.replace(hour=9, minute=16, second=0, microsecond=0)
-
-        # Case 1: Before 9:16 AM - wait for candle close
-        if now < target_time:
-            wait_seconds = (target_time - now).total_seconds()
-            logger.info(f"[AUTO] Waiting {wait_seconds:.0f}s for 9:16 AM candle close...")
-            time_module.sleep(wait_seconds)
-
-            # Get 9:16 bar close
-            bar = self.data_pipeline.get_spot_bar(self.spot_symbol, target_time)
-            if bar and bar.close is not None:
-                logger.info(f"[AUTO] NIFTY Spot from WebSocket (9:16 close): {bar.close}")
-                return float(bar.close)
-            else:
-                logger.warning("[AUTO] 9:16 bar not available, will try API fallback")
-                return None
-
-        # Case 2: After 9:16 AM - use current LTP
+        ltp = self.data_pipeline.get_spot_price(self.spot_symbol)
+        if ltp is not None:
+            now = datetime.now(IST)
+            logger.info(f"[AUTO] NIFTY Spot from WebSocket (LTP at {now.strftime('%H:%M:%S')}): {ltp}")
+            return float(ltp)
         else:
-            logger.info(f"[AUTO] Already past 9:16 AM, using current WebSocket LTP")
-            ltp = self.data_pipeline.get_spot_price(self.spot_symbol)
-            if ltp is not None:
-                logger.info(f"[AUTO] NIFTY Spot from WebSocket (current LTP): {ltp}")
-                return float(ltp)
-            else:
-                logger.warning("[AUTO] WebSocket LTP not available, will try API fallback")
-                return None
+            logger.warning("[AUTO] WebSocket LTP not available, will try API fallback")
+            return None
 
     def fetch_spot_price(self):
         """
