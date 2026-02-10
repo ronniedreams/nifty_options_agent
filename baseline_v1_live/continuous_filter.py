@@ -322,6 +322,7 @@ class ContinuousFilterEngine:
             )
 
         # Check for broken swings in VWAP-qualified pool and remove them
+        broken_count = 0  # Track how many swings broke this evaluation
         for option_type in ['CE', 'PE']:
             broken_swings = []
             for swing_info in self.stage1_swings_by_type[option_type]:
@@ -329,7 +330,7 @@ class ContinuousFilterEngine:
                 if symbol and symbol in latest_bars:
                     current_bar = latest_bars[symbol]
                     swing_low = swing_info['price']
-                    
+
                     # Check if swing broke (price went BELOW swing_low)
                     if current_bar.low < swing_low:
                         logger.info(
@@ -337,10 +338,11 @@ class ContinuousFilterEngine:
                             f"(Low: {current_bar.low:.2f}) - removing from VWAP pool"
                         )
                         broken_swings.append(swing_info)
-            
+
             # Remove broken swings
             for broken in broken_swings:
                 self.stage1_swings_by_type[option_type].remove(broken)
+                broken_count += 1
         
         # Reset rejection stats for this evaluation
         self.rejection_stats = {
@@ -478,9 +480,11 @@ class ContinuousFilterEngine:
             
             if total_candidates > 0 and total_qualified == 0:
                 # All candidates rejected - show why
+                # Note: broken swings are removed from stage1 pool before SL% evaluation,
+                # so they don't appear in rejection_stats — track them separately here.
                 logger.info(
                     f"[FILTER-SUMMARY] {total_candidates} candidates, 0 qualified. "
-                    f"Rejections: VWAP<4%={self.rejection_stats['vwap_premium_low']}, "
+                    f"Rejections: broken={broken_count}, "
                     f"SL<2%={self.rejection_stats['sl_percent_low']}, "
                     f"SL>10%={self.rejection_stats['sl_percent_high']}, "
                     f"No data={self.rejection_stats['no_data']}"

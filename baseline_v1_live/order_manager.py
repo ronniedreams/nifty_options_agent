@@ -758,8 +758,8 @@ class OrderManager:
         # Case 1: Cancel existing order (no new candidate)
         if candidate is None or limit_price is None:
             if existing:
-                cancel_success = self._cancel_broker_order(existing['order_id'])
-                if cancel_success:
+                cancel_result = self._cancel_broker_order(existing['order_id'])
+                if cancel_result in ('success', 'terminal'):
                     del self.pending_limit_orders[option_type]
                     logger.info(f"[CANCEL-{option_type}] Cancelled limit order for {existing['symbol']}")
                     return 'cancelled'
@@ -801,9 +801,9 @@ class OrderManager:
         # Case 3: Different symbol - cancel old, place new
         # CRITICAL FIX: Check cancel result BEFORE placing new order to prevent duplicates
         if existing['symbol'] != symbol:
-            cancel_success = self._cancel_broker_order(existing['order_id'])
+            cancel_result = self._cancel_broker_order(existing['order_id'])
 
-            if not cancel_success:
+            if cancel_result == 'failed':
                 # Cancel failed - old order may be triggered/filled at broker
                 # DO NOT place new order to avoid having positions in multiple symbols
                 logger.warning(
@@ -812,15 +812,16 @@ class OrderManager:
                 )
                 return 'kept'
 
-            # NEW: Verify cancel propagated to orderbook before placing new order (race condition fix)
-            cancel_verified = self._verify_order_cancelled(existing['order_id'])
-
-            if not cancel_verified:
-                logger.warning(
-                    f"[SKIP-SWITCH-{option_type}] Cancel verification failed for order {existing['order_id']}. "
-                    f"NOT switching to {symbol} to prevent duplicate orders."
-                )
-                return 'kept'
+            # Only verify propagation when cancel was a fresh success (not already terminal)
+            # When terminal, broker already confirms order is gone - no verify needed
+            if cancel_result == 'success':
+                cancel_verified = self._verify_order_cancelled(existing['order_id'])
+                if not cancel_verified:
+                    logger.warning(
+                        f"[SKIP-SWITCH-{option_type}] Cancel verification failed for order {existing['order_id']}. "
+                        f"NOT switching to {symbol} to prevent duplicate orders."
+                    )
+                    return 'kept'
 
             # Cancel succeeded and verified - safe to place new order for new symbol
             order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
@@ -848,9 +849,9 @@ class OrderManager:
         if trigger_diff > MODIFICATION_THRESHOLD or limit_diff > MODIFICATION_THRESHOLD:
             # Price changed significantly - try to cancel old and place new SL order
             # CRITICAL FIX: Check cancel result BEFORE placing new order to prevent duplicates
-            cancel_success = self._cancel_broker_order(existing['order_id'])
+            cancel_result = self._cancel_broker_order(existing['order_id'])
 
-            if not cancel_success:
+            if cancel_result == 'failed':
                 # Cancel failed - order may be triggered/filled at broker
                 # DO NOT place new order to avoid duplicates
                 logger.warning(
@@ -859,17 +860,17 @@ class OrderManager:
                 )
                 return 'kept'
 
-            # NEW: Verify cancel propagated to orderbook before placing new order (race condition fix)
-            cancel_verified = self._verify_order_cancelled(existing['order_id'])
+            # Only verify propagation when cancel was a fresh success (not already terminal)
+            if cancel_result == 'success':
+                cancel_verified = self._verify_order_cancelled(existing['order_id'])
+                if not cancel_verified:
+                    logger.warning(
+                        f"[SKIP-MODIFY-{option_type}] Cancel verification failed for order {existing['order_id']}. "
+                        f"Keeping existing order to prevent duplicate orders."
+                    )
+                    return 'kept'
 
-            if not cancel_verified:
-                logger.warning(
-                    f"[SKIP-MODIFY-{option_type}] Cancel verification failed for order {existing['order_id']}. "
-                    f"Keeping existing order to prevent duplicate orders."
-                )
-                return 'kept'
-
-            # Cancel succeeded and verified - safe to place new order
+            # Cancel succeeded and verified (or already terminal) - safe to place new order
             order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
             if order_id:
                 existing['order_id'] = order_id
@@ -979,18 +980,43 @@ class OrderManager:
         logger.error(f"Failed to place limit order after {MAX_ORDER_RETRIES} attempts")
         return None
     
-    def _cancel_broker_order(self, order_id: str) -> bool:
-        """Cancel order via broker API"""
+    def _cancel_broker_order(self, order_id: str) -> str:
+        """Cancel order via broker API.
+
+        Returns:
+            'success'  - cancel API confirmed success (verify propagation)
+            'terminal' - order was already in terminal state (no verify needed)
+            'failed'   - cancel failed (order may be live/filling)
+        """
         if DRY_RUN:
             logger.info(f"[DRY-RUN] Would cancel order {order_id}")
-            return True
+            return 'success'
+
+        # Terminal state keywords: order is already gone at broker, no verify needed
+        TERMINAL_MESSAGES = (
+            "cancelled status",
+            "completed status",
+            "rejected status",
+            "order not found",
+            "invalid order",
+        )
 
         try:
             response = self.client.cancelorder(order_id=order_id)
-            return response.get('status') == 'success'
+            if response.get('status') == 'success':
+                return 'success'
+            # Check if error is because order is already in a terminal state
+            message = response.get('message', '').lower()
+            if any(term in message for term in TERMINAL_MESSAGES):
+                logger.info(
+                    f"[CANCEL-ALREADY-DONE] Order {order_id} already in terminal state "
+                    f"({response.get('message')}) - no verification needed"
+                )
+                return 'terminal'
+            return 'failed'
         except Exception as e:
             logger.error(f"Error cancelling order: {e}")
-            return False
+            return 'failed'
 
     def _verify_order_cancelled(self, order_id: str, max_retries: int = 3, delay: float = 0.5) -> bool:
         """
