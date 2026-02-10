@@ -577,11 +577,20 @@ class BaselineV1Live:
                         )
 
                         # Attempt automatic reconnection
+                        # If pipeline already reconnecting (self-healed), skip and let it finish
+                        if self.data_pipeline.is_reconnecting:
+                            logger.info(
+                                "[WATCHDOG] Pipeline reconnection already in progress - "
+                                "skipping watchdog reconnect, resetting timer"
+                            )
+                            last_watchdog_check = time.time()
+                            continue
+
                         logger.warning("[WATCHDOG] Attempting to reconnect WebSocket...")
                         reconnect_success = self.data_pipeline.reconnect()
 
                         if reconnect_success:
-                            logger.info("[WATCHDOG] ✅ Reconnection successful, reconciling orders...")
+                            logger.info("[WATCHDOG] Reconnection successful, reconciling orders...")
 
                             # 🔧 CRITICAL: Reconcile orders with broker after reconnection
                             # This ensures local state matches broker reality
@@ -616,15 +625,18 @@ class BaselineV1Live:
 
                                 # Handle missing SL orders (CRITICAL!)
                                 if reconcile_results['sl_orders_missing']:
-                                    critical_msg = (
-                                        f"🚨 [CRITICAL] MISSING SL ORDERS\n\n"
-                                        f"Positions without SL protection:\n"
-                                        f"{', '.join(reconcile_results['sl_orders_missing'])}\n\n"
-                                        f"[WARNING]️ MANUAL BROKER CHECK REQUIRED!"
+                                    missing_symbols = ', '.join(reconcile_results['sl_orders_missing'])
+                                    logger.critical(
+                                        f"[CRITICAL] MISSING SL ORDERS - "
+                                        f"Positions without SL: {missing_symbols} - "
+                                        f"MANUAL BROKER CHECK REQUIRED"
                                     )
-
-                                    logger.critical(critical_msg)
-                                    self.telegram.send_message(critical_msg)
+                                    self.telegram.send_message(
+                                        f"[CRITICAL] MISSING SL ORDERS\n\n"
+                                        f"Positions without SL protection:\n"
+                                        f"{missing_symbols}\n\n"
+                                        f"MANUAL BROKER CHECK REQUIRED!"
+                                    )
 
                                     # Consider triggering emergency shutdown if missing SLs
                                     logger.critical(
@@ -641,7 +653,7 @@ class BaselineV1Live:
                                     self.handle_emergency_shutdown()
                                     raise SystemExit("Missing SL orders after reconnect")
 
-                                logger.info("[WATCHDOG] ✅ Order reconciliation complete")
+                                logger.info("[WATCHDOG] Order reconciliation complete")
 
                             except SystemExit:
                                 raise  # Re-raise SystemExit
@@ -669,7 +681,7 @@ class BaselineV1Live:
                         else:
                             # Reconnection failed - trigger emergency shutdown
                             logger.critical(
-                                f"[WATCHDOG] ❌ Reconnection failed after multiple attempts - "
+                                f"[WATCHDOG] Reconnection failed after multiple attempts - "
                                 f"initiating emergency shutdown"
                             )
 
@@ -1100,7 +1112,7 @@ class BaselineV1Live:
             
             # Check if we should halt trading
             if self.order_manager.should_halt_trading():
-                logger.critical("🛑 HALTING TRADING DUE TO REPEATED SL FAILURES")
+                logger.critical("[HALT] HALTING TRADING DUE TO REPEATED SL FAILURES")
                 
                 # Send halt notification
                 self.telegram.send_message(

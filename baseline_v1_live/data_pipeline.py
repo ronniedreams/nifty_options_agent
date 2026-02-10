@@ -1248,7 +1248,7 @@ class DataPipeline:
 
             # All reconnection attempts failed
             logger.critical(
-                f"[RECONNECT] ❌ Failed to reconnect after {WEBSOCKET_MAX_RECONNECT_ATTEMPTS} attempts"
+                f"[RECONNECT] Failed to reconnect after {WEBSOCKET_MAX_RECONNECT_ATTEMPTS} attempts"
             )
             return False
 
