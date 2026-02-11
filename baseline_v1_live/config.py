@@ -222,8 +222,8 @@ NOTIFY_ON_BEST_STRIKE_CHANGE = True  # Notify when best strike changes (not ever
 # ============================================================================
 
 # Startup Health Checks
-MAX_STARTUP_RETRIES = 3
-STARTUP_RETRY_DELAY_BASE = 30  # seconds (30s, 60s, 90s with exponential backoff)
+MAX_STARTUP_RETRIES = 5
+STARTUP_RETRY_DELAY_BASE = 20  # seconds (20s, 40s, 60s, 80s backoff)
 
 # Notification Throttling (seconds)
 NOTIFICATION_THROTTLE_STARTUP = 3600      # 1 hour

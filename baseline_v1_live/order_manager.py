@@ -255,7 +255,13 @@ class OrderManager:
         
         order_info = self.pending_limit_orders[symbol]
         order_id = order_info['order_id']
-        
+
+        # If order is in_flight (sentinel, no real order_id yet), just remove it
+        if order_id == 'PLACING' or order_info.get('status') == 'in_flight':
+            logger.info(f"[CANCEL] {symbol} was in_flight (no broker order placed), removing sentinel")
+            del self.pending_limit_orders[symbol]
+            return True
+
         if DRY_RUN:
             logger.info(f"[DRY RUN] Would cancel order {order_id}")
             del self.pending_limit_orders[symbol]
@@ -266,11 +272,15 @@ class OrderManager:
 
             if response.get('status') == 'success':
                 del self.pending_limit_orders[symbol]
-
                 logger.info(f"Cancelled order {order_id} for {symbol}")
-
                 return True
             else:
+                # Treat "already cancelled/rejected" as success — goal is order not active
+                msg = response.get('message', '').lower()
+                if any(x in msg for x in ['cancelled', 'canceled', 'rejected', 'completed']):
+                    del self.pending_limit_orders[symbol]
+                    logger.info(f"Order {order_id} already {msg} — removing from pending")
+                    return True
                 logger.error(f"Failed to cancel order {order_id}: {response}")
                 return False
 
@@ -395,6 +405,12 @@ class OrderManager:
                 logger.info(f"Cancelled SL order {order_id} for {symbol}")
                 return True
             else:
+                # Treat "already cancelled/rejected/completed" as success
+                msg = response.get('message', '').lower()
+                if any(x in msg for x in ['cancelled', 'canceled', 'rejected', 'completed']):
+                    del self.active_sl_orders[symbol]
+                    logger.info(f"SL order {order_id} already {msg} — removing from active")
+                    return True
                 logger.error(f"Failed to cancel SL order {order_id}: {response}")
                 return False
                 
@@ -782,20 +798,28 @@ class OrderManager:
         
         # Case 2: No existing order - place new
         if not existing:
+            # Set sentinel BEFORE broker API call to prevent duplicate placement
+            # if process_tick() fires again while API call is in-flight or retrying
+            self.pending_limit_orders[option_type] = {
+                'order_id': 'PLACING',
+                'symbol': symbol,
+                'trigger_price': trigger_price,
+                'limit_price': limit_price_entry,
+                'quantity': quantity,
+                'status': 'in_flight',
+                'placed_at': datetime.now(IST),
+                'candidate_info': candidate
+            }
             order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
             if order_id:
-                self.pending_limit_orders[option_type] = {
+                self.pending_limit_orders[option_type].update({
                     'order_id': order_id,
-                    'symbol': symbol,
-                    'trigger_price': trigger_price,
-                    'limit_price': limit_price_entry,
-                    'quantity': quantity,
                     'status': 'pending',
-                    'placed_at': datetime.now(IST),
-                    'candidate_info': candidate
-                }
+                })
                 logger.info(f"[PLACE-{option_type}] {symbol} SL-L trigger {trigger_price:.2f} limit {limit_price_entry:.2f} QTY {quantity}")
                 return 'placed'
+            # API failed - remove sentinel so next tick can retry
+            del self.pending_limit_orders[option_type]
             return 'failed'
 
         # Case 3: Different symbol - cancel old, place new
@@ -1347,6 +1371,11 @@ class OrderManager:
                 order_info = self.pending_limit_orders[option_type]
                 order_id = order_info['order_id']
                 symbol = order_info['symbol']
+
+                # Skip in_flight sentinel (API call in progress, no real order_id yet)
+                if order_id == 'PLACING' or order_info.get('status') == 'in_flight':
+                    logger.debug(f"[RECONCILE] Skipping in_flight order for {option_type} ({symbol})")
+                    continue
 
                 broker_order = broker_order_map.get(order_id)
 
