@@ -9,7 +9,7 @@ tick data into 1-minute OHLCV bars with session VWAP calculation.
 
 
 Features:
-- WebSocket subscription to ±10 strikes from ATM (42 options: 21 CE + 21 PE)
+- WebSocket subscription to ±20 strikes from ATM (82 options: 41 CE + 41 PE)
 - Tick-to-bar aggregation with volume tracking
 - Session VWAP calculation: Cumulative from market open (9:15 AM)
   VWAP = Σ(typical_price × volume) / Σ(volume) where typical_price = (H+L+C)/3
