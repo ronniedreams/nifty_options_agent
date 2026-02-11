@@ -215,7 +215,7 @@ if not (timestamp_valid and bid < ask and ltp > 0 and volume > 0):
 Check heartbeat metrics every 60 seconds:
 
 ```
-[HEARTBEAT] Data: 22/22 | Coverage: 100.0% | Stale: 0
+[HEARTBEAT] Data: 82/82 | Coverage: 100.0% | Stale: 0
 ```
 
 **Alert if:**

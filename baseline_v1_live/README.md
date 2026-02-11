@@ -261,7 +261,7 @@ Output:
 **Cause:** Market not volatile enough OR strike range too narrow
 
 **Solution:**
-- Increase `STRIKE_SCAN_RANGE` in `config.py` (default: 7 strikes)
+- Increase `STRIKE_SCAN_RANGE` in `config.py` (default: 20 strikes)
 - Check data pipeline health: `pipeline.get_health_status()`
 
 ### Issue: Orders not placing

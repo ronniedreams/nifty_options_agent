@@ -5,7 +5,7 @@ Main script for running the baseline_v1 swing-break options shorting strategy
 in live markets via OpenAlgo.
 
 Trading Logic:
-1. Monitor 42 options (±10 strikes from ATM, CE + PE) for swing low breaks
+1. Monitor 82 options (±20 strikes from ATM, CE + PE) for swing low breaks
 2. Apply entry filters (100-300 price, >4% VWAP premium, 2-10% SL)
 3. Select best strike (SL closest to 10 points, then highest price)
 4. Place proactive limit orders BEFORE break (swing_low - 1 tick)

@@ -441,7 +441,7 @@ Swing detection operates **independently per symbol**. Each option strike (e.g.,
 - Swing history (alternating highs and lows)
 - Last swing state
 
-This allows the system to track potential entry points across multiple strikes simultaneously. The `MultiSwingDetector` class manages 42+ individual detectors (21 CE + 21 PE strikes around ATM).
+This allows the system to track potential entry points across multiple strikes simultaneously. The `MultiSwingDetector` class manages 82+ individual detectors (41 CE + 41 PE strikes around ATM).
 
 ## Evaluation Frequency
 

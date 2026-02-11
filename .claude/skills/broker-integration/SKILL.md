@@ -108,7 +108,7 @@ reconnect_delay = min(2 ** attempt, 60)  # Max 60 seconds
 
 ### Data Pipeline Health Metrics
 ```
-[HEARTBEAT] Positions: 0 | Data: 22/22 | Coverage: 100.0% | Stale: 0
+[HEARTBEAT] Positions: 0 | Data: 82/82 | Coverage: 100.0% | Stale: 0
 ```
 - **Coverage**: Percentage of symbols receiving ticks
 - **Stale**: Symbols with no recent data (>5 minutes)
