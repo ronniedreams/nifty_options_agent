@@ -67,7 +67,7 @@ MAX_SL_PERCENT = 0.10    # 10% maximum SL
 # ============================================================================
 
 # Number of strikes to scan around ATM
-STRIKE_SCAN_RANGE = 5  # ±5 strikes from ATM (250 point range) - reduced for broker limits
+STRIKE_SCAN_RANGE = 20  # ±20 strikes from ATM (1000 point range)
 
 # Strike selection tie-breaker priority:
 # 1. SL points closest to TARGET_SL_POINTS (10)

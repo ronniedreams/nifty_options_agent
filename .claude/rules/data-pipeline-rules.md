@@ -181,11 +181,11 @@ When a bar completes for any symbol:
 Emit heartbeat every 60 seconds showing data health:
 
 ```
-[HEARTBEAT] Positions: 0 | Data: 22/22 | Coverage: 100.0% | Stale: 0
+[HEARTBEAT] Positions: 0 | Data: 82/82 | Coverage: 100.0% | Stale: 0
 ```
 
 **Metrics:**
-- **Data**: Current symbols / Expected symbols (e.g., 22/22)
+- **Data**: Current symbols / Expected symbols (e.g., 82/82)
 - **Coverage**: % of symbols with recent ticks (100% = good, <90% = warning)
 - **Stale**: Number of symbols with no ticks in last minute
 
@@ -361,7 +361,7 @@ If `ANGELONE_OPENALGO_API_KEY` is empty, failover is silently disabled. System r
 
 ```
 [ANGELONE] Connected to backup feed
-[ANGELONE] Subscribed to 22 symbols
+[ANGELONE] Subscribed to 82 symbols
 [FAILOVER] Switching to Angel One — Zerodha ticks stale
 [FAILBACK] Switching back to Zerodha — stable for 10s
 ```

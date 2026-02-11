@@ -310,7 +310,7 @@ Agent Investigation:
 2. Look for disconnect messages
 3. Check OpenAlgo container status (if EC2)
 4. Verify subscription tokens are valid
-5. Check data coverage in heartbeat: [HEARTBEAT] Data: 22/22 | Coverage: 100%
+5. Check data coverage in heartbeat: [HEARTBEAT] Data: 82/82 | Coverage: 100%
 6. Report: "WebSocket disconnected at 11:28:45, reconnect failed due to OpenAlgo container restart. Reconnected at 11:32:10 after container recovery."
 ```
 

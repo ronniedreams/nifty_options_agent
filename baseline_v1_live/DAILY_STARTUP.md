@@ -119,10 +119,10 @@ Replace:
 
 ## Coverage Today
 
-With `--atm 24200` and ±10 strikes:
-- **CE Range**: 24200 to 24700 (11 strikes)
-- **PE Range**: 23700 to 24200 (11 strikes)
-- **Total**: 42 options monitored
+With `--atm 24200` and ±20 strikes:
+- **CE Range**: 24200 to 25200 (21 strikes)
+- **PE Range**: 23200 to 24200 (21 strikes)
+- **Total**: 82 options monitored
 
 ---
 

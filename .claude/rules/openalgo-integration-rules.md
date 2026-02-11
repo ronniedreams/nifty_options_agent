@@ -658,7 +658,7 @@ docker stats
 2. Verify subscription tokens are valid
 3. Check OpenAlgo logs for connection errors
 4. Restart WebSocket: Close and reconnect
-5. Check data coverage: `[HEARTBEAT] Data: 22/22`
+5. Check data coverage: `[HEARTBEAT] Data: 82/82`
 
 **Debug (EC2):**
 1. Check container networking: `docker network ls`

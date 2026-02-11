@@ -35,7 +35,7 @@ A **production-ready live trading system** with revolutionary **continuous filte
 - **Callback-based**: Swing detection triggers automatic candidate addition
 
 ✅ **Real-Time Data Pipeline**
-- WebSocket subscription to 42 options (±10 strikes from ATM, CE + PE)
+- WebSocket subscription to 82 options (±20 strikes from ATM, CE + PE)
 - Tick-to-bar aggregation (1-minute OHLCV)
 - Rolling VWAP calculation with volume weighting
 - Historical data loading: 390 bars (6.5 hours) on startup for consistent swings
@@ -275,7 +275,7 @@ final_lots = min(lots_required, MAX_LOTS_PER_POSITION)  # Safety cap at 15 (conf
 - Each option has unique price action
 
 **Implementation:**
-- 42 separate `SwingDetector` instances (21 CE + 21 PE strikes)
+- 82 separate `SwingDetector` instances (41 CE + 41 PE strikes)
 - Each tracks its own swing state
 - Swing detection happens on bar close per option
 

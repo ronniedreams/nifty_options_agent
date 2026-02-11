@@ -690,7 +690,7 @@ The swing detector uses watch-based confirmation. If issues:
 ### Debug Data Pipeline
 ```python
 # Check coverage in heartbeat logs:
-[HEARTBEAT] Positions: 0 | Data: 22/22 | Coverage: 100.0% | Stale: 0
+[HEARTBEAT] Positions: 0 | Data: 82/82 | Coverage: 100.0% | Stale: 0
 ```
 
 ---

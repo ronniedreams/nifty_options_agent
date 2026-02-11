@@ -206,7 +206,7 @@ PAPER_TRADING=true python -m baseline_v1_live.baseline_v1_live --expiry 30JAN26 
 
 **Monitor Logs**:
 ```
-[HEARTBEAT] Positions: 0 | Data: 22/22 | Coverage: 100.0% | Stale: 0
+[HEARTBEAT] Positions: 0 | Data: 82/82 | Coverage: 100.0% | Stale: 0
 [TICK] NIFTY30JAN2623500CE: 245.50 (LTP)
 ```
 
