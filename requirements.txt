@@ -7,7 +7,7 @@ pytz>=2023.3
 python-dotenv>=1.0.0
 
 # OpenAlgo Python SDK
-openalgo>=1.0.0
+openalgo>=1.0.45
 
 # Telegram notifications
 requests>=2.31.0

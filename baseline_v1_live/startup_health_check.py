@@ -111,7 +111,7 @@ class StartupHealthCheck:
                 # Ping OpenAlgo health endpoint
                 response = requests.get(
                     f"{OPENALGO_HOST}/",
-                    timeout=5
+                    timeout=20
                 )
 
                 if response.status_code == 200:
@@ -264,7 +264,7 @@ class StartupHealthCheck:
                     # Try to establish WebSocket connection
                     ws = websocket.create_connection(
                         OPENALGO_WS_URL,
-                        timeout=5
+                        timeout=20
                     )
                     ws.close()
 
