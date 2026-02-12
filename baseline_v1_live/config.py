@@ -184,6 +184,15 @@ PRODUCT_TYPE = 'MIS'  # Intraday (positions auto-squared at 3:20 PM)
 MAX_CE_POSITIONS = 3
 MAX_PE_POSITIONS = 3
 
+# Validation: warn if sub-limits exceed total (not a bug, but worth noting)
+if MAX_CE_POSITIONS + MAX_PE_POSITIONS > MAX_POSITIONS:
+    import logging as _cfg_logging
+    _cfg_logging.getLogger(__name__).warning(
+        f"[CONFIG] MAX_CE_POSITIONS({MAX_CE_POSITIONS}) + MAX_PE_POSITIONS({MAX_PE_POSITIONS}) "
+        f"= {MAX_CE_POSITIONS + MAX_PE_POSITIONS} > MAX_POSITIONS({MAX_POSITIONS}). "
+        f"Total limit ({MAX_POSITIONS}) is the binding constraint."
+    )
+
 # Circuit Breakers
 MAX_CONSECUTIVE_LOSSES = 3  # Pause trading after 3 losses in a row
 PAUSE_DURATION_MINUTES = 30  # Resume after 30 minutes

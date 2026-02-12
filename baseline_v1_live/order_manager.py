@@ -316,9 +316,7 @@ class OrderManager:
             raise ValueError(
                 f"SL BUY trigger ({trigger_price:.2f}) must be < limit ({limit_price:.2f}) for Upstox"
             )
-        
-        limit_price = trigger_price + SL_LIMIT_PRICE_OFFSET
-        
+
         if DRY_RUN:
             logger.info(
                 f"[DRY RUN] Would place SL-L order: "
@@ -551,6 +549,28 @@ class OrderManager:
         if DRY_RUN:
             logger.info(f"[DRY RUN] Would place MARKET order for {symbol}")
             return f"DRY_MARKET_{symbol}_{int(time.time())}"
+
+        # Verify position exists at broker before placing close order
+        try:
+            positions_response = self.client.openposition()
+            if positions_response.get('status') == 'success':
+                positions = positions_response.get('data', [])
+                position_exists = False
+                for pos in positions:
+                    if pos.get('symbol') == symbol and pos.get('product') == PRODUCT_TYPE:
+                        actual_qty = abs(int(pos.get('quantity', 0)))
+                        if actual_qty > 0:
+                            position_exists = True
+                            quantity = actual_qty  # Use broker's actual quantity
+                            break
+                if not position_exists:
+                    logger.warning(
+                        f"[MARKET-EXIT] No position at broker for {symbol} - "
+                        f"skipping to prevent reverse position"
+                    )
+                    return None
+        except Exception as e:
+            logger.error(f"[MARKET-EXIT] Position check failed: {e}, proceeding with caution")
 
         # 3-retry logic (same as other order methods)
         for attempt in range(1, MAX_ORDER_RETRIES + 1):
@@ -1211,6 +1231,11 @@ class OrderManager:
                 order_id = pending.get('order_id')
                 if not order_id:
                     logger.error(f"[CHECK-FILLS] No order_id for {option_type}. Pending: {pending}")
+                    continue
+
+                # Skip in-flight sentinel (broker API call in progress, no real order yet)
+                if order_id == 'PLACING' or pending.get('status') == 'in_flight':
+                    logger.debug(f"[CHECK-FILLS] Skipping in-flight order for {option_type}")
                     continue
 
                 logger.debug(f"[CHECK-FILLS] Looking for {option_type} order {order_id}")

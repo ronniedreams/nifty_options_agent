@@ -179,6 +179,9 @@ class BaselineV1Live:
         # Guard flags to ensure one-shot exit handlers (prevent Telegram spam)
         self._eod_exit_done = False  # Set True after handle_eod_exit() runs once
 
+        # Guard against duplicate fill processing (same fill from multiple paths)
+        self._processed_fill_ids = set()
+
         # FIX: Load previous state from database (CRITICAL for crash recovery)
         self.load_state()
 
@@ -256,15 +259,36 @@ class BaselineV1Live:
                     )
                     self.handle_order_fill(fill_info, current_prices)
 
-            # Alert on missing SL orders (positions without stop-loss)
+            # Auto re-place missing SL orders (positions without stop-loss)
             if reconcile_results['sl_orders_missing']:
-                critical_msg = (
-                    f"[CRITICAL] MISSING SL ORDERS after crash recovery. "
-                    f"Positions without SL: {', '.join(reconcile_results['sl_orders_missing'])}. "
-                    f"MANUAL BROKER CHECK REQUIRED."
-                )
-                logger.critical(critical_msg)
-                self.telegram.send_message(critical_msg)
+                for missing_symbol in reconcile_results['sl_orders_missing']:
+                    if missing_symbol in self.position_tracker.open_positions:
+                        pos = self.position_tracker.open_positions[missing_symbol]
+                        logger.warning(
+                            f"[RECOVERY] Attempting to re-place missing SL for {missing_symbol} "
+                            f"@ {pos.sl_price:.2f}"
+                        )
+                        sl_id = self.order_manager.place_sl_order(
+                            symbol=missing_symbol,
+                            trigger_price=pos.sl_price,
+                            quantity=pos.quantity
+                        )
+                        if sl_id:
+                            logger.warning(f"[RECOVERY] Re-placed SL for {missing_symbol}: {sl_id}")
+                            self.telegram.send_message(
+                                f"[RECOVERY] Re-placed missing SL\n"
+                                f"Symbol: {missing_symbol}\n"
+                                f"Trigger: {pos.sl_price:.2f}\n"
+                                f"Order: {sl_id}"
+                            )
+                        else:
+                            logger.critical(
+                                f"[RECOVERY] FAILED to re-place SL for {missing_symbol}"
+                            )
+                            self.telegram.send_message(
+                                f"[CRITICAL] FAILED to re-place SL for {missing_symbol}\n"
+                                f"MANUAL BROKER CHECK REQUIRED"
+                            )
 
         except Exception as e:
             logger.error(f"[RECOVERY] Order reconciliation failed: {e}", exc_info=True)
@@ -812,7 +836,8 @@ class BaselineV1Live:
         best_strikes = self.continuous_filter.evaluate_all_candidates(
             latest_bars,
             self.swing_detector,
-            current_bars  # Include current bars for accurate highest_high tracking
+            current_bars,  # Include current bars for accurate highest_high tracking
+            open_position_symbols=set(self.position_tracker.open_positions.keys())
         )
         
         # Log current best strikes and candidates (INFO level for visibility)
@@ -963,10 +988,15 @@ class BaselineV1Live:
                         f"Proceeding with order (margin not verified)"
                     )
 
-                # Check if we can open position for this type
+                # Check if we can open position for this type (include pending orders)
+                pending_ce = 1 if self.order_manager.pending_limit_orders.get('CE') else 0
+                pending_pe = 1 if self.order_manager.pending_limit_orders.get('PE') else 0
+
                 can_open, reason = self.position_tracker.can_open_position(
                     candidate['symbol'],
-                    option_type
+                    option_type,
+                    pending_ce_orders=pending_ce,
+                    pending_pe_orders=pending_pe
                 )
 
                 logger.info(
@@ -1023,12 +1053,63 @@ class BaselineV1Live:
         # 7. Reconcile positions with broker (every 60 seconds)
         if self.last_bar_update is None or \
            (datetime.now(IST) - self.last_bar_update).total_seconds() > 60:
-            self.position_tracker.reconcile_with_broker()
+            phantom_closed = self.position_tracker.reconcile_with_broker()
+            if phantom_closed:
+                for sym in phantom_closed:
+                    self.continuous_filter.remove_swing_candidate(sym)
+                    logger.info(f"[PHANTOM-CLEANUP] {sym} removed from filter after SL hit")
             self.last_bar_update = datetime.now(IST)
         
         # 8. Save state
         self.save_state()
     
+    def _compute_live_sl_price(self, symbol: str, candidate_info: Dict) -> float:
+        """Compute fresh SL price using live highest_high at fill time.
+
+        Falls back to candidate_info['sl_price'] if live data unavailable.
+        """
+        try:
+            detector = self.swing_detector.detectors.get(symbol)
+            if not detector or not detector.bars:
+                return candidate_info['sl_price']
+
+            swing_time = candidate_info.get('swing_time')
+            if not swing_time:
+                return candidate_info['sl_price']
+
+            # Find highest high from all bars at/after swing time
+            highest_high = 0.0
+            found_swing = False
+            for bar in detector.bars:
+                if bar['timestamp'] >= swing_time:
+                    found_swing = True
+                    highest_high = max(highest_high, bar.get('high', 0.0))
+
+            if not found_swing:
+                return candidate_info['sl_price']
+
+            # Include current incomplete bar
+            current_bars = self.data_pipeline.get_all_current_bars()
+            current_bar = current_bars.get(symbol)
+            if current_bar and current_bar.high is not None:
+                highest_high = max(highest_high, current_bar.high)
+
+            live_sl = highest_high + 1  # +1 Rs buffer (per architecture)
+
+            # Only use live SL if it's HIGHER than stale (safer for short positions)
+            stale_sl = candidate_info['sl_price']
+            if live_sl > stale_sl:
+                logger.info(
+                    f"[SL-RECOMPUTE] {symbol}: stale SL={stale_sl:.2f} -> "
+                    f"live SL={live_sl:.2f} (highest_high={highest_high:.2f})"
+                )
+                return live_sl
+            return stale_sl
+
+        except Exception as e:
+            logger.error(f"[SL-RECOMPUTE] Error for {symbol}: {e}, using stale SL")
+            return candidate_info['sl_price']
+
     def handle_order_fill(self, fill: Dict, current_prices: Dict):
         """Handle filled limit order"""
         symbol = fill['symbol']
@@ -1036,28 +1117,42 @@ class BaselineV1Live:
         quantity = fill['quantity']
         candidate_info = fill['candidate_info']
         option_type = fill['option_type']
-        
+
+        # Dedup guard: prevent processing the same fill multiple times
+        fill_key = f"{symbol}_{fill.get('order_id', '')}_{fill_price}"
+        if fill_key in self._processed_fill_ids:
+            logger.warning(f"[FILL-DEDUP] {symbol} fill already processed (key={fill_key}), skipping")
+            return
+        self._processed_fill_ids.add(fill_key)
+
         logger.info(f"[FILL-{option_type}] {symbol} @ {fill_price:.2f}, Qty={quantity}")
-        
-        # Add position
+
+        # Recompute SL price using live highest_high (not stale candidate_info)
+        live_sl_price = self._compute_live_sl_price(symbol, candidate_info)
+
+        # Add position (use live SL for position record too)
         position = self.position_tracker.add_position(
             symbol=symbol,
             entry_price=fill_price,
-            sl_price=candidate_info['sl_price'],
+            sl_price=live_sl_price,
             quantity=quantity,
             actual_R=candidate_info['actual_R'],
             candidate_info=candidate_info
         )
-        
-        # Place SL order immediately
+
+        # CRITICAL: Remove filled symbol from filter pool to prevent re-ordering
+        self.continuous_filter.remove_swing_candidate(symbol)
+        logger.info(f"[FILL-CLEANUP] {symbol} removed from filter pool after fill")
+
+        # Place SL order immediately with live price
         sl_order_id = self.order_manager.place_sl_order(
             symbol=symbol,
-            trigger_price=candidate_info['sl_price'],
+            trigger_price=live_sl_price,
             quantity=quantity
         )
         
         if sl_order_id:
-            logger.info(f"[SL-ORDER] {symbol} @ {candidate_info['sl_price']:.2f} | Order: {sl_order_id}")
+            logger.info(f"[SL-ORDER] {symbol} @ {live_sl_price:.2f} | Order: {sl_order_id}")
         else:
             # 🚨 CRITICAL: SL placement failed - position has unlimited risk
             logger.critical(
@@ -1070,7 +1165,7 @@ class BaselineV1Live:
                 f"Symbol: {symbol}\n"
                 f"Entry: ₹{fill_price:.2f}\n"
                 f"Qty: {quantity}\n"
-                f"Expected SL: ₹{candidate_info['sl_price']:.2f}\n\n"
+                f"Expected SL: ₹{live_sl_price:.2f}\n\n"
                 f"[WARNING]️ Initiating emergency MARKET exit..."
             )
             
@@ -1137,23 +1232,40 @@ class BaselineV1Live:
     def handle_daily_exit(self, exit_reason: str, current_prices: Dict):
         """Handle ±5R daily exit"""
         logger.warning(f"DAILY EXIT TRIGGERED: {exit_reason}")
-        
-        # Cancel all orders
-        self.order_manager.cancel_all_orders()
-        
-        # Close all positions
-        self.position_tracker.close_all_positions(exit_reason, current_prices)
-        
-        # Save final state
-        self.save_state()
-        
-        # Save daily summary and notify
-        summary = self.position_tracker.get_position_summary()
-        self.state_manager.save_daily_summary(summary)
-        self.telegram.notify_daily_target(summary)
-        
-        logger.info(f"Daily Summary: {summary}")
-        logger.info("Trading stopped for the day")
+
+        try:
+            # Cancel all orders FIRST (prevent new fills during exit)
+            self.order_manager.cancel_all_orders()
+
+            # Clear filter pools to prevent re-nomination after exit
+            self.continuous_filter.reset_daily_data()
+            logger.info("[DAILY-EXIT] Filter pools cleared to prevent re-nomination")
+
+            # Close all positions
+            self.position_tracker.close_all_positions(exit_reason, current_prices)
+
+            # Save final state
+            self.save_state()
+
+            # Save daily summary and notify
+            summary = self.position_tracker.get_position_summary()
+            self.state_manager.save_daily_summary(summary)
+            self.telegram.notify_daily_target(summary)
+
+            logger.info(f"Daily Summary: {summary}")
+            logger.info("Trading stopped for the day")
+
+        except Exception as e:
+            logger.critical(
+                f"[DAILY-EXIT-ERROR] Failed during daily exit: {e}. "
+                f"Some positions may still be open!",
+                exc_info=True
+            )
+            # Send critical alert
+            self.telegram.send_message(
+                f"[CRITICAL] Daily exit FAILED: {e}\n"
+                f"MANUAL BROKER CHECK REQUIRED"
+            )
     
     def handle_eod_exit(self):
         """Handle end-of-day forced exit at 3:15 PM"""
@@ -1165,6 +1277,10 @@ class BaselineV1Live:
 
         # Cancel all orders
         self.order_manager.cancel_all_orders()
+
+        # Clear filter pools to prevent re-nomination after exit
+        self.continuous_filter.reset_daily_data()
+        logger.info("[EOD-EXIT] Filter pools cleared to prevent re-nomination")
 
         # Close all positions
         self.position_tracker.close_all_positions('EOD_EXIT', current_prices)

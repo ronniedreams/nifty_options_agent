@@ -746,7 +746,7 @@ class StateManager:
         cursor.execute('DELETE FROM swing_candidates')
         
         # Save current candidates
-        for symbol, candidate in candidates.items():
+        for symbol, candidate in list(candidates.items()):
             # Convert timestamp to ISO string if it's a pandas Timestamp
             timestamp = candidate['timestamp']
             if hasattr(timestamp, 'isoformat'):

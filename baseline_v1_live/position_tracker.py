@@ -193,34 +193,40 @@ class PositionTracker:
         """
         # Restore open positions
         for pos_data in open_positions_data:
-            symbol = pos_data['symbol']
-            
-            # Reconstruct Position object
-            # candidate_info was stored as part of the position in DB
-            # We need to extract it or mock it
-            candidate_info = {
-                'strike': pos_data.get('strike'),
-                'option_type': pos_data.get('option_type'),
-                'lots': pos_data.get('lots')
-            }
-            
-            position = Position(
-                symbol=symbol,
-                entry_price=pos_data['entry_price'],
-                sl_price=pos_data['sl_price'],
-                quantity=pos_data['quantity'],
-                actual_R=pos_data['actual_R'],
-                entry_time=datetime.fromisoformat(pos_data['entry_time']) if pos_data['entry_time'] else datetime.now(IST),
-                candidate_info=candidate_info
-            )
-            
-            # Restore current state
-            position.current_price = pos_data.get('current_price', pos_data['entry_price'])
-            position.unrealized_pnl = pos_data.get('unrealized_pnl', 0.0)
-            position.unrealized_R = pos_data.get('unrealized_R', 0.0)
-            
-            self.open_positions[symbol] = position
-            logger.info(f"Restored open position: {symbol} @ {position.entry_price}")
+            try:
+                symbol = pos_data['symbol']
+
+                # Reconstruct Position object
+                candidate_info = {
+                    'strike': pos_data.get('strike'),
+                    'option_type': pos_data.get('option_type'),
+                    'lots': pos_data.get('lots')
+                }
+
+                position = Position(
+                    symbol=symbol,
+                    entry_price=pos_data['entry_price'],
+                    sl_price=pos_data['sl_price'],
+                    quantity=pos_data['quantity'],
+                    actual_R=pos_data['actual_R'],
+                    entry_time=datetime.fromisoformat(pos_data['entry_time']) if pos_data.get('entry_time') else datetime.now(IST),
+                    candidate_info=candidate_info
+                )
+
+                # Restore current state
+                position.current_price = pos_data.get('current_price', pos_data['entry_price'])
+                position.unrealized_pnl = pos_data.get('unrealized_pnl', 0.0)
+                position.unrealized_R = pos_data.get('unrealized_R', 0.0)
+
+                self.open_positions[symbol] = position
+                logger.info(f"Restored open position: {symbol} @ {position.entry_price}")
+
+            except Exception as e:
+                logger.error(
+                    f"[RESTORE-ERROR] Failed to restore position {pos_data.get('symbol', 'UNKNOWN')}: {e}. "
+                    f"Skipping this position - MANUAL CHECK REQUIRED.",
+                    exc_info=True
+                )
 
         # Restore daily state
         if daily_state:
@@ -246,13 +252,17 @@ class PositionTracker:
 
             logger.info(f"Restored daily state: Exit Triggered={self.daily_exit_triggered}, Reason={self.daily_exit_reason}")
 
-    def can_open_position(self, symbol: str, option_type: str) -> tuple:
+    def can_open_position(self, symbol: str, option_type: str,
+                          pending_ce_orders: int = 0,
+                          pending_pe_orders: int = 0) -> tuple:
         """
         Check if new position allowed
 
         Args:
             symbol: Option symbol
             option_type: 'CE' or 'PE'
+            pending_ce_orders: Number of pending CE entry orders at broker (not yet filled)
+            pending_pe_orders: Number of pending PE entry orders at broker (not yet filled)
 
         Returns:
             (can_open: bool, reason: str)
@@ -267,23 +277,25 @@ class PositionTracker:
         if symbol in self.open_positions:
             return False, f"Position already exists for {symbol}"
 
-        # Count current positions
-        total_positions = len(self.open_positions)
-        ce_positions = sum(1 for pos in self.open_positions.values() if pos.option_type == 'CE')
-        pe_positions = sum(1 for pos in self.open_positions.values() if pos.option_type == 'PE')
-        
+        # Count current positions + pending orders (pending may fill any moment)
+        ce_positions = sum(1 for pos in self.open_positions.values()
+                          if pos.option_type == 'CE') + pending_ce_orders
+        pe_positions = sum(1 for pos in self.open_positions.values()
+                          if pos.option_type == 'PE') + pending_pe_orders
+        total_positions = len(self.open_positions) + pending_ce_orders + pending_pe_orders
+
         # Check total limit
         if total_positions >= MAX_POSITIONS:
-            return False, f"Max {MAX_POSITIONS} positions already open"
-        
+            return False, f"Max {MAX_POSITIONS} positions (incl. pending) already open"
+
         # Check CE limit
         if option_type == 'CE' and ce_positions >= MAX_CE_POSITIONS:
-            return False, f"Max {MAX_CE_POSITIONS} CE positions already open"
-        
+            return False, f"Max {MAX_CE_POSITIONS} CE positions (incl. pending) already open"
+
         # Check PE limit
         if option_type == 'PE' and pe_positions >= MAX_PE_POSITIONS:
-            return False, f"Max {MAX_PE_POSITIONS} PE positions already open"
-        
+            return False, f"Max {MAX_PE_POSITIONS} PE positions (incl. pending) already open"
+
         return True, "OK"
     
     def add_position(
@@ -379,37 +391,45 @@ class PositionTracker:
         logger.info(f"Closing ALL positions: {exit_reason}")
 
         for symbol in list(self.open_positions.keys()):
-            position = self.open_positions[symbol]
-            exit_price = current_prices.get(symbol)
+            try:
+                position = self.open_positions[symbol]
+                exit_price = current_prices.get(symbol)
 
-            if exit_price is None:
-                logger.warning(f"No price for {symbol}, using last known price")
-                exit_price = position.current_price
+                if exit_price is None:
+                    logger.warning(f"No price for {symbol}, using last known price")
+                    exit_price = position.current_price
 
-            # NEW: Place broker orders if order_manager provided
-            if self.order_manager:
-                # 1. Cancel existing exit SL order
-                logger.info(f"[EXIT] Cancelling SL for {symbol}")
-                self.order_manager.cancel_sl_order(symbol)
+                # NEW: Place broker orders if order_manager provided
+                if self.order_manager:
+                    # 1. Cancel existing exit SL order
+                    logger.info(f"[EXIT] Cancelling SL for {symbol}")
+                    self.order_manager.cancel_sl_order(symbol)
 
-                # 2. Place MARKET order to close position
-                logger.info(f"[EXIT] Placing MARKET order for {symbol}")
-                order_id = self.order_manager.place_market_order(
-                    symbol=symbol,
-                    quantity=position.quantity,
-                    action="BUY",  # Cover the short
-                    reason=exit_reason
-                )
-
-                if not order_id:
-                    logger.error(
-                        f"[EXIT] Failed to place market order for {symbol}. "
-                        f"Position will auto-square at 3:15 PM (MIS product)."
+                    # 2. Place MARKET order to close position
+                    logger.info(f"[EXIT] Placing MARKET order for {symbol}")
+                    order_id = self.order_manager.place_market_order(
+                        symbol=symbol,
+                        quantity=position.quantity,
+                        action="BUY",  # Cover the short
+                        reason=exit_reason
                     )
-                    # Continue with other positions
 
-            # Update internal state (existing logic)
-            self.close_position(symbol, exit_price, exit_reason)
+                    if not order_id:
+                        logger.error(
+                            f"[EXIT] Failed to place market order for {symbol}. "
+                            f"Position will auto-square at 3:15 PM (MIS product)."
+                        )
+                        # Continue with other positions
+
+                # Update internal state (existing logic)
+                self.close_position(symbol, exit_price, exit_reason)
+
+            except Exception as e:
+                logger.error(
+                    f"[EXIT-ERROR] Failed to close {symbol}: {e}. "
+                    f"Continuing with remaining positions.",
+                    exc_info=True
+                )
     
     def get_cumulative_R(self) -> float:
         """
@@ -483,25 +503,28 @@ class PositionTracker:
         """Get all positions as dicts"""
         return [pos.to_dict() for pos in list(self.open_positions.values()) + self.closed_positions]
     
-    def reconcile_with_broker(self):
+    def reconcile_with_broker(self) -> list:
         """
         [CRITICAL] ENHANCED: Bi-directional position reconciliation with broker
-        
+
         Detects TWO types of discrepancies:
         1. Phantom positions: We track, broker doesn't have (SL likely hit)
         2. Orphaned positions: Broker has, we don't track (missed fill notification)
-        
+
         Called every 60 seconds from main loop
+
+        Returns:
+            List of phantom-closed symbols (symbols removed because broker no longer has them)
         """
         if DRY_RUN:
-            return
+            return []
         
         try:
             response = self.client.positionbook()
             
             if response.get('status') != 'success':
                 logger.error(f"Failed to fetch positions: {response}")
-                return
+                return []
             
             broker_positions = response.get('data', [])
             
@@ -638,9 +661,12 @@ class PositionTracker:
                     f"[OK] Position reconciliation OK: "
                     f"{len(tracked_symbols)} positions match broker"
                 )
-            
+
+            return list(phantom_symbols)
+
         except Exception as e:
             logger.error(f"Exception during position reconciliation: {e}", exc_info=True)
+            return []
 
 
 if __name__ == '__main__':

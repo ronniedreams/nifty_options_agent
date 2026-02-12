@@ -1,0 +1,79 @@
+BRANCH STRUCTURE CREATED
+========================
+
+Active Branches
+===============
+* draft/example-feature  ← You are here (pre-market snapshot)
+  feature/example-feature ← Feature development
+  main ← Production (synced to GitHub)
+
+Branch Purposes
+===============
+main (4056068)
+  └─ Current production
+  └─ EC2 runs this
+  └─ Synced to GitHub
+
+feature/example-feature (4056068)
+  └─ Development branch
+  └─ Work freely here
+  └─ Commit and test locally
+  └─ Can break things
+
+draft/example-feature (4056068)
+  └─ Merged from feature/example-feature
+  └─ Pre-market snapshot
+  └─ Isolated for testing
+  └─ main + feature/example-feature
+
+Next Steps in Workflow
+======================
+1. Work on feature/example-feature
+   └─ Make changes
+   └─ Commit: git add . && git commit -m "message"
+   └─ Test locally
+
+2. Before market (9:15 AM):
+   └─ draft/example-feature is ready to test
+   └─ Tag: git tag pre-market-20260128-example-feature
+
+3. After market (3:30 PM):
+   ├─ If GOOD: Merge to main
+   │  └─ git checkout main
+   │  └─ git merge feature/example-feature
+   │  └─ git push origin main
+   └─ If FAILED: Delete branches
+      └─ git branch -D feature/example-feature draft/example-feature
+      └─ git push origin --delete feature/example-feature draft/example-feature
+
+Current State
+=============
+✓ feature/example-feature created
+✓ draft/example-feature created (merged)
+✓ Both pushed to GitHub
+✓ Ready for development
+
+Branch Naming Convention
+=========================
+feature/X  = Development branch (feature/new-filter, feature/bugfix-vwap, etc.)
+draft/X    = Pre-market test branch (draft/new-filter, draft/bugfix-vwap, etc.)
+main       = Production (never touch during market hours)
+
+To Switch Branches
+==================
+git checkout feature/example-feature
+git checkout draft/example-feature
+git checkout main
+
+To See Git Graph
+================
+git log --graph --oneline --all
+
+To Delete Branches (After Testing)
+===================================
+# Local only
+git branch -D feature/example-feature
+git branch -D draft/example-feature
+
+# Also from GitHub
+git push origin --delete feature/example-feature draft/example-feature
