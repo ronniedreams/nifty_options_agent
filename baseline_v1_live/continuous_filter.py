@@ -233,15 +233,28 @@ class ContinuousFilterEngine:
         )
     
     def remove_swing_candidate(self, symbol: str):
-        """Remove swing candidate (if swing gets invalidated)"""
+        """Remove swing candidate from ALL pools (after fill, invalidation, etc.)"""
+        option_type = None
         if symbol in self.swing_candidates:
+            option_type = self.swing_candidates[symbol].get('option_type')
             del self.swing_candidates[symbol]
 
-            # Clear evaluation state for removed candidate
-            if symbol in self.last_evaluation_state:
-                del self.last_evaluation_state[symbol]
+        if symbol in self.last_evaluation_state:
+            del self.last_evaluation_state[symbol]
 
-            logger.info(f"[SWING-REMOVED] {symbol}")
+        # Clean stage1 pool (the pool used by evaluate_all_candidates)
+        for ot in (['CE', 'PE'] if option_type is None else [option_type]):
+            self.stage1_swings_by_type[ot] = [
+                s for s in self.stage1_swings_by_type[ot]
+                if s.get('symbol') != symbol
+            ]
+
+        # Clear from current_best if this was the selected strike
+        for ot in ['CE', 'PE']:
+            if self.current_best.get(ot) and self.current_best[ot].get('symbol') == symbol:
+                self.current_best[ot] = None
+
+        logger.info(f"[SWING-REMOVED] {symbol} purged from all filter pools")
 
     def mark_historical_breaks(self, swing_detector) -> int:
         """
@@ -294,7 +307,8 @@ class ContinuousFilterEngine:
         logger.info(f"[STARTUP-PROTECTION] Marked {marked_count} swings as already broken in history")
         return marked_count
 
-    def evaluate_all_candidates(self, latest_bars: Dict, swing_detector, current_bars: Dict = None) -> Dict:
+    def evaluate_all_candidates(self, latest_bars: Dict, swing_detector, current_bars: Dict = None,
+                                open_position_symbols: set = None) -> Dict:
         """
         Evaluate all swing candidates with latest bar data
 
@@ -360,6 +374,11 @@ class ContinuousFilterEngine:
                 symbol = swing_info.get('symbol')
                 if not symbol:
                     continue
+
+                # Defense-in-depth: skip symbols with open positions
+                if open_position_symbols and symbol in open_position_symbols:
+                    continue
+
                 # Skip if no bar data available
                 if symbol not in latest_bars:
                     self.rejection_stats['no_data'] += 1
@@ -442,7 +461,8 @@ class ContinuousFilterEngine:
                     'quantity': quantity,
                     'actual_R': actual_R,
                     'score': abs(sl_points - TARGET_SL_POINTS),
-                    'entry_price': swing_low
+                    'entry_price': swing_low,
+                    'broke_in_history': swing_info.get('broke_in_history', False),
                 }
                 
                 qualified[option_type].append(enriched)
@@ -588,6 +608,18 @@ class ContinuousFilterEngine:
             symbol = candidate['symbol']
             swing_low = candidate['swing_low']
 
+            # CRITICAL: Skip candidates that broke in historical data (all paths)
+            if candidate.get('broke_in_history', False):
+                logger.info(
+                    f"[STARTUP-SKIP] {symbol}: Swing @ {swing_low:.2f} already broke in history - skipping"
+                )
+                triggers[option_type] = {
+                    'action': 'cancel',
+                    'candidate': candidate,
+                    'reason': f'swing already broke in historical data before startup'
+                }
+                continue
+
             # [CRITICAL] CRITICAL: Use CURRENT bar for real-time price, not completed bar
             # In live trading, we need to react to ticks as they come in, not wait for bar completion
             price_source = current_bars.get(symbol) or latest_bars.get(symbol)
@@ -649,18 +681,6 @@ class ContinuousFilterEngine:
                 }
             
             else:
-                # STARTUP PROTECTION: Skip swings that already broke in historical data
-                if candidate.get('broke_in_history', False):
-                    logger.info(
-                        f"[STARTUP-SKIP] {symbol}: Swing @ {swing_low:.2f} already broke in history - skipping order"
-                    )
-                    triggers[option_type] = {
-                        'action': 'wait',
-                        'candidate': candidate,
-                        'reason': f'swing already broke in historical data before startup'
-                    }
-                    continue
-
                 # No existing order - place order immediately (qualified candidate)
                 # Per ORDER_EXECUTION_THEORY.md: Place order as soon as strike qualifies
                 price_type = "REALTIME" if is_realtime else "COMPLETED_BAR"

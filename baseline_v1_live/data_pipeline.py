@@ -17,6 +17,7 @@ Features:
 - Data validation (stale tick detection)
 """
 
+import copy
 import logging
 from collections import defaultdict
 from datetime import datetime, time, timedelta
@@ -492,6 +493,9 @@ class DataPipeline:
                         cum_pv = vwap_data['cum_pv']
                         cum_vol = vwap_data['cum_vol']
 
+                    # Build set of existing bar timestamps for dedup
+                    existing_timestamps = {b.timestamp for b in self.bars[symbol]}
+
                     for idx, row in missed_bars.iterrows():
                         bar_time = idx
 
@@ -507,6 +511,14 @@ class DataPipeline:
                         if bar_timestamp >= current_check:
                             logger.debug(
                                 f"[GAP-FILL] Skipping incomplete/future bar @ {bar_timestamp.strftime('%H:%M')}"
+                            )
+                            continue
+
+                        # Dedup: skip if bar already exists for this timestamp
+                        if bar_timestamp in existing_timestamps:
+                            logger.debug(
+                                f"[GAP-FILL] Skipping duplicate bar @ "
+                                f"{bar_timestamp.strftime('%H:%M')} for {symbol}"
                             )
                             continue
 
@@ -529,6 +541,7 @@ class DataPipeline:
                             bar.vwap = typical_price
 
                         self.bars[symbol].append(bar)
+                        existing_timestamps.add(bar_timestamp)  # Track newly added
                         filled_count += 1
 
                     # Update session VWAP cumulative values
@@ -827,7 +840,7 @@ class DataPipeline:
             should_process = (self.active_source == 'zerodha')
 
         if should_process:
-            self._process_tick(data)
+            self._process_tick(data, source='zerodha')
 
     def _on_quote_update_angelone(self, data):
         """
@@ -842,14 +855,18 @@ class DataPipeline:
             should_process = (self.active_source == 'angelone')
 
         if should_process:
-            self._process_tick(data)
+            self._process_tick(data, source='angelone')
 
-    def _process_tick(self, data):
+    def _process_tick(self, data, source=None):
         """
         Core tick processing - aggregates ticks into 1-min OHLCV bars.
 
         Called by whichever source is currently active (_on_quote_update_zerodha
         or _on_quote_update_angelone). Source switching is transparent to this method.
+
+        Args:
+            data: Tick data dict with 'symbol' and 'data' keys
+            source: 'zerodha' or 'angelone' - re-verified to prevent TOCTOU race
 
         Expected data format:
         {
@@ -863,6 +880,11 @@ class DataPipeline:
             }
         }
         """
+        # TOCTOU guard: re-verify source is still active
+        if source:
+            with self.lock:
+                if self.active_source != source:
+                    return  # Source switched during handoff, discard tick
         try:
             symbol = data.get('symbol')
             quote_data = data.get('data', {})
@@ -935,51 +957,52 @@ class DataPipeline:
     def get_latest_bar(self, symbol):
         """
         Get latest completed bar for symbol
-        
+
         Returns:
-            BarData object or None if no bars available
+            Defensive copy of BarData object or None if no bars available
         """
         with self.lock:
             bars = self.bars.get(symbol, [])
-            return bars[-1] if bars else None
-    
+            return copy.copy(bars[-1]) if bars else None
+
     def get_current_bar(self, symbol):
         """
         Get current (incomplete) bar for symbol
-        
+
         Returns:
-            BarData object or None
+            Defensive copy of BarData object or None
         """
         with self.lock:
-            return self.current_bars.get(symbol)
-    
+            bar = self.current_bars.get(symbol)
+            return copy.copy(bar) if bar else None
+
     def get_bars(self, symbol, count=100):
         """
         Get last N completed bars for symbol
-        
+
         Args:
             symbol: Option symbol
             count: Number of bars to return
-        
+
         Returns:
-            List of BarData objects
+            List of defensive copies of BarData objects
         """
         with self.lock:
             bars = self.bars.get(symbol, [])
-            return bars[-count:] if bars else []
-    
+            return [copy.copy(b) for b in bars[-count:]] if bars else []
+
     def get_bars_for_symbol(self, symbol):
         """
         Get ALL completed bars for symbol (used for swing detection)
-        
+
         Args:
             symbol: Option symbol
-        
+
         Returns:
-            List of BarData objects
+            List of defensive copies of BarData objects
         """
         with self.lock:
-            return self.bars.get(symbol, [])
+            return [copy.copy(b) for b in self.bars.get(symbol, [])]
     
     def get_all_latest_bars(self):
         """
@@ -1437,8 +1460,27 @@ class DataPipeline:
                         cum_pv = vwap_data['cum_pv']
                         cum_vol = vwap_data['cum_vol']
 
+                    # Build set of existing bar timestamps for dedup
+                    existing_timestamps = {b.timestamp for b in self.bars[symbol]}
+
                     for idx, row in missed_bars.iterrows():
-                        bar = BarData(timestamp=idx)
+                        # Normalize timestamp to minute boundary for dedup check
+                        bar_time = idx
+                        if isinstance(bar_time, str):
+                            bar_time = datetime.fromisoformat(bar_time)
+                        if bar_time.tzinfo is None:
+                            bar_time = IST.localize(bar_time)
+                        bar_timestamp = bar_time.replace(second=0, microsecond=0)
+
+                        # Dedup: skip if bar already exists for this timestamp
+                        if bar_timestamp in existing_timestamps:
+                            logger.debug(
+                                f"[BACKFILL] Skipping duplicate bar @ "
+                                f"{bar_timestamp.strftime('%H:%M')} for {symbol}"
+                            )
+                            continue
+
+                        bar = BarData(timestamp=bar_timestamp)
                         bar.open = row.get('open', row.get('Open'))
                         bar.high = row.get('high', row.get('High'))
                         bar.low = row.get('low', row.get('Low'))
@@ -1458,6 +1500,7 @@ class DataPipeline:
                         bar.tick_count = 1
 
                         self.bars[symbol].append(bar)
+                        existing_timestamps.add(bar_timestamp)  # Track newly added
                         # Store when bar was RECEIVED (for watchdog)
                         self.last_bar_timestamp[symbol] = datetime.now(IST)
                         backfilled_count += 1

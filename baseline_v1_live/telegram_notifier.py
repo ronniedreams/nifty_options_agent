@@ -19,6 +19,7 @@ Setup:
 
 import logging
 import requests
+import threading
 from typing import Optional, Dict
 from datetime import datetime
 import pytz
@@ -109,19 +110,19 @@ class TelegramNotifier:
         if parse_mode:
             payload['parse_mode'] = parse_mode
         
-        try:
-            response = requests.post(url, json=payload, timeout=10)
-            
-            if response.status_code == 200:
-                logger.debug("Telegram message sent successfully")
-                return True
-            else:
-                logger.error(f"Telegram API error: {response.status_code} - {response.text}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Failed to send Telegram message: {e}")
-            return False
+        def _do_send():
+            try:
+                response = requests.post(url, json=payload, timeout=10)
+                if response.status_code == 200:
+                    logger.debug("Telegram message sent successfully")
+                else:
+                    logger.error(f"Telegram API error: {response.status_code} - {response.text}")
+            except Exception as e:
+                logger.error(f"Failed to send Telegram message: {e}")
+
+        thread = threading.Thread(target=_do_send, daemon=True)
+        thread.start()
+        return True  # Optimistically return True (fire-and-forget)
     
     def notify_trade_entry(self, fill_info: Dict):
         """

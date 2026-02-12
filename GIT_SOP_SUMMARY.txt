@@ -1,0 +1,96 @@
+GIT SOP ESTABLISHED & DOCUMENTED
+=================================
+
+Documentation Files
+===================
+✓ .claude/GIT_SOP.md (360 lines)
+  - Complete workflow documentation
+  - Examples and scenarios
+  - Hard rules and checklist
+  
+✓ .claude/CLAUDE.md (updated)
+  - Git workflow section at top
+  - Quick reference in Code Change Guidelines
+
+Status
+======
+✓ All environments synced (commit 8cc541f)
+✓ EC2 updated with latest SOP
+✓ GitHub has full documentation
+
+WORKFLOW COMMITMENT
+===================
+From now on, I will follow this workflow for ALL code changes:
+
+1. Feature Development
+   ├─ git checkout main && git pull
+   ├─ git checkout -b experiment/feature-X
+   ├─ [Work freely, commit normally]
+   └─ Push when ready
+
+2. Pre-Market Snapshot (Before 9:15 AM)
+   ├─ git checkout main
+   ├─ git checkout -b draft/feature-X
+   ├─ git merge experiment/feature-X
+   ├─ git tag pre-market-YYYYMMDD-feature-X
+   └─ git push origin draft/feature-X --tags
+
+3. Post-Market Decision (After 3:30 PM)
+   ├─ If GOOD:
+   │  ├─ git checkout main
+   │  ├─ git merge experiment/feature-X
+   │  ├─ git tag stable-YYYYMMDD-feature-X
+   │  └─ git push origin main --tags
+   └─ If FAILED:
+      ├─ git branch -D draft/feature-X
+      ├─ git branch -D experiment/feature-X
+      └─ git push origin --delete draft/feature-X experiment/feature-X
+
+HARD RULES (NON-NEGOTIABLE)
+============================
+❌ Never test directly on main
+❌ Never stack multiple experiments in one draft
+❌ Never change code during market hours (9:15 AM - 3:30 PM)
+❌ Never delete tags
+❌ Never deploy draft/experiment to EC2
+
+MENTAL MODEL
+============
+experiment builds ideas
+draft tests ideas
+main trusts ideas
+
+WHY THIS WORKS
+==============
+✓ True isolation - No surprise dependencies
+✓ Zero ambiguity - Branch name tells you everything
+✓ No resets - History is never rewritten
+✓ No branch state confusion - Clear progression
+✓ Perfect for limited market windows
+✓ Professional release engineering standard
+✓ Full rollback capability via tags
+✓ Safety by design - Mistakes are contained
+
+REFERENCES
+==========
+Full SOP: .claude/GIT_SOP.md
+Quick Ref: Top of .claude/CLAUDE.md
+EC2 Copy: ~/nifty_options_agent/.claude/GIT_SOP.md
+
+NEXT STEPS
+==========
+1. This SOP is now active
+2. All future development follows this workflow
+3. Weekly cleanup of old experiment/draft branches
+4. Tags serve as recovery points
+5. main stays clean and production-ready
+
+COMMITMENT
+==========
+Claude will strictly follow this SOP for all future code changes.
+This prevents crashes, branch confusion, and enables safe testing
+during market hours with full rollback capability.
+
+Effective: 2026-01-28
+Version: 1.0
+Status: ACTIVE

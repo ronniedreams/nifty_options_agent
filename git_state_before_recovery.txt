@@ -1,0 +1,85 @@
+* 3257206 (HEAD -> fix/crash-loop-notifications, origin/fix/crash-loop-notifications, backup/crash-loop-notifications-2026-01-28) Fix VWAP bug: Use deepcopy for swing_info to prevent reference corruption
+* e3ed244 Fix OpenAlgo API request body - add apikey field
+* 7697bfd Fix health check and Telegram notification issues
+| * 67fb46d (refs/stash) On fix/crash-loop-notifications: Save settings.local.json before revert
+|/| 
+| * fa3adca index on fix/crash-loop-notifications: a151f53 Make STATE_DB_PATH configurable via environment variable
+|/  
+* a151f53 Make STATE_DB_PATH configurable via environment variable
+* b3e6a48 Fix Docker volume mount to not overwrite code directory
+* f325c47 Use --auto flag for baseline strategy to auto-detect ATM and expiry
+* a02468f Add OpenAlgo v2 migration plan and tracking checklist
+* 016c629 Fix test paths after moving to tests/ folder
+* 30e4cff Move test files to tests/ folder
+* 5754b16 Organize documentation: move to docs/ folder
+* 4ed858a Add implementation summary document
+* 36bfafb Add comprehensive testing and deployment guide
+* 9edef35 Implement failure handling and notification management
+*   25081a0 (origin/feature/order-flow-update, feature/order-flow-update) Merge branch 'main' into feature/order-flow-update
+|\  
+| *   595c80a (origin/main, main, backup/main-2026-01-28) Merge branch 'main' of https://github.com/ronniedreams/nifty_options_agent
+| |\  
+| | * 2e822bb Add Telegram notification environment variables to docker-compose
+* | | b25d633 Implement market order profit booking at daily exits
+* | | 2245da1 Fix order_manager code structure and enable all order management cases
+|/ /  
+* / 65824fd Restructure skills from single files to directories with SKILL.md
+|/  
+* 6acff2f Add auto-detection for ATM and expiry with nearest-expiry selection
+* 29f7814 Sync dashboard expiry with running strategy
+* 8b62109 Fix strategy name inconsistency in order placement
+* 5fdb892 Add custom subagents and skills with frontmatter registration
+* abe0a72 Fix swing updates to require 2-watch confirmation
+* 3ee05f7 Fix GitHub Actions workflow for correct Docker builds
+* 9a52135 (origin/feature/docker-ec2-fixes, feature/docker-ec2-fixes) Comprehensive documentation update: configurable values, SL orders, EC2 context
+* b2ce704 Add three-way sync workflow documentation for Claude Code
+* 2e6e141 Add EC2 deployment documentation to CLAUDE.md
+* 8e74f26 Fix volume paths for monitor dashboard DB access
+* 11fbdf2 Add deploy.sh script for easy EC2 deployments
+| * ebe2f12 (origin/feature/railway-deployment) Update Railway configs for multi-service deployment
+| * cb52a21 Add Railway deployment configuration
+|/  
+* 96a2e1b Fix monitor dashboard DB path to use environment variable
+* b87b13b Simplify OpenAlgo healthcheck to use socket-based check
+* 3cf0908 Fix OpenAlgo path in docker-compose to match actual directory structure
+* 9d4c9bf Fix OpenAlgo healthcheck to use Python instead of wget
+* 2d59a90 Mount OpenAlgo .env file as volume to fix empty .env issue
+* 825b5fc Fix OpenAlgo to build from local source instead of Docker Hub
+* d296dbe Fix Docker configuration for EC2 deployment
+* f2381e4 Add Dockerfile for monitor dashboard
+* 121abf7 Add Docker deployment for EC2 Ubuntu
+* a8c6355 Update docs: Entry orders use SL (stop-limit) instead of LIMIT
+* 784f725 Fix false WebSocket disconnection detection after market close
+* 6acbc1c Fix import paths, package name, and update gitignore
+* 071c281 Initial commit: NIFTY options trading system (baseline_v1)
+  backup/crash-loop-notifications-2026-01-28
+  backup/main-2026-01-28
+  feature/docker-ec2-fixes
+  feature/order-flow-update
+* fix/crash-loop-notifications
+  main
+  remotes/origin/feature/docker-ec2-fixes
+  remotes/origin/feature/order-flow-update
+  remotes/origin/feature/railway-deployment
+  remotes/origin/fix/crash-loop-notifications
+  remotes/origin/main
+On branch fix/crash-loop-notifications
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   .claude/settings.local.json
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	2026-01-20-shall-we-continue-working-on-our-project-we-were.txt
+	README.md
+	baseline_v1_live/live_state.db-shm
+	baseline_v1_live/live_state.db-wal
+	extra docs/
+	git_state_before_recovery.txt
+	how-branch
+	nul
+	snips/
+	test_vwap_fix.py
+
+no changes added to commit (use "git add" and/or "git commit -a")

@@ -1,0 +1,128 @@
+BRANCH SETUP COMPLETE ✅
+=======================
+
+Branch Structure Created
+========================
+
+main (4056068)
+  └─ Production branch
+  └─ Safe, trusted, on GitHub
+  └─ EC2 runs this
+
+feature/example-feature (81bef74)
+  ├─ Development branch
+  ├─ Work freely here
+  ├─ Contains: FEATURE_README.md
+  └─ Ready for development
+
+draft/example-feature (81bef74)
+  ├─ Pre-market testing snapshot
+  ├─ = main + feature/example-feature
+  ├─ Isolated for testing
+  └─ Ready to test
+
+Status
+======
+✓ feature/example-feature created locally
+✓ draft/example-feature created locally
+✓ Both branches pushed to GitHub
+✓ Both branches synced (commit 81bef74)
+✓ FEATURE_README.md demonstrates workflow
+✓ All environments ready
+
+Branch Commit History
+=====================
+81bef74 - Add feature branch README (feature/example-feature, draft/example-feature)
+4056068 - Update Git SOP: Use 'feature' instead of 'experiment' (main)
+8cc541f - Add Git SOP (main)
+007709a - Update requirements.txt (main)
+
+How to Use
+==========
+
+Work on Feature:
+  git checkout feature/example-feature
+  # Make changes, commit normally
+  git add .
+  git commit -m "Your change"
+
+Switch Branches:
+  git checkout feature/example-feature   # Development
+  git checkout draft/example-feature     # Testing
+  git checkout main                      # Production
+
+See All Branches:
+  git branch -a
+  git log --graph --oneline --all
+
+Test Flow Example:
+  1. Make changes on feature/example-feature
+  2. git checkout draft/example-feature && git merge feature/example-feature
+  3. git tag pre-market-20260128-example-feature
+  4. Test the draft branch
+  5. Post-market: merge to main if successful
+
+Push Changes:
+  git push origin feature/example-feature
+  git push origin draft/example-feature
+
+The Workflow in Action
+======================
+
+Development Phase:
+  $ git checkout feature/example-feature
+  $ # Edit files, test locally
+  $ git add .
+  $ git commit -m "Implement new feature"
+  $ git push origin feature/example-feature
+
+Pre-Market Phase (Before 9:15 AM):
+  $ git checkout draft/example-feature
+  $ git merge feature/example-feature
+  $ git tag pre-market-20260128-example-feature
+  $ git push origin draft/example-feature --tags
+
+Testing Phase (Market Hours):
+  $ # Observe draft/example-feature behavior
+  $ # Check logs, verify trades
+
+Post-Market Phase (After 3:30 PM):
+  $ # If successful:
+  $ git checkout main
+  $ git merge feature/example-feature
+  $ git tag stable-20260128-example-feature
+  $ git push origin main --tags
+  
+  $ # If failed:
+  $ git branch -D feature/example-feature draft/example-feature
+  $ git push origin --delete feature/example-feature draft/example-feature
+
+Safety Features
+===============
+✓ feature/ development is isolated
+✓ draft/ is main + feature (no surprises)
+✓ main stays clean during market hours
+✓ Tags enable rollback
+✓ Branches are easily deleted
+✓ Clear naming convention
+
+Next Step
+=========
+When you have actual work to do:
+1. Replace "example-feature" with your real feature name
+2. Follow the same workflow
+3. Delete example branches after practicing
+
+Example Real-World Features:
+  feature/improve-swing-detection
+  feature/fix-vwap-bug
+  feature/add-new-filter
+  feature/optimize-performance
+  feature/bugfix-order-placement
+
+---
+
+Ready for real feature development!
+Current Branch: draft/example-feature
+All Branches: synced to GitHub
+Status: ACTIVE

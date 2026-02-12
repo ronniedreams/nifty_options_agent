@@ -596,9 +596,12 @@ class MultiSwingDetector:
         breaks = []
 
         for symbol, bar_dict in bars_dict.items():
-            break_info = self.update(symbol, bar_dict)
-            if break_info:
-                breaks.append(break_info)
+            try:
+                break_info = self.update(symbol, bar_dict)
+                if break_info:
+                    breaks.append(break_info)
+            except Exception as e:
+                logger.error(f"[SWING-ERROR] Exception updating {symbol}: {e}", exc_info=True)
 
         return breaks
 
