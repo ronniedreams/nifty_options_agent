@@ -30,8 +30,8 @@ services:
       context: ./openalgo-angelone/openalgo
     container_name: openalgo_angelone
     ports:
-      - "5001:5001"
-      - "8766:8766"  # WebSocket proxy (backup feed)
+      - "5001:5000"
+      - "8766:8765"  # WebSocket proxy (backup feed)
     volumes:
       - ./openalgo-angelone/openalgo/.env:/app/.env:ro
       - openalgo_angelone_data:/app/db
@@ -40,7 +40,7 @@ services:
       - FLASK_ENV=production
     restart: unless-stopped
     healthcheck:
-      test: python -c "import socket; s=socket.socket(); s.connect(('localhost', 5001)); s.close()"
+      test: python -c "import socket; s=socket.socket(); s.connect(('localhost', 5000)); s.close()"
       interval: 30s
       timeout: 10s
       retries: 5
@@ -66,8 +66,8 @@ services:
       - STATE_DB_PATH=/app/state/live_state.db
       - OPENALGO_HOST=http://openalgo:5000
       - OPENALGO_WS_URL=ws://openalgo:8765
-      - ANGELONE_HOST=http://openalgo_angelone:5001
-      - ANGELONE_WS_URL=ws://openalgo_angelone:8766
+      - ANGELONE_HOST=http://openalgo_angelone:5000
+      - ANGELONE_WS_URL=ws://openalgo_angelone:8765
       - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-true}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
