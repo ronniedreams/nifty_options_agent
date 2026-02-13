@@ -31,7 +31,7 @@ services:
     container_name: openalgo_angelone
     ports:
       - "5001:5000"
-      - "8766:8765"  # WebSocket proxy (backup feed)
+      - "8766:8766"  # WebSocket proxy (backup feed)
     volumes:
       - ./openalgo-angelone/openalgo/.env:/app/.env:ro
       - openalgo_angelone_data:/app/db
@@ -67,7 +67,7 @@ services:
       - OPENALGO_HOST=http://openalgo:5000
       - OPENALGO_WS_URL=ws://openalgo:8765
       - ANGELONE_HOST=http://openalgo_angelone:5000
-      - ANGELONE_WS_URL=ws://openalgo_angelone:8765
+      - ANGELONE_WS_URL=ws://openalgo_angelone:8766
       - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-true}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
