@@ -59,7 +59,7 @@ services:
         condition: service_healthy
     volumes:
       - ./.env:/app/.env:ro  # Read-only secrets (root-level .env)
-      - ./logs:/app/logs  # Persist logs on host
+      - ./baseline_v1_live/logs:/app/baseline_v1_live/logs  # Persist logs on host
       - trading_state:/app/state  # Persist SQLite state
     environment:
       - PYTHONUNBUFFERED=1

@@ -62,15 +62,26 @@ from .telegram_notifier import get_notifier
 from .notification_manager import NotificationManager
 from .startup_health_check import StartupHealthCheck
 
-# Setup logging
+# Setup logging with IST timestamps
 os.makedirs(LOG_DIR, exist_ok=True)
+
+import pytz as _pytz
+_IST = _pytz.timezone('Asia/Kolkata')
+
+class _ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        import datetime as _dt
+        return _dt.datetime.fromtimestamp(timestamp, _IST).timetuple()
+
+_formatter = _ISTFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+_file_handler = logging.FileHandler(os.path.join(LOG_DIR, f'baseline_v1_live_{datetime.now(_IST).strftime("%Y%m%d")}.log'))
+_file_handler.setFormatter(_formatter)
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_formatter)
+
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, f'baseline_v1_live_{datetime.now().strftime("%Y%m%d")}.log')),
-        logging.StreamHandler()
-    ]
+    handlers=[_file_handler, _stream_handler]
 )
 
 logger = logging.getLogger(__name__)
@@ -729,13 +740,9 @@ class BaselineV1Live:
 
                     last_watchdog_check = time.time()
                 
-                # Check if market is open
-                if not self.is_market_open():
-                    logger.debug("Market closed, waiting...")
-                    await asyncio.sleep(60)
-                    continue
-
-                # Check if force exit time reached (3:15 PM)
+                # Check force exit time BEFORE market open check — both share 15:15, and
+                # is_market_open() returns False at 15:15 (condition: now < 15:15), so this
+                # must come first or the EOD exit and daily summary never fire.
                 if self.is_force_exit_time():
                     if not self._eod_exit_done:
                         logger.warning("Force exit time (3:15 PM) reached - initiating EOD exit")
@@ -743,6 +750,12 @@ class BaselineV1Live:
                         self.handle_eod_exit()
                         logger.info("EOD exit complete - system will monitor until market close")
                     # Continue running (monitor mode) until market closes at 3:30 PM
+                    await asyncio.sleep(60)
+                    continue
+
+                # Check if market is open
+                if not self.is_market_open():
+                    logger.debug("Market closed, waiting...")
                     await asyncio.sleep(60)
                     continue
 
