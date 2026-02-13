@@ -1,6 +1,6 @@
 # Options Trading Agent - NIFTY Swing-Break Strategy
 
-## ⚡ Quick Context (30 seconds)
+## ⚡ Quick Context
 
 **What:** Automated trading system for NIFTY index options using swing-break strategy
 **How:** Detect swing lows → Apply 2-stage filters → Place proactive SL (stop-limit) orders BEFORE breaks
@@ -11,67 +11,90 @@
 
 ---
 
-## 🔧 Development & Git Workflow (READ FIRST!)
+## 🚨 Known Issues & Persistent Fixes (READ ON EVERY STARTUP)
 
-**MANDATORY SOP for all code changes:** See `.claude/GIT_SOP.md`
-
-**Branch Structure:**
-- `main` → Production only (EC2 runs this)
-- `feature/feature-X` → Your feature development
-- `draft/feature-X` → Isolated test (main + feature)
-
-**Quick Workflow:**
+### Angel One Container — `logs/` Directory Missing After Rebuild
+**Fix (run after any rebuild):**
 ```bash
-# 1. Start feature
-git checkout main && git pull
-git checkout -b feature/my-feature
-
-# 2. Build & test locally
-# (Commit freely, break things if needed)
-
-# 3. Before market (9:15 AM):
-git checkout main
-git checkout -b draft/my-feature
-git merge feature/my-feature
-git tag pre-market-YYYYMMDD-my-feature
-git push --tags
-
-# 4. After market (3:30 PM):
-# If good: git checkout main && git merge feature/my-feature && git push
-# If bad: git branch -D draft/my-feature feature/my-feature && git push origin --delete draft/my-feature feature/my-feature
+docker exec -u root openalgo_angelone mkdir -p /app/logs && docker exec -u root openalgo_angelone chmod 777 /app/logs
 ```
-
-**Hard Rules:**
-- ❌ Never deploy to EC2 during market hours (9:15 AM - 3:30 PM) — EC2 is live production
-- ✅ Local code changes and debugging ARE allowed during market hours
-- ❌ Never test directly on main
-- ❌ Never delete tags
-- ❌ Never deploy draft/experiment to EC2
+**Permanent fix location:** `openalgo-angelone/openalgo/start.sh` (gitignored, can't commit).
 
 ---
 
-## 📋 Architecture at a Glance (3 minutes)
+### Angel One WebSocket Port — Internal Port is 8766 (not 8765)
+**Status:** Already fixed in `docker-compose.yaml` (`8766:8766` and `ws://openalgo_angelone:8766`). No action needed unless docker-compose is reset.
+
+---
+
+### Daily Login Required (Zerodha + Angel One)
+**Both sessions expire daily.** Every morning before 9:15 AM:
+1. Open **https://openalgo.ronniedreams.in** (admin / Trading@2026) → Log in with Zerodha (TOTP 2FA)
+2. Open Angel One OpenAlgo URL → log in with Angel One
+
+**After login, restart trading agent:**
+```bash
+docker-compose stop trading_agent && docker-compose rm -f trading_agent && docker-compose up -d trading_agent
+```
+
+---
+
+## 📝 Pending Tasks
+
+| # | Task | Notes |
+|---|------|-------|
+| 1 | Fix cancel-verify failure when orderbook returns non-list response | `order_manager.py` — add type check before iterating orderbook response |
+| 2 | Upgrade Zerodha OpenAlgo to v2.0.0.0 | Check changelog for breaking changes, test paper mode first |
+| 3 | Verify Zerodha WebSocket ATP matches Kite VWAP | Critical — Stage-1 VWAP filter depends on this |
+| 4 | Check if Angel One WebSocket provides VWAP/ATP values | If absent, need fallback strategy |
+| 5 | Clear stale same-day entries from `all_swings_log` on restart | Clear `all_swings_log`, `filter_rejections`, `swing_candidates`, `best_strikes`. Do NOT clear positions/orders/daily_state |
+
+---
+
+## 🔧 Development & Git Workflow
+
+**MANDATORY SOP:** See `.claude/GIT_SOP.md`
+
+**Branch Structure:** `main` → Production | `feature/X` → Development | `draft/X` → Pre-market test
+
+**Quick Workflow:**
+```bash
+git checkout main && git pull && git checkout -b feature/my-feature
+# develop...
+git checkout main && git checkout -b draft/my-feature && git merge feature/my-feature
+git tag pre-market-YYYYMMDD-my-feature && git push --tags
+# After market: merge to main (good) or delete branch (bad)
+```
+
+**Hard Rules:**
+- ❌ Never deploy to EC2 during market hours (9:15 AM - 3:30 PM)
+- ✅ Local code changes/debugging allowed during market hours
+- ❌ Never test directly on main | ❌ Never delete tags | ❌ Never deploy draft to EC2
+
+---
+
+## 📋 Architecture at a Glance
 
 ```
 1. DATA PIPELINE (data_pipeline.py)
-   Dual WebSocket feeds → 1-min OHLCV bars + VWAP calculation
+   Dual WebSocket → 1-min OHLCV bars + VWAP
    Primary: Zerodha (ws://127.0.0.1:8765) | Backup: Angel One (ws://127.0.0.1:8766)
    Auto-failover: Zerodha stale >15s → switch to Angel One; switchback when Zerodha recovers
 
 2. SWING DETECTION (swing_detector.py)
-   Watch-based system: bars confirm past turning points
-   Output: swing_candidates dict (all detected swings)
+   Watch-based system (2-bar confirmation) → swing_candidates dict
+   Alternating High→Low→High pattern enforced. See SWING_DETECTION_THEORY.md
 
 3. STRIKE FILTRATION (continuous_filter.py)
-   Stage-1: Static filters (price range 100-300 Rs, VWAP ≥4%)
-   Stage-2: Dynamic filter (SL% 2-10%, recalculated every bar)
-   Stage-3: Tie-breaker (select best strike per option type)
-   Output: current_best dict (qualified strikes for CE and PE)
+   Stage-1: Static (price 100-300 Rs, VWAP ≥4%) — run once at swing formation
+   Stage-2: Dynamic (SL% 2-10%) — recalculated every tick
+   Stage-3: Tie-breaker (SL pts closest to 10, round strike, highest premium)
+   See STRIKE_FILTRATION_THEORY.md
 
 4. ORDER EXECUTION (order_manager.py)
-   Proactive placement: SL orders BEFORE swing breaks (trigger: swing_low - tick, limit: trigger - 3)
-   Position sizing: R-based formula (R_VALUE configurable, default ₹6,500)
-   Exit SL: SL orders at highest_high + 1 (trigger), +3 Rs buffer (limit)
+   Proactive SL orders BEFORE swing breaks: trigger=swing_low-tick, limit=trigger-3
+   Exit SL on fill: trigger=highest_high+1, limit=trigger+3
+   Position sizing: R_VALUE / (risk_per_unit × LOT_SIZE). See ORDER_EXECUTION_THEORY.md
 
 5. POSITION TRACKING (position_tracker.py)
    Monitor active positions, calculate R-multiples
@@ -80,804 +103,149 @@ git push --tags
 
 ---
 
-## Architecture: Continuous Filtering (Proactive Order Management)
-
-**Key Innovation:** Orders are placed BEFORE swing breaks, not after.
-
-```
-Flow:
-1. Swing LOW detected → Added to candidates (static filter: 100-300 Rs)
-2. EVERY BAR: Evaluate ALL candidates (dynamic filters: VWAP 4%+, SL 2-10%)
-3. Track best CE and best PE separately
-4. Best strike qualifies → Place SL order (trigger: swing_low - tick, limit: trigger - 3)
-5. Price drops to trigger → Order activates → Fills at limit price (no slippage)
-```
-
----
-
 ## File Structure (baseline_v1_live/)
 
-### Core Trading System
-| File | Purpose | Lines |
-|------|---------|-------|
-| `baseline_v1_live.py` | Main orchestrator, entry point | ~530 |
-| `config.py` | All configuration parameters | ~180 |
-| `data_pipeline.py` | WebSocket → 1-min OHLCV bars + VWAP | ~500 |
-| `swing_detector.py` | Multi-symbol swing low/high detection | ~350 |
-| `continuous_filter.py` | Two-stage filtering engine | ~300 |
-| `order_manager.py` | Proactive SL orders for entry + exit | ~680 |
-| `position_tracker.py` | R-multiple accounting | ~350 |
-| `state_manager.py` | SQLite persistence | ~280 |
-| `telegram_notifier.py` | Trade notifications | ~150 |
-
-### Utilities
 | File | Purpose |
 |------|---------|
+| `baseline_v1_live.py` | Main orchestrator (~530 lines) |
+| `config.py` | All configuration parameters (~180 lines) |
+| `data_pipeline.py` | WebSocket → 1-min OHLCV bars + VWAP (~500 lines) |
+| `swing_detector.py` | Multi-symbol swing detection (~350 lines) |
+| `continuous_filter.py` | Two-stage filtering engine (~300 lines) |
+| `order_manager.py` | Proactive SL orders entry + exit (~680 lines) |
+| `position_tracker.py` | R-multiple accounting (~350 lines) |
+| `state_manager.py` | SQLite persistence (~280 lines) |
+| `telegram_notifier.py` | Trade notifications (~150 lines) |
 | `check_system.py` | Pre-flight validation |
-| `strike_filter.py` | Strike selection helpers |
 | `monitor_dashboard/` | Streamlit monitoring dashboard |
-
-### Configuration
-| File | Purpose |
-|------|---------|
-| `.env` | API keys, trading mode (PAPER_TRADING=true/false) |
-| `config.py` | Position sizing, filters, timing |
 
 ---
 
 ## Key Configuration (config.py)
 
-All values below are **configurable** in config.py:
-
 ```python
-# Capital & Position Sizing
 TOTAL_CAPITAL = 10000000      # Rs.1 Crore
-R_VALUE = 6500                # Rs.6,500 per R (configurable risk per trade)
-MAX_POSITIONS = 5             # Max concurrent positions (configurable)
-MAX_LOTS_PER_POSITION = 15    # Safety cap on lots (configurable, R-based sizing is primary)
+R_VALUE = 6500                # Rs.6,500 per R
+MAX_POSITIONS = 5             # Max concurrent (also MAX_CE_POSITIONS=3, MAX_PE_POSITIONS=3)
+MAX_LOTS_PER_POSITION = 15    # Safety cap
 LOT_SIZE = 65                 # NIFTY lot size
 
-# Entry Filters (all configurable)
-MIN_ENTRY_PRICE = 100         # Minimum option price
-MAX_ENTRY_PRICE = 300         # Maximum option price
+MIN_ENTRY_PRICE = 100         # Option price range
+MAX_ENTRY_PRICE = 300
 MIN_VWAP_PREMIUM = 0.04       # 4% above VWAP required
-MIN_SL_PERCENT = 0.02         # 2% minimum SL
-MAX_SL_PERCENT = 0.10         # 10% maximum SL
+MIN_SL_PERCENT = 0.02         # SL range 2-10%
+MAX_SL_PERCENT = 0.10
 
-# Daily Exits (configurable)
-DAILY_TARGET_R = 5.0          # Exit all at +5R (configurable)
-DAILY_STOP_R = -5.0           # Exit all at -5R (configurable)
-FORCE_EXIT_TIME = time(15, 15) # Force exit at 3:15 PM
+DAILY_TARGET_R = 5.0          # Exit at +5R
+DAILY_STOP_R = -5.0           # Exit at -5R
+FORCE_EXIT_TIME = time(15, 15)
 
-# Angel One Backup Feed (from .env)
-ANGELONE_OPENALGO_API_KEY = ''  # Leave empty to disable failover
+# Angel One Backup Feed (.env)
+ANGELONE_OPENALGO_API_KEY = ''  # Empty = disable failover
 ANGELONE_HOST = 'http://127.0.0.1:5001'
 ANGELONE_WS_URL = 'ws://127.0.0.1:8766'
-FAILOVER_NO_TICK_THRESHOLD = 15  # Seconds before switching to Angel One
-FAILOVER_SWITCHBACK_THRESHOLD = 10  # Seconds of stable Zerodha ticks before switching back
+FAILOVER_NO_TICK_THRESHOLD = 15       # Seconds before switching
+FAILOVER_SWITCHBACK_THRESHOLD = 10    # Seconds stable before switchback
 ```
-
----
-
-## Swing Detection Logic
-
-The swing detector uses a **watch-based system** - a confirmation-voting mechanism where future bars validate past turning points.
-
-### Core Concept
-
-A **swing** is a significant turning point where trends change:
-- **Swing Low**: A local minimum - price makes a low, then moves higher
-- **Swing High**: A local maximum - price makes a high, then moves lower
-
-### Watch-Based Confirmation System
-
-Each bar in history gets **watch counters** that increment when future bars confirm it might be a turning point:
-
-**For Swing LOW Detection:**
-- A bar's `low_watch` counter increments when a future bar shows:
-  1. **Higher High** AND
-  2. **Higher Close**
-- Logic: If price makes higher highs/closes vs a past bar, that bar was likely a low point
-
-**For Swing HIGH Detection:**
-- A bar's `high_watch` counter increments when a future bar shows:
-  1. **Lower Low** AND
-  2. **Lower Close**
-- Logic: If price makes lower lows/closes vs a past bar, that bar was likely a high point
-
-### Trigger Rule
-
-When any bar's watch counter reaches **2**:
-- **For low_watch = 2**: Find the **lowest low** in the window → Mark as **SWING LOW**
-- **For high_watch = 2**: Find the **highest high** in the window → Mark as **SWING HIGH**
-
-**Why "2"?** One confirmation could be noise. Two confirmations validate the turning point.
-
-### Alternating Pattern
-
-Valid swings must alternate:
-```
-High → Low → High → Low → High → Low
-```
-
-After a swing low, the next swing must be a high. After a high, the next must be a low.
-
-### Swing Updates (Same Direction)
-
-If a **new extreme** forms BEFORE the next alternating swing, AND gets 2-watch confirmation:
-- **Swing LOW @ 80** detected
-- Before any HIGH, price drops to **75** (new lower low)
-- Wait for 2 watch confirmations (HH+HC pattern twice)
-- **Action**: UPDATE the swing low from 80 → 75
-- **Reason**: 75 is the true extreme, not the premature 80
-
-**Key Point:** Updates are NOT immediate - they require the same 2-watch confirmation as initial swings. This prevents noise and false signals from being marked as swing updates.
-
-This ensures we always track the TRUE extremes, not intermediate levels.
-
-### Window Behavior
-
-- **First swing**: From start of data to current bar
-- **Subsequent swings**: From bar AFTER last swing to current bar
-
-This keeps the analysis focused on current wave formation only.
-
-**Validation:** Watch-based system validated through historical testing
-
----
-
-## Strike Filtration Logic
-
-Strike filtration is the process of evaluating swing candidates to determine which options qualify for order placement. This happens **AFTER swing detection** but **BEFORE order execution**.
-
-The system uses a **two-stage approach**: Static filters (run once) and Dynamic filters (run continuously).
-
-### Stage 1: Static Filter (Run Once)
-
-Applied **immediately when swing forms**, never rechecked.
-
-**Criteria:**
-
-1. **Price Range**
-   - Rule: `MIN_ENTRY_PRICE ≤ Entry Price ≤ MAX_ENTRY_PRICE`
-   - Entry Price = Swing Low (the option premium at swing formation)
-   - Default: 100-300 Rs range
-
-2. **VWAP Premium**
-   - Rule: `VWAP Premium ≥ MIN_VWAP_PREMIUM` (4% by default)
-   - Formula: `((Entry - VWAP) / VWAP) × 100`
-   - VWAP is frozen at swing formation time (immutable)
-
-**When Applied:**
-```
-Swing forms → Check price range → Check VWAP premium
-    ↓
-Pass both → Add to swing_candidates (static pool)
-Fail either → Log rejection, discard swing
-```
-
-### Stage 2: Dynamic Filter (Tick-Level Evaluation)
-
-Applied **every tick** to all candidates in `swing_candidates`. Current bar's high updates with each tick.
-
-**SL% Filter (Truly Dynamic):**
-- Rule: `MIN_SL_PERCENT ≤ SL% ≤ MAX_SL_PERCENT` (2-10% by default, configurable)
-- Formula:
-  ```
-  Highest High = Maximum high since swing formation (includes current bar's high, updates each tick)
-  Entry Price = Swing low
-  SL Price = Highest High + 1 Rs (buffer for slippage)
-  SL% = (SL Price - Entry Price) / Entry Price × 100
-  ```
-
-**Why SL% is Dynamic:**
-- Highest High updates every tick (current bar's high tracked in real-time)
-- SL% can change from passing → failing mid-bar
-- Example: Bar starts SL%=8% ✓ → Tick pushes high up → SL%=11% ❌ (disqualified immediately)
-
-**Evaluation Frequency:**
-- **Swing detection**: On bar close (needs complete OHLC)
-- **Filter evaluation**: Every tick (real-time SL% accuracy)
-- Order placed immediately when strike qualifies
-
-### Stage 3: Tie-Breaker (Best Strike Selection)
-
-When **multiple strikes pass all filters** for the same option type (CE or PE), select ONE using:
-
-**Rule 1: SL Points Closest to 10 Rs (Primary)**
-- Target: 10 points (optimized for R_VALUE, configurable)
-- Formula: `sl_distance = abs(sl_points - 10)`
-- Example: 8pts (distance=2), 12pts (distance=2), 9pts (distance=1) ← **BEST**
-
-**Rule 2: Strike Multiple of 100 (Secondary Tie-Breaker)**
-- If multiple strikes have same SL distance, prefer strikes that are multiples of 100
-- Why: Round strikes (24000, 24100, 24200) have better liquidity than odd strikes (24050, 24150)
-- Strike extraction from symbol: `NIFTY06JAN2626200CE` → Strike = 26200 → 26200 % 100 == 0 ✓
-
-**Rule 3: Highest Entry Price (Final Tie-Breaker)**
-- If still tied (same SL distance AND both multiples of 100), prefer higher premium
-
-### Filter State Tracking
-
-**swing_candidates (dict):**
-- All swings that passed static filters (price range + VWAP premium)
-- Never re-evaluated after insertion
-- Only swings in this pool are eligible for dynamic SL% filtering
-
-**qualified_candidates (list):**
-- Swings from `swing_candidates` that currently pass dynamic SL% filter
-- Refreshed every tick/bar (mutable)
-
-**current_best (dict):**
-- The single best strike per option type (CE/PE) selected from qualified_candidates
-- Eligible for order placement
-- Updated every evaluation cycle
-
-### Filter Flow Example
-
-**Time: 10:15 AM - New Swing Detected**
-```
-Swing: NIFTY06JAN2626250CE @ 125.00 (swing low)
-VWAP: 118.00
-
-Step 1: Static Filter
-- Check: 100 ≤ 125 ≤ 300 ✓ PASS
-- Premium: (125-118)/118 = 5.93% ✓ PASS (≥4%)
-- Action: Add to swing_candidates
-
-Step 2: Dynamic Filter (10:15 AM)
-- Highest High: 130.00
-- SL Price: 131 (includes +1 Rs buffer)
-- SL%: (131-125)/125 = 4.8% ✓ PASS (2-10%)
-- Action: Add to qualified_candidates
-
-Step 3: Tie-Breaker
-- Only one CE qualified → Automatically best
-```
-
-**Evolution Over Time:**
-- 10:20 AM: SL% = 8.8% ✓ Still qualified
-- 10:30 AM: SL% = 12.0% ❌ DISQUALIFIED (exceeds 10%)
-
----
-
-## Order Flow
-
-### Core Concept: Proactive vs Reactive
-
-**Reactive Approach (Legacy):**
-```
-1. Swing low breaks (price < swing_low)
-2. System detects break
-3. Place MARKET order
-4. Get filled at current price (slippage!)
-```
-
-**Proactive Approach (Current - What We Do):**
-```
-1. Swing low detected and qualified
-2. Place SL order BEFORE break:
-   - Trigger: swing_low - tick_size (e.g., swing_low - 0.05)
-   - Limit: trigger - 3 Rs (buffer for fill)
-3. Order sits dormant until trigger hit
-4. When price drops to trigger → Order activates as limit order
-5. Fills at limit price with no slippage!
-```
-
-### Order Placement Trigger
-
-Orders are placed only when a strike passes all three filter stages:
-
-1. **Stage-1 (Static)**: Price range + VWAP premium ✓
-2. **Stage-2 (Dynamic)**: SL% within limits ✓
-3. **Stage-3 (Tie-Breaker)**: Selected as best strike per option type ✓
-
-Plus position availability checks (max positions, no duplicate orders)
-
-### Entry Order: SL (Stop-Limit)
-
-```python
-# When strike qualifies:
-tick_size = 0.05
-trigger_price = swing_low - tick_size      # Trigger just below swing
-limit_price = trigger_price - 3            # 3 Rs buffer for fill
-
-order = client.placeorder(
-    strategy="baseline_v1",
-    symbol="NIFTY30DEC2526000CE",
-    action="SELL",              # Short the option
-    exchange="NFO",
-    price_type="SL",            # Stop-Limit order
-    trigger_price=trigger_price,
-    price=limit_price,
-    quantity=lots * LOT_SIZE,
-    product="MIS"               # Intraday
-)
-```
-
-**Why SL (Stop-Limit), not regular LIMIT?**
-- Order sits dormant until trigger price is hit
-- Prevents fills if price never reaches our entry level
-- When triggered, becomes a limit order with price control
-- Better entry timing aligned with swing break
-
-**Price Calculation:**
-- `trigger_price = swing_low - 0.05` (1 tick below swing)
-- `limit_price = trigger_price - 3` (3 Rs buffer below trigger)
-- When price drops to trigger → Order activates → Fills at limit or better
-
-### Position Sizing
-
-Formula based on R_VALUE:
-
-```
-Risk per unit = Entry Price - SL Price
-Required lots = R_VALUE / (Risk per unit × LOT_SIZE)
-Final lots = min(Required lots, MAX_LOTS_PER_POSITION)
-Final quantity = Final lots × LOT_SIZE
-
-Example:
-Entry: 150 Rs
-SL: 160 Rs
-Risk per unit: 10 Rs
-Required lots: 6500 / (10 × 65) = 10 lots
-Quantity: 10 × 65 = 650 shares
-```
-
-### Exit Stop Loss Order: SL (Placed on Fill)
-
-```python
-# SL placed IMMEDIATELY when entry fills:
-trigger_price = highest_high + 1    # +1 Rs buffer above highest high
-limit_price = trigger_price + 3     # +3 Rs buffer for fill
-
-sl_order = client.placeorder(
-    strategy="baseline_v1",
-    symbol="NIFTY30DEC2526000CE",
-    action="BUY",              # Close the short
-    exchange="NFO",
-    price_type="SL",           # Stop-Limit order
-    trigger_price=trigger_price,
-    price=limit_price,
-    quantity=lots * LOT_SIZE,
-    product="MIS"
-)
-```
-
-**Why SL (Stop-Limit) instead of Market?**
-- Market orders can have extreme slippage in fast markets
-- SL with 3 Rs buffer ensures reasonable fill
-- Better control over exit price
-
-**+1 Rs Buffer in Trigger Calculation:**
-- Accounts for tick-level slippage during volatile moves
-- Prevents premature exits at exact highest high level
-- Ensures SL triggers reliably
-
-### Order Lifecycle States
-
-```
-NO_ORDER → ORDER_PLACED → ORDER_FILLED → POSITION_ACTIVE → EXITED
-   ↓           ↓              ↓               ↓             ↓
-REJECTED   CANCELLED      SL_HIT         CLOSED        LOGGED
-```
-
-**State Transitions:**
-
-1. **NO_ORDER → ORDER_PLACED**
-   - Trigger: Strike passes all filters
-   - Action: Place SL order (trigger: swing_low - tick, limit: trigger - 3)
-
-2. **ORDER_PLACED → ORDER_FILLED**
-   - Trigger: Order status = COMPLETE (checked every 10 seconds)
-   - Action: Create position, place SL-L order immediately
-
-3. **ORDER_PLACED → CANCELLED**
-   - Triggers:
-     - Disqualification (SL% exceeds MAX_SL_PERCENT)
-     - Different strike becomes best (tie-breaker selects new winner)
-     - Daily limits hit (DAILY_TARGET_R or DAILY_STOP_R reached)
-     - Market close approaching (FORCE_EXIT_TIME)
-     - System shutdown
-   - **NOT a cancellation reason**: Swing breaking - that's the ENTRY TRIGGER!
-
-4. **POSITION_ACTIVE → EXITED**
-   - Triggers: SL hit, target hit, or force exit
-   - Action: Log trade with R-multiple
-
-### Order Modification Rules
-
-**When to Modify (keep same symbol):**
-- Same symbol remains best candidate
-- Swing low gets updated (e.g., 80 → 75)
-- Modify order trigger/limit to: new_swing_low - tick, trigger - 3
-
-**When to Cancel and Replace (different symbol):**
-- Different strike becomes best
-- Cancel old symbol's order
-- Place new order for new symbol
-
-### Important Rules
-
-**Rule 1: Keep Orders Once Placed**
-- Don't cancel just because price moves away from swing
-- Only cancel if disqualified (SL% out of range) or better strike available
-
-**Rule 2: One Order Per Option Type**
-- Maximum one pending CE order
-- Maximum one pending PE order
-- Cancel old if new best strike selected
-
-**Rule 3: Proactive Placement**
-- Place orders BEFORE swing breaks
-- Orders wait in market (not reactive after break)
 
 ---
 
 ## Running the System
 
-### Start OpenAlgo Instances First
-
-**Step 1: Start Zerodha OpenAlgo (Primary — orders + data)**
 ```powershell
-cd D:\nifty_options_agent\openalgo-zerodha\openalgo
-python app.py
-```
+# Start Zerodha OpenAlgo (Primary)
+cd D:\nifty_options_agent\openalgo-zerodha\openalgo && python app.py
 
-**Step 2: Start Angel One OpenAlgo (Backup — data feed only)**
-```powershell
-cd D:\nifty_options_agent\openalgo-angelone\openalgo
-python app.py
-```
-- Angel One is optional; if not running, strategy runs on Zerodha only (no failover)
-- Log in to Angel One at http://127.0.0.1:5001 (session expires daily, must refresh)
+# Start Angel One OpenAlgo (Backup, optional)
+cd D:\nifty_options_agent\openalgo-angelone\openalgo && python app.py
 
-### Run System Check
-```powershell
-cd D:\nifty_options_agent
+# System check
 python -m baseline_v1_live.check_system
-```
 
-### Start Trading (Paper Mode)
-```powershell
-cd D:\nifty_options_agent
+# Start trading (paper mode)
 python -m baseline_v1_live.baseline_v1_live --expiry 30JAN25 --atm 23500
-```
-
-### Go Live (Change .env)
-```bash
-# Edit baseline_v1_live/.env
-PAPER_TRADING=false
 ```
 
 ---
 
 ## EC2 Deployment (Production)
 
-### Infrastructure
-- **EC2 Instance**: Ubuntu 22.04 on AWS
-- **Elastic IP**: 13.233.211.15 (static)
-- **Domain**: ronniedreams.in
-- **SSL**: Let's Encrypt (auto-renews)
+- **EC2**: Ubuntu 22.04 | **IP**: 13.233.211.15 | **Domain**: ronniedreams.in
+- **SSH**: `ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15`
+- **Deploy**: `cd ~/nifty_options_agent && ./deploy.sh`
+- **Basic Auth**: admin / Trading@2026
 
-### URLs (Password Protected)
 | Service | URL |
 |---------|-----|
 | OpenAlgo Dashboard | https://openalgo.ronniedreams.in |
 | Monitor Dashboard | https://monitor.ronniedreams.in |
 
-**Basic Auth Credentials:**
-- Username: `admin`
-- Password: `Trading@2026`
-
-### SSH Access
+**Docker commands:**
 ```bash
-ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15
-```
-
-### Deploy Updates to EC2
-After pushing changes to GitHub:
-```bash
-# SSH into EC2
-ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15
-
-# Run deploy script
-cd ~/nifty_options_agent
-./deploy.sh
-```
-
-### Manual Docker Commands on EC2
-```bash
-cd ~/nifty_options_agent
-
-# View container status
 docker-compose ps
-
-# View logs
 docker-compose logs -f trading_agent
-docker-compose logs -f openalgo
-
-# Restart all services
-docker-compose down && docker-compose up -d
-
-# Restart single service
 docker-compose restart trading_agent
+docker-compose down && docker-compose up -d
 ```
 
-### Directory Structure on EC2
-```
-~/nifty_options_agent/
-├── openalgo-zerodha/openalgo/   # OpenAlgo broker integration
-├── baseline_v1_live/            # Trading strategy
-├── docker-compose.yaml          # Container orchestration
-├── deploy.sh                    # Deployment script
-└── .env                         # Environment variables
-```
-
-### Nginx Configuration
-Location: `/etc/nginx/sites-available/ronniedreams.in`
-
-To modify basic auth password:
+**Three-Way Sync (Laptop → GitHub → EC2):**
 ```bash
-sudo htpasswd /etc/nginx/.htpasswd admin
-sudo systemctl reload nginx
+# Laptop: git add . && git commit -m "msg" && git push origin <branch>
+# EC2:    cd ~/nifty_options_agent && ./deploy.sh
 ```
-
-### SSL Certificate Renewal
-Certbot auto-renews. Manual renewal:
-```bash
-sudo certbot renew
-```
-
-### Three-Way Sync Workflow (IMPORTANT for Claude Code)
-
-**Environment Setup:**
-- **Laptop** (Windows): Local development, uses HTTPS for GitHub
-- **GitHub**: Central repository (feature/docker-ec2-fixes branch)
-- **EC2**: Production server, uses SSH for GitHub
-
-**Laptop → GitHub → EC2 (Most Common):**
-```bash
-# 1. On laptop - commit and push
-git add . && git commit -m "message" && git push origin feature/docker-ec2-fixes
-
-# 2. On EC2 - pull and deploy
-ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15
-cd ~/nifty_options_agent && ./deploy.sh
-```
-
-**EC2 → GitHub → Laptop:**
-```bash
-# 1. On EC2 - commit and push
-cd ~/nifty_options_agent
-git add . && git commit -m "message" && git push origin feature/docker-ec2-fixes
-
-# 2. On laptop - pull
-git pull origin feature/docker-ec2-fixes
-```
-
-**CRITICAL RULES for Claude Code:**
-1. **Always check git status** on both laptop and EC2 before making changes
-2. **Never force push** - always resolve conflicts properly
-3. **EC2 is production** - test changes locally first when possible
-4. **After any code change on EC2**, commit and push to keep all three in sync
-5. **docker-compose.yaml** has EC2-specific paths - don't change volume mounts without testing
-6. **SSH key for EC2→GitHub**: `~/.ssh/github_key` (already configured)
-
----
-
-## Common Tasks
-
-### Check Why No Trades
-Look at filter summary logs:
-```
-[FILTER-SUMMARY] 8 candidates, 0 qualified. Rejections: VWAP<4%=5, SL<2%=0
-```
-- `VWAP<4%`: Swing low price is below VWAP (need price 4%+ ABOVE VWAP)
-- `SL<2%` or `SL>10%`: Stop loss percentage outside acceptable range
-
-### Modify Entry Filters
-Edit `config.py`:
-```python
-MIN_VWAP_PREMIUM = 0.04  # Reduce to 0.02 for more trades
-```
-
-### Check Swing Detection
-The swing detector uses watch-based confirmation. If issues:
-1. Check logs for `[SWING]` tags
-2. Verify alternating pattern (High → Low → High → Low)
-
-### Debug Data Pipeline
-```python
-# Check coverage in heartbeat logs:
-[HEARTBEAT] Positions: 0 | Data: 82/82 | Coverage: 100.0% | Stale: 0
-```
+- Never force push | EC2 is production — test locally first
+- SSH key for EC2→GitHub: `~/.ssh/github_key`
 
 ---
 
 ## Database Schema (live_state.db)
 
 ```sql
--- Positions table
 positions (symbol, entry_price, quantity, sl_price, entry_time, status, pnl, r_multiple)
-
--- Orders table
 orders (order_id, symbol, order_type, price, quantity, status, timestamp)
-
--- Daily summary
 daily_summary (date, total_trades, winning_trades, cumulative_r, pnl)
-
--- Swing detection log
 swing_log (symbol, swing_type, price, timestamp, vwap)
 ```
+WAL mode enabled. Do NOT clear positions/orders/daily_state on restart (crash recovery).
 
 ---
 
-## Crash Recovery System
+## Crash Recovery
 
-The system automatically persists state to SQLite and recovers on same-day restart.
+On startup: loads positions/orders/daily_state from DB → reconciles with live broker orderbook.
 
-### What Gets Persisted
-
-**Positions:**
-- Open positions with entry price, SL price, quantity
-- R-value (actual_R) for each position
-- Entry time and current P&L
-- Candidate info (strike, option_type, lots)
-
-**Orders:**
-- Pending limit orders (not yet filled)
-- Active SL orders (exit orders for open positions)
-- Order details: symbol, trigger_price, limit_price, quantity
-
-**Daily State:**
-- Daily exit triggered flag
-- Daily exit reason (target/stop)
-- Cumulative R-multiple
-- Total P&L
-
-### Recovery Flow
-
-**1. On Startup (`__init__`):**
-```python
-# Load state from database
-load_state()
-  ├─ Load open positions → Restore to position_tracker
-  ├─ Load pending orders → Restore to order_manager
-  └─ Load daily state → Restore exit flags
-```
-
-**2. After Pipeline Connects (`start()`):**
-```python
-# Reconcile with broker after data loads
-_reconcile_restored_orders()
-  ├─ Get live orderbook from broker
-  ├─ Compare with restored orders
-  ├─ Detect fills during crash window
-  ├─ Place missing SL orders
-  └─ Cancel stale orders
-```
-
-### Same-Day Restart Behavior
-
-**What's Preserved:**
-- Dashboard trade_date (no reset if same day)
-- Open positions and their P&L
-- Pending entry orders
-- Daily cumulative metrics
-
-**What's Recalculated:**
-- Swing candidates (from historical bars)
-- Filter state (from current market data)
-- In-memory bar buffers
-
-### Broker Reconciliation
-
-After crash, the system reconciles orders with broker:
-
-**Order Status Mapping:**
-```
-DB: PENDING → Broker: COMPLETE → Action: Process fill
-DB: PENDING → Broker: OPEN → Action: Keep order
-DB: PENDING → Broker: REJECTED → Action: Clean up
-DB: SL_ACTIVE → Broker: MISSING → Action: Re-place SL
-```
-
-**Fill Detection:**
-- Orders marked PENDING in DB but COMPLETE on broker = filled during crash
-- System processes fills: creates position, places SL order
-- Telegram notification sent for discovered fills
-
-**Missing SL Orders:**
-- If position exists but SL order missing on broker → Critical alert
-- System attempts to re-place SL order immediately
-- User notified via Telegram (CRITICAL tag)
-
-### Recovery Testing
-
-To test crash recovery:
-```bash
-# 1. Start strategy, let it create positions
-python -m baseline_v1_live.baseline_v1_live --auto
-
-# 2. Simulate crash (Ctrl+C)
-
-# 3. Restart same day
-python -m baseline_v1_live.baseline_v1_live --auto
-
-# Expected logs:
-# [RECOVERY] Restoring state from database...
-# [RECOVERY] Restored X positions and Y orders
-# [RECOVERY] Reconciling restored orders with broker...
-```
-
-### Database Files
-
-- **live_state.db**: Main database (SQLite with WAL mode)
-- **live_state.db-shm**: Shared memory file (auto-generated)
-- **live_state.db-wal**: Write-ahead log (auto-generated)
-
-WAL mode enabled for:
-- Better concurrency
-- Crash safety
-- Atomic commits
+**Order reconciliation:**
+- DB PENDING + Broker COMPLETE → process fill, place SL
+- DB PENDING + Broker OPEN → keep
+- DB PENDING + Broker REJECTED → clean up
+- DB SL_ACTIVE + Broker MISSING → re-place SL, send CRITICAL Telegram alert
 
 ---
 
 ## Important Patterns
 
-### Time Handling
-Always use IST:
 ```python
-import pytz
-IST = pytz.timezone('Asia/Kolkata')
-now = datetime.now(IST)
-```
+# Time: always IST
+IST = pytz.timezone('Asia/Kolkata'); now = datetime.now(IST)
 
-### Symbol Format
-```python
-# Format: NIFTY[DDMMMYY][STRIKE][CE/PE]
-symbol = f"NIFTY{expiry}{strike}CE"
-# Example: NIFTY30DEC2526000CE
-```
+# Symbol format: NIFTY[DDMMMYY][STRIKE][CE/PE]
+symbol = f"NIFTY{expiry}{strike}CE"  # e.g. NIFTY30DEC2526000CE
 
-### Error Handling
-- All broker calls have 3-retry logic with 2-second delay
-- WebSocket auto-reconnects on disconnect
-- State persists to SQLite (crash recovery)
-
-### Logging
-```python
-import logging
-logger = logging.getLogger(__name__)
-logger.info("[TAG] Message")  # Use tags like [SWING], [ORDER], [FILL]
+# Logging
+logger.info("[TAG] Message")  # Tags: [SWING], [ORDER], [FILL], [RECOVERY]
 ```
+- Broker calls: 3-retry with 2s delay | WebSocket: auto-reconnects | State: SQLite WAL
 
 ---
 
 ## Safety Rules
 
-All limits below are **configurable** in config.py:
-
-1. **Never skip Analyzer Mode** - Always test with PAPER_TRADING=true first
-2. **Position limits enforced** - MAX_POSITIONS (default 5), MAX_CE_POSITIONS (default 3), MAX_PE_POSITIONS (default 3)
-3. **Daily stops** - Auto-exit at DAILY_TARGET_R/DAILY_STOP_R (default +/-5R)
-4. **Force exit** - All positions closed at FORCE_EXIT_TIME (default 3:15 PM)
-5. **Reconciliation** - Positions synced with broker every 60 seconds
-6. **R-based position sizing** - Primary sizing via R_VALUE formula, MAX_LOTS_PER_POSITION as safety cap
-
----
-
-## Historical Data
-
-Located in `data/`:
-
-| File | Purpose |
-|------|---------|
-| `rl_dataset_v2.parquet` | Historical NIFTY options data |
-| `rl_dataset_v2_with_spot.parquet` | Historical data with spot prices |
-
-Note: Backtest files are maintained separately. This folder focuses on live trading only.
+1. Always test with PAPER_TRADING=true first
+2. Position limits: MAX_POSITIONS=5, MAX_CE/PE_POSITIONS=3
+3. Daily stops: auto-exit at DAILY_TARGET_R/DAILY_STOP_R (+/-5R)
+4. Force exit all at FORCE_EXIT_TIME (3:15 PM)
+5. Positions synced with broker every 60 seconds
+6. R-based sizing is primary; MAX_LOTS_PER_POSITION is safety cap
 
 ---
 
@@ -885,280 +253,98 @@ Note: Backtest files are maintained separately. This folder focuses on live trad
 
 | Issue | Solution |
 |-------|----------|
-| No ticks received | Check OpenAlgo WebSocket, broker login |
+| No ticks | Check OpenAlgo WebSocket, broker login |
 | All candidates rejected | Check VWAP filter (price must be 4%+ above VWAP) |
 | Orders not placing | Verify API key, check order_manager logs |
-| Swings not detecting | Compare with backtest logic, check bar formation |
-| Position mismatch | Check reconciliation logs, verify broker dashboard |
-| Failover not triggering | Check Angel One OpenAlgo running at port 5001, verify ANGELONE_OPENALGO_API_KEY in .env |
-| Stuck on Angel One (no switchback) | Check Zerodha reconnection logs; `last_zerodha_tick_time` must update for switchback |
+| Swings not detecting | Check `[SWING]` logs, verify alternating pattern |
+| Position mismatch | Check reconciliation logs |
+| Failover not triggering | Check Angel One at port 5001, verify ANGELONE_OPENALGO_API_KEY |
+| Stuck on Angel One | Check Zerodha reconnection logs; `last_zerodha_tick_time` must update |
+
+**Filter debug:**
+```
+[FILTER-SUMMARY] 8 candidates, 0 qualified. Rejections: VWAP<4%=5, SL<2%=0
+```
 
 ---
 
-## Related Projects
+## 🔍 Debugging Order Issues — Log Sources
 
-- **OpenAlgo** (`D:\nifty_options_agent\openalgo-zerodha\openalgo`) - Broker integration platform (must be running for live trading)
+When investigating order problems, check these sources **in order**:
 
----
+### 1. OpenAlgo API Analyzer (BEST for order debugging)
+The OpenAlgo dashboard has a built-in **API Analyzer** that logs every API call (place order, cancel, orderbook, etc.) with full request/response details. **This persists across EC2 restarts** because it's stored in a named Docker volume (`openalgo_data:/app/db`).
 
-## Contact Points
+- **Local:** http://127.0.0.1:5000 → API Analyzer tab
+- **EC2:** https://openalgo.ronniedreams.in → API Analyzer tab (admin / Trading@2026)
 
-- OpenAlgo Dashboard: http://127.0.0.1:5000
-- WebSocket Proxy: ws://127.0.0.1:8765
-- Telegram Bot: Configured in .env (TELEGRAM_BOT_TOKEN)
+Use this to see: exact order payloads, broker responses, cancel confirmations, fill timestamps.
 
----
+### 2. Trading Agent Python Logs (ephemeral — lost on container restart)
+- **Live (container running):** `docker logs baseline_v1_live 2>&1 | grep <pattern>`
+- **On disk (persisted since fix):** `~/nifty_options_agent/baseline_v1_live/logs/baseline_v1_live_YYYYMMDD.log`
+- Note: Logs were NOT persisted before the docker-compose volume fix (Feb 13, 2026). Logs prior to that date may be unavailable.
 
-## 📚 Deep Dive Theory Documents
-
-For comprehensive understanding, refer to parent documentation:
-
-| Document | Focus | Key Topics |
-|----------|-------|-----------|
-| **SWING_DETECTION_THEORY.md** | Swing identification mechanism | Watch-based confirmation, alternating patterns, swing updates, window behavior |
-| **STRIKE_FILTRATION_THEORY.md** | Multi-stage filter pipeline | Static filters, dynamic filters, tie-breaker rules, pool state tracking |
-| **ORDER_EXECUTION_THEORY.md** | Order placement and lifecycle | Proactive vs reactive, position sizing, order states, modification rules |
+### 3. SQLite Database
+- Located at `~/nifty_options_agent/baseline_v1_live/live_state.db` (host) or `/app/state/live_state.db` (container via named volume — persists)
+- Tables: `pending_orders`, `trade_log`, `positions`, `order_triggers`
+- Query via Python inside container: `docker exec baseline_v1_live python3 -c "import sqlite3; ..."`
 
 ---
 
-## 🎯 Modular Rules (for Claude Code context)
+## 📚 Theory Documents
 
-See `.claude/rules/` for path-specific rules:
+| Document | Topics |
+|----------|--------|
+| `SWING_DETECTION_THEORY.md` | Watch-based confirmation, alternating patterns, swing updates |
+| `STRIKE_FILTRATION_THEORY.md` | Static/dynamic filters, tie-breaker rules, pool state |
+| `ORDER_EXECUTION_THEORY.md` | Proactive placement, position sizing, order lifecycle |
 
-- **trading-rules.md** → For baseline_v1_live.py, order_manager.py, position_tracker.py
-- **swing-detection-rules.md** → For swing_detector.py, continuous_filter.py
-- **data-pipeline-rules.md** → For data_pipeline.py
-- **openalgo-integration-rules.md** → For all OpenAlgo API/WebSocket integration
-- **safety-rules.md** → Critical constraints and validations
+## 🎯 Modular Rules (`.claude/rules/`)
 
-Each rule file includes:
-- Path-specific conditions (paths: ...)
-- Detailed implementation rules
-- Common gotchas and edge cases
-- Validation checkpoints
-
-### OpenAlgo Integration (NEW!)
-
-Comprehensive guide for broker API integration:
-- Order placement (SL orders for entry and exit)
-- WebSocket data feed management
-- Position reconciliation
-- Error handling & retry logic
-- Rate limiting & backoff
-- Testing & paper trading
-
-See **openalgo-integration-rules.md** for complete details.
+- `trading-rules.md` → baseline_v1_live.py, order_manager.py, position_tracker.py
+- `swing-detection-rules.md` → swing_detector.py, continuous_filter.py
+- `data-pipeline-rules.md` → data_pipeline.py
+- `openalgo-integration-rules.md` → all OpenAlgo API/WebSocket integration
+- `safety-rules.md` → critical constraints and validations
 
 ---
 
-## Sub-Agents Architecture
+## Sub-Agents
 
-The system uses specialized sub-agents to handle different functional domains. This reduces context clutter and enables focused expertise for each area.
+**Reference:** `.claude/SUB_AGENTS_REFERENCE.md`
 
-**Complete Reference:** See `.claude/SUB_AGENTS_REFERENCE.md` for detailed documentation on each agent, including domain knowledge, use cases, and investigation examples.
-
-### Agent Types
-
-**Skills** (Slash Commands) - Interactive work with specialized context. User stays in conversation.
-- Invoke with `/skill-name` (e.g., `/trading-strategy`, `/pre-commit`)
-- Located in `.claude/skills/<skill-name>/SKILL.md`
-
-**Subagents** - Autonomous delegation. Agent works independently and returns results.
-- Invoke via Task tool with `subagent_type` parameter
-- Located in `.claude/agents/`
-- Built-in: `Explore`, `Plan`, `Bash`, `general-purpose`
-- Custom: Our domain-specific agents (e.g., `trading-strategy-agent`)
-
-### Available Agents
-
-#### Domain Agents (6)
-
-| Agent | Skill | Subagent | Responsibility |
-|-------|-------|------------|----------------|
-| Trading Strategy | `/trading-strategy` | `trading-strategy-agent` | Swing detection, filtration, tie-breakers |
-| Order Execution | `/order-execution` | `order-execution-agent` | Orders, positions, R-multiples |
-| Broker Integration | `/broker-integration` | `broker-integration-agent` | OpenAlgo API, WebSocket |
-| State Management | `/state-management` | `state-management-agent` | Database, persistence |
-| Monitoring Alerts | `/monitoring-alerts` | `monitoring-alerts-agent` | Dashboard, Telegram |
-| Infrastructure | `/infrastructure` | `infrastructure-agent` | Config, Docker, EC2 |
-
-#### Quality Agents (4)
-
-| Agent | Skill | Subagent | Responsibility |
-|-------|-------|------------|----------------|
-| Code Reviewer | `/code-reviewer` | `code-reviewer-agent` | Safety, patterns, bugs |
-| Integration Checker | `/integration-checker` | `integration-checker-agent` | Cross-module impact |
-| Test Runner | `/test-runner` | `test-runner-agent` | Testing, validation |
-| E2E Workflow | `/e2e-workflow` | `e2e-workflow-agent` | Pipeline validation |
-
-#### Workflow Skills (1)
-
-| Skill | Purpose |
-|-------|---------|
-| `/pre-commit` | Orchestrate quality checks before commit |
-
-### Quick Reference: When to Use Which Agent
-
-| User Intent | Agent |
-|-------------|-------|
-| Swing not detecting | `trading-strategy` |
-| Candidate disqualified | `trading-strategy` |
-| Tie-breaker wrong | `trading-strategy` |
-| Order cancelled unexpectedly | `order-execution` |
-| Position sizing wrong | `order-execution` |
-| Daily limit not triggering | `order-execution` |
-| WebSocket dropping | `broker-integration` |
-| Ticks stopped | `broker-integration` |
-| Order API error | `broker-integration` |
-| Crash recovery | `state-management` |
-| Database query | `state-management` |
-| Schema migration | `state-management` |
-| Dashboard issue | `monitoring-alerts` |
-| Add Telegram alert | `monitoring-alerts` |
-| Deploy to EC2 | `infrastructure` |
-| Docker issue | `infrastructure` |
-| Config change | `infrastructure` |
-| Review code changes | `code-reviewer` |
-| Check module impact | `integration-checker` |
-| Run tests | `test-runner` |
-| Validate pipeline | `e2e-workflow` |
-| Quality checks before commit | `pre-commit` |
-
-### Cross-Agent Workflows
-
-#### New Trade Entry Flow
-```
-trading-strategy → order-execution → broker-integration → state-management → monitoring-alerts
-     |                  |                  |                   |                  |
-  Qualifies         Places SL          Sends to           Persists          Sends
-  candidate         entry order        OpenAlgo           position          Telegram
-```
-
-#### Debugging Failed Trade
-```
-1. trading-strategy: Check if swing qualified
-2. order-execution: Check if order was placed/filled
-3. broker-integration: Check OpenAlgo logs/errors
-4. state-management: Query order history
-```
-
-#### Pre-Commit Workflow
-```
-1. Identify changes → 2. Code review → 3. Integration check
-                                              ↓
-4. System validation ← 5. E2E check (if trading logic) → 6. Commit
-```
-
-### Context Files Per Agent
-
-Each agent loads specific context before working:
-
-| Agent | Primary Context | Secondary Context |
-|-------|-----------------|-------------------|
-| `trading-strategy` | SWING_DETECTION_THEORY.md, STRIKE_FILTRATION_THEORY.md | swing-detection-rules.md |
-| `order-execution` | ORDER_EXECUTION_THEORY.md | trading-rules.md |
-| `broker-integration` | openalgo-integration-rules.md | data-pipeline-rules.md |
-| `state-management` | trading-rules.md (State section) | CLAUDE.md (Schema) |
-| `monitoring-alerts` | TELEGRAM_SETUP.md | safety-rules.md |
-| `infrastructure` | DAILY_STARTUP.md, PRE_LAUNCH_CHECKLIST.md | safety-rules.md |
-| `code-reviewer` | safety-rules.md, trading-rules.md | All theory files |
-| `integration-checker` | CLAUDE.md (Architecture) | Module dependency graph |
-| `test-runner` | Theory files | check_system.py |
-| `e2e-workflow` | All theory files | CLAUDE.md (Architecture) |
-
-### Files Owned Per Agent
-
-| Agent | Files |
-|-------|-------|
-| `trading-strategy` | swing_detector.py, continuous_filter.py, strike_filter.py |
-| `order-execution` | order_manager.py, position_tracker.py |
-| `broker-integration` | data_pipeline.py |
-| `state-management` | state_manager.py, live_state.db |
-| `monitoring-alerts` | telegram_notifier.py, monitor_dashboard/ |
-| `infrastructure` | config.py, check_system.py, docker-compose.yaml, deploy.sh |
+| Agent | Skill | Intent |
+|-------|-------|--------|
+| Trading Strategy | `/trading-strategy` | Swing detection, filtration, tie-breakers |
+| Order Execution | `/order-execution` | Orders, positions, R-multiples |
+| Broker Integration | `/broker-integration` | OpenAlgo API, WebSocket |
+| State Management | `/state-management` | Database, persistence, crash recovery |
+| Monitoring Alerts | `/monitoring-alerts` | Dashboard, Telegram |
+| Infrastructure | `/infrastructure` | Config, Docker, EC2 |
+| Code Reviewer | `/code-reviewer` | Safety, patterns, bugs |
+| Integration Checker | `/integration-checker` | Cross-module impact |
+| Test Runner | `/test-runner` | Testing, validation |
+| E2E Workflow | `/e2e-workflow` | Pipeline validation |
+| Pre-Commit | `/pre-commit` | Quality checks before commit |
 
 ---
 
 ## Code Change Guidelines
 
-**⚠️ CRITICAL: Git Workflow SOP**
+**Core files requiring extra care:** `order_manager.py`, `position_tracker.py`, `baseline_v1_live.py`, `continuous_filter.py`, `swing_detector.py`, `data_pipeline.py`
 
-**ALWAYS follow the Git SOP for safe feature development:** See `.claude/GIT_SOP.md`
+**Best practices:** Minimal focused changes | No unrelated refactoring | Paper mode first
 
-**TL;DR:**
-- `main` = Production only (safe)
-- `feature/feature-X` = Development (your work)
-- `draft/feature-X` = Isolated test (main + your work)
-- Pre-market: Tag with `pre-market-YYYYMMDD-feature-X`
-- Post-market: Merge to main if good, tag stable release with `stable-YYYY-MM-DD`, delete if failed
-- ❌ Never code during market hours (9:15 AM - 3:30 PM)
-- ❌ Never test directly on main
-- ❌ Never delete tags
+**⚠️ MANDATORY Commit Workflow (never skip):**
+1. Show code changes to user, explain what/why → wait for feedback
+2. Ask permission to run `/pre-commit` checks → wait for approval
+3. Run `/pre-commit` → fix any issues
+4. Ask permission to commit with message preview → wait for explicit yes
+5. Commit only after explicit approval
 
-**When modifying core files:**
-- `order_manager.py`
-- `position_tracker.py`
-- `baseline_v1_live.py`
-- `continuous_filter.py`
-- `swing_detector.py`
-- `data_pipeline.py`
-
-**Best Practices:**
-1. Make minimal, focused changes
-2. Don't refactor unrelated code
-3. Keep changes small and testable
-4. Verify system runs without errors after changes
-5. Test in paper trading mode first
-
-**⚠️ MANDATORY Commit Workflow:**
-
-**NEVER commit code without following these steps in order:**
-
-1. **Show implementation first**
-   - Present all code changes to the user
-   - Explain what was changed and why
-   - Wait for user feedback
-
-2. **Get approval to run /pre-commit checks**
-   - Ask: "Should I run /pre-commit checks on these changes?"
-   - Wait for explicit permission
-
-3. **Run /pre-commit checks**
-   - Execute: `/pre-commit`
-   - Review all check results
-   - Fix any issues found
-
-4. **Ask for permission to commit**
-   - Ask: "All checks passed. Should I commit these changes?"
-   - Provide commit message preview
-   - Wait for explicit permission
-
-5. **Commit only if given permission**
-   - Only after explicit "yes" from user
-   - Never rush to commit
-   - Never skip steps 1-4
-
-**Example:**
-```
-[After implementing changes]
-"I've updated ui_components.py to format timestamps. Here are the changes: [show code].
-Should I run /pre-commit checks on these changes?"
-
-[After checks pass]
-"All checks passed. Should I commit with message: 'Fix: Format timestamps to human-readable display'?"
-
-[Only commit after user says yes]
-```
-
-**Verification Steps:**
+**Verification:**
 ```bash
-cd D:\nifty_options_agent
-
-# 1. Run system check
 python -m baseline_v1_live.check_system
-
-# 2. Start in paper mode and verify no errors
 python -m baseline_v1_live.baseline_v1_live --expiry 30JAN25 --atm 23500
 ```
-
-Note: Automated tests will be added in future iterations.

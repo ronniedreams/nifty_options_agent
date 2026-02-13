@@ -156,6 +156,12 @@ class DataPipeline:
         self.last_zerodha_tick_time = {}     # Zerodha ticks tracked even when on Angel One
         self.zerodha_continuous_tick_start = None  # When Zerodha ticks resumed (for switchback)
 
+        # VWAP fallback: if history API lag prevents complete VWAP from 9:15 AM,
+        # fall back to exchange-provided average_price (ATP) from WebSocket ticks.
+        # ATP = session VWAP computed by exchange from 9:15 AM.
+        self.vwap_from_websocket = False      # True = use ATP instead of cumulative calc
+        self.vwap_websocket_applied = set()   # Symbols already patched from ATP on first tick
+
         logger.info("DataPipeline initialized")
 
     def _is_market_open(self):
@@ -339,7 +345,11 @@ class DataPipeline:
                 failed += 1
         
         logger.info(f"[HIST] Historical data loaded: {successful} success, {failed} failed")
-        
+
+        # Verify completeness; retry up to 3x if Zerodha API lag is detected.
+        # Falls back to WebSocket ATP if all retries fail.
+        self._ensure_complete_history(now)
+
         # Log bar counts and gap detection
         if successful > 0:
             sample_symbol = list(self.bars.keys())[0] if self.bars else None
@@ -368,6 +378,179 @@ class DataPipeline:
                             f"current bar @ {current_minute.strftime('%H:%M')} (in progress)"
                         )
     
+    def _ensure_complete_history(self, load_time):
+        """
+        Verify that history loading captured bars from close to 9:15 AM.
+
+        Zerodha's intraday history API can have a ~15-minute lag when polled
+        shortly after market open, returning far fewer bars than expected.
+        This method retries up to 3 times (60s apart) using the history API.
+        If all 3 retries still show insufficient bars, it activates WebSocket
+        ATP fallback (vwap_from_websocket=True) so that VWAP values are sourced
+        from the exchange-provided average_price field in each tick instead.
+
+        Expected bar count = floor(minutes since 9:15 AM) - 1
+        Trigger threshold  = actual_max_bars < expected * 0.8
+        """
+        market_open = load_time.replace(hour=9, minute=15, second=0, microsecond=0)
+        if load_time.time() < time(9, 15):
+            return  # Pre-market: no bars expected yet
+
+        minutes_since_open = (load_time - market_open).total_seconds() / 60
+        expected_bars = max(0, int(minutes_since_open) - 1)  # -1: current bar incomplete
+
+        if expected_bars < 5:
+            return  # Less than 5 min past open — lag cannot meaningfully affect VWAP
+
+        with self.lock:
+            max_bars = max((len(v) for v in self.bars.values()), default=0)
+
+        if max_bars >= expected_bars * 0.8:
+            logger.info(
+                f"[HIST] Bar count OK: {max_bars}/{expected_bars} bars loaded "
+                f"(>= 80% threshold). VWAP reliable."
+            )
+            return
+
+        logger.warning(
+            f"[HIST] Incomplete history: {max_bars}/{expected_bars} bars loaded "
+            f"(< 80% of expected). Likely Zerodha API lag. "
+            f"Retrying up to 3 times (60s apart) before WebSocket ATP fallback."
+        )
+
+        for attempt in range(1, 4):
+            logger.info(f"[HIST-RETRY] Waiting 60s before attempt {attempt}/3...")
+            time_module.sleep(60)
+
+            self._reload_historical_vwap()
+
+            now = datetime.now(IST)
+            market_open_now = now.replace(hour=9, minute=15, second=0, microsecond=0)
+            expected_now = max(0, int((now - market_open_now).total_seconds() / 60) - 1)
+
+            with self.lock:
+                max_bars = max((len(v) for v in self.bars.values()), default=0)
+
+            logger.info(
+                f"[HIST-RETRY] Attempt {attempt}/3: {max_bars}/{expected_now} bars after reload."
+            )
+
+            if max_bars >= expected_now * 0.8:
+                logger.info(
+                    f"[HIST-RETRY] History complete after attempt {attempt}. "
+                    f"VWAP corrected from full history."
+                )
+                return
+
+        # All 3 retries exhausted — activate WebSocket ATP fallback
+        with self.lock:
+            self.vwap_from_websocket = True
+        logger.warning(
+            f"[HIST-RETRY] All 3 retries failed. Activating WebSocket ATP fallback. "
+            f"VWAP will be sourced from exchange average_price as ticks arrive. "
+            f"All bar VWAPs will be patched on first tick per symbol."
+        )
+
+    def _reload_historical_vwap(self):
+        """
+        Re-fetch today's full 1-min history and correct VWAP for all symbols.
+
+        On each retry call:
+        - Fetches fresh history from OpenAlgo (may now include early bars missed
+          due to API lag on first load)
+        - Inserts any newly available early bars at the front of self.bars[symbol]
+        - Recalculates cumulative VWAP from the first available bar for every bar
+          in memory, including live bars added since startup
+        - Updates session_vwap_data so all future bar VWAP calculations are correct
+        """
+        today = datetime.now(IST).date().strftime('%Y-%m-%d')
+        now = datetime.now(IST)
+        last_complete = now.replace(second=0, microsecond=0) - timedelta(minutes=1)
+        if last_complete.tzinfo is None:
+            last_complete = IST.localize(last_complete)
+
+        with self.lock:
+            symbols = list(self.bars.keys())
+
+        corrected = 0
+        for symbol in symbols:
+            try:
+                df = self.client.history(
+                    symbol=symbol,
+                    exchange=EXCHANGE,
+                    interval='1m',
+                    start_date=today,
+                    end_date=today
+                )
+
+                if isinstance(df, dict) or df is None or (hasattr(df, 'empty') and df.empty):
+                    continue
+
+                df = df.sort_index()
+                df = df[df.index <= last_complete]
+
+                if df.empty:
+                    continue
+
+                with self.lock:
+                    existing_timestamps = {b.timestamp for b in self.bars.get(symbol, [])}
+
+                    # Build new early bars and recalculate VWAP for all history rows
+                    new_early_bars = []
+                    cum_pv = 0.0
+                    cum_vol = 0
+                    bar_vwap_map = {}
+
+                    for idx, row in df.iterrows():
+                        bar_ts = idx.replace(second=0, microsecond=0)
+                        tp = (row['high'] + row['low'] + row['close']) / 3
+                        cum_pv += tp * row.get('volume', 0)
+                        cum_vol += row.get('volume', 0)
+                        vwap = cum_pv / cum_vol if cum_vol > 0 else tp
+                        bar_vwap_map[bar_ts] = vwap
+
+                        if bar_ts not in existing_timestamps:
+                            # Early bar the first load missed — add it now
+                            bar = BarData(bar_ts)
+                            bar.open = row.get('open', 0)
+                            bar.high = row.get('high', 0)
+                            bar.low = row.get('low', 0)
+                            bar.close = row.get('close', 0)
+                            bar.volume = row.get('volume', 0)
+                            bar.tick_count = 10
+                            bar.vwap = vwap
+                            new_early_bars.append(bar)
+
+                    # Prepend missing early bars (they come before all existing bars)
+                    if new_early_bars:
+                        self.bars[symbol] = new_early_bars + list(self.bars.get(symbol, []))
+                        logger.info(
+                            f"[HIST-RETRY] {symbol}: inserted {len(new_early_bars)} "
+                            f"early bars from history."
+                        )
+
+                    # Patch VWAP on every bar now in memory
+                    last_known_vwap = None
+                    for bar in self.bars.get(symbol, []):
+                        corrected_vwap = bar_vwap_map.get(bar.timestamp)
+                        if corrected_vwap is not None:
+                            bar.vwap = corrected_vwap
+                            last_known_vwap = corrected_vwap
+                        elif last_known_vwap is not None:
+                            # Live bar not yet in history API — carry forward last known
+                            bar.vwap = last_known_vwap
+
+                    # Update VWAP accumulator for future live bars
+                    self.session_vwap_data[symbol] = {'cum_pv': cum_pv, 'cum_vol': cum_vol}
+
+                corrected += 1
+
+            except Exception as e:
+                logger.error(f"[HIST-RETRY] Error reloading {symbol}: {e}")
+
+        logger.info(f"[HIST-RETRY] VWAP reloaded for {corrected}/{len(symbols)} symbols.")
+        return corrected
+
     def fill_initial_gap(self):
         """
         🔧 FIX: Fill any gap between last historical bar and current time
@@ -891,6 +1074,8 @@ class DataPipeline:
 
             ltp = quote_data.get('ltp')
             volume = quote_data.get('volume', 1)
+            # Exchange-provided session VWAP (ATP). Present in quote/full mode ticks.
+            average_price = quote_data.get('average_price', 0)
 
             if not symbol or ltp is None:
                 return
@@ -909,26 +1094,43 @@ class DataPipeline:
             bar_timestamp = now.replace(second=0, microsecond=0)
             
             with self.lock:
+                # WebSocket ATP fallback: on first tick for this symbol, patch all
+                # historical bar VWAPs with exchange ATP (accurate from 9:15 AM).
+                if (self.vwap_from_websocket
+                        and average_price > 0
+                        and symbol not in self.vwap_websocket_applied):
+                    for bar in self.bars.get(symbol, []):
+                        bar.vwap = average_price
+                    self.vwap_websocket_applied.add(symbol)
+                    logger.info(
+                        f"[VWAP-ATP] {symbol}: patched {len(self.bars.get(symbol, []))} "
+                        f"historical bars with exchange ATP={average_price:.2f}"
+                    )
+
                 # Check if we need to start a new bar
                 current_bar = self.current_bars.get(symbol)
 
                 if current_bar is None or current_bar.timestamp != bar_timestamp:
                     # Save completed bar
                     if current_bar is not None and current_bar.is_valid():
-                        # Update session VWAP with completed bar's contribution
-                        vwap_data = self.session_vwap_data.get(symbol, {'cum_pv': 0.0, 'cum_vol': 0})
-                        typical_price = (current_bar.high + current_bar.low + current_bar.close) / 3
-                        vwap_data['cum_pv'] += typical_price * current_bar.volume
-                        vwap_data['cum_vol'] += current_bar.volume
-
-                        # Calculate and set session VWAP for this bar
-                        if vwap_data['cum_vol'] > 0:
-                            current_bar.vwap = vwap_data['cum_pv'] / vwap_data['cum_vol']
+                        if self.vwap_from_websocket and average_price > 0:
+                            # ATP fallback: use exchange-provided session VWAP directly
+                            current_bar.vwap = average_price
                         else:
-                            current_bar.vwap = typical_price
+                            # Normal path: update cumulative VWAP accumulator
+                            vwap_data = self.session_vwap_data.get(symbol, {'cum_pv': 0.0, 'cum_vol': 0})
+                            typical_price = (current_bar.high + current_bar.low + current_bar.close) / 3
+                            vwap_data['cum_pv'] += typical_price * current_bar.volume
+                            vwap_data['cum_vol'] += current_bar.volume
 
-                        # Store updated cumulative values
-                        self.session_vwap_data[symbol] = vwap_data
+                            # Calculate and set session VWAP for this bar
+                            if vwap_data['cum_vol'] > 0:
+                                current_bar.vwap = vwap_data['cum_pv'] / vwap_data['cum_vol']
+                            else:
+                                current_bar.vwap = typical_price
+
+                            # Store updated cumulative values
+                            self.session_vwap_data[symbol] = vwap_data
 
                         self.bars[symbol].append(current_bar)
                         # Store when bar was RECEIVED, not bar's timestamp (for watchdog)
@@ -950,7 +1152,12 @@ class DataPipeline:
 
                 # Update current bar with tick
                 current_bar.update_tick(ltp, volume)
-            
+
+                # ATP fallback: keep current bar's VWAP up to date each tick
+                # so the filter sees the correct value even mid-bar.
+                if self.vwap_from_websocket and average_price > 0:
+                    current_bar.vwap = average_price
+
         except Exception as e:
             logger.error(f"[TICK] Error processing tick: {e}")
     

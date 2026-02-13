@@ -349,13 +349,15 @@ Time: {datetime.now(IST).strftime('%H:%M:%S')}
         emoji = "🆕" if is_new else "🔄"
         action = "SELECTED" if is_new else "UPDATED"
 
+        sl_points = sl_price - entry_price
+
         message = f"""
 {emoji} <b>BEST {option_type} {action}</b>
 
 Symbol: <code>{symbol}</code>
 Entry: ₹{entry_price:.2f}
 Current: ₹{current_price:.2f}
-SL: ₹{sl_price:.2f} ({sl_percent:.1%})
+SL: ₹{sl_price:.2f} ({sl_percent:.1%}) | {sl_points:.1f} pts
 
 VWAP Premium: {vwap_premium:.1%}
 Lots: {lots} ({lots * 65} qty)

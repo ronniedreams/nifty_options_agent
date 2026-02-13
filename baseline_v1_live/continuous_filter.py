@@ -443,6 +443,12 @@ class ContinuousFilterEngine:
                 quantity = int(lots) * LOT_SIZE
                 actual_R = sl_points * int(lots) * LOT_SIZE
                 
+                # Extract strike from symbol (format: NIFTY{DDMMMYY}{STRIKE}{CE/PE})
+                try:
+                    is_round_strike = int(symbol[12:-2]) % 100 == 0
+                except (ValueError, IndexError):
+                    is_round_strike = False
+
                 # Enrich candidate with calculated fields
                 enriched = {
                     'symbol': symbol,
@@ -462,6 +468,7 @@ class ContinuousFilterEngine:
                     'actual_R': actual_R,
                     'score': abs(sl_points - TARGET_SL_POINTS),
                     'entry_price': swing_low,
+                    'is_round_strike': is_round_strike,
                     'broke_in_history': swing_info.get('broke_in_history', False),
                 }
                 
@@ -472,8 +479,8 @@ class ContinuousFilterEngine:
         
         for option_type in ['CE', 'PE']:
             if qualified[option_type]:
-                # Sort by score (SL points closest to 10), then by highest entry price
-                best = min(qualified[option_type], key=lambda x: (x['score'], -x['entry_price']))
+                # Sort by: (1) SL points closest to 10, (2) round strike preferred, (3) highest entry price
+                best = min(qualified[option_type], key=lambda x: (x['score'], not x['is_round_strike'], -x['entry_price']))
                 best_strikes[option_type] = best
                 
                 # Log if best strike changed
@@ -652,7 +659,7 @@ class ContinuousFilterEngine:
                 triggers[option_type] = {
                     'action': 'place',  # OrderManager will handle cancel + place
                     'candidate': candidate,
-                    'limit_price': swing_low - 0.05,
+                    'limit_price': swing_low - 0.05 - 3,
                     'current_price': current_price,
                     'reason': f'better strike qualified: {symbol}'
                 }
@@ -691,7 +698,7 @@ class ContinuousFilterEngine:
                 triggers[option_type] = {
                     'action': 'place',
                     'candidate': candidate,
-                    'limit_price': swing_low - 0.05,
+                    'limit_price': swing_low - 0.05 - 3,
                     'current_price': current_price,
                     'reason': f'strike qualified, no existing order'
                 }

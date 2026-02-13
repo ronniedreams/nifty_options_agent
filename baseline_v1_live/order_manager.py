@@ -1104,7 +1104,11 @@ class OrderManager:
                     continue
 
                 if not isinstance(orders, list):
-                    logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook data is not a list")
+                    logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook data is not a list (type={type(orders).__name__}, value={str(orders)[:100]})")
+                    # Empty/falsy response (e.g. {}) means no orders in book — treat as cancelled
+                    if not orders:
+                        logger.info(f"[CANCEL-VERIFIED] Order {order_id} not in orderbook (empty response, attempt {attempt}/{max_retries})")
+                        return True
                     continue
 
                 # Find the order in orderbook
