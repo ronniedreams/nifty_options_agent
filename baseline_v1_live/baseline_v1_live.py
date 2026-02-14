@@ -190,6 +190,12 @@ class BaselineV1Live:
         # Guard against duplicate fill processing (same fill from multiple paths)
         self._processed_fill_ids = set()
 
+        # Track deferred strike switches (executed at bar close, not mid-bar)
+        # When the best strike changes mid-bar, we defer the cancel+replace to bar close
+        # to avoid brief naked-position windows and excessive API churn.
+        # Structure: {'CE': {'candidate': ..., 'limit_price': ...} or None, 'PE': ...}
+        self._pending_switch = {'CE': None, 'PE': None}
+
         # FIX: Load previous state from database (CRITICAL for crash recovery)
         self.load_state()
 
@@ -960,6 +966,24 @@ class BaselineV1Live:
                 # Price within 1 Rs of swing - place/update order
                 limit_price = trigger['limit_price']
 
+                # BAR-CLOSE DEFER: If an order for a DIFFERENT symbol is already placed,
+                # don't cancel+replace mid-bar — defer the switch to bar close.
+                # This avoids a brief naked-position window on every tick where the best
+                # strike changes. First-time placements (no existing order) are immediate.
+                existing_order = pending_orders.get(option_type)
+                is_switch = existing_order and existing_order.get('symbol') != candidate['symbol']
+
+                if is_switch:
+                    self._pending_switch[option_type] = {
+                        'candidate': candidate,
+                        'limit_price': limit_price
+                    }
+                    logger.info(
+                        f"[SWITCH-DEFER-{option_type}] Best changed {existing_order['symbol']} -> "
+                        f"{candidate['symbol']}, deferring to bar close"
+                    )
+                    continue  # Skip order action this tick
+
                 # Check available margin before attempting order (CRITICAL FIX #5)
                 try:
                     # Query broker for account info
@@ -1027,25 +1051,48 @@ class BaselineV1Live:
                     logger.warning(f"[BLOCKED-{option_type}] {reason}")
             
             elif action == 'cancel':
-                # Price too far - cancel order
+                # No qualified candidate - cancel order immediately and wipe any pending switch
                 self.order_manager.manage_limit_order_for_type(option_type, None, None)
+                if self._pending_switch[option_type]:
+                    logger.info(
+                        f"[SWITCH-CANCEL-{option_type}] Clearing deferred switch to "
+                        f"{self._pending_switch[option_type]['candidate']['symbol']} "
+                        f"(no qualified candidate)"
+                    )
+                    self._pending_switch[option_type] = None
                 logger.debug(f"[ORDER-{option_type}] Cancelled: {trigger.get('reason')}")
             
             elif action == 'check_fill':
                 # Price broke - order should have filled
                 logger.debug(f"[ORDER-{option_type}] Price broke: {trigger.get('reason')}")
-            
-            # action == 'wait': do nothing
+
+            elif action == 'wait':
+                # Same symbol stays best — clear any stale pending switch.
+                # If the best reverted to the currently-placed symbol, switching
+                # at bar close to the previously-deferred symbol would be wrong.
+                if self._pending_switch[option_type]:
+                    deferred_symbol = self._pending_switch[option_type]['candidate']['symbol']
+                    current_symbol = pending_orders.get(option_type, {}).get('symbol', 'N/A')
+                    logger.info(
+                        f"[SWITCH-REVERT-{option_type}] Best reverted to {current_symbol}, "
+                        f"clearing deferred switch to {deferred_symbol}"
+                    )
+                    self._pending_switch[option_type] = None
         
         # 6. Check for order fills
         fills = self.order_manager.check_fills_by_type()
-        
+
         current_prices = {symbol: bar.close for symbol, bar in latest_bars.items()}
-        
+
         for option_type in ['CE', 'PE']:
             if fills[option_type]:
                 self.handle_order_fill(fills[option_type], current_prices)
-        
+
+        # 6.5 At bar close: execute any deferred strike switches.
+        # Runs AFTER fill processing so position state is up-to-date before the guard check.
+        if new_bars_dict:
+            self._process_bar_close_switches()
+
         # 7. Update position prices
         self.position_tracker.update_prices(current_prices)
         
@@ -1119,6 +1166,88 @@ class BaselineV1Live:
         except Exception as e:
             logger.error(f"[SL-RECOMPUTE] Error for {symbol}: {e}, using stale SL")
             return candidate_info['sl_price']
+
+    def _process_bar_close_switches(self):
+        """
+        Execute deferred strike switches at bar close.
+
+        Called once per bar (when new_bars_dict is non-empty). For each option type
+        that has a pending switch, check whether the old order was already filled
+        mid-bar (a position would exist). If so, suppress the switch. Otherwise,
+        cancel the old order and place the new one.
+        """
+        for option_type in ['CE', 'PE']:
+            pending = self._pending_switch[option_type]
+            if not pending:
+                continue
+
+            candidate = pending['candidate']
+            limit_price = pending['limit_price']
+
+            # Guard: was the old entry order filled during this bar?
+            # can_open_position() returns False if a position for this option type
+            # already exists — which means the mid-bar fill happened.
+            pending_ce = 1 if self.order_manager.pending_limit_orders.get('CE') else 0
+            pending_pe = 1 if self.order_manager.pending_limit_orders.get('PE') else 0
+
+            # For the switch check, treat the existing order as being replaced (not added).
+            # Pass 0 for the option type being switched so the position count check is fair.
+            if option_type == 'CE':
+                pending_ce = 0
+            else:
+                pending_pe = 0
+
+            can_open, reason = self.position_tracker.can_open_position(
+                candidate['symbol'],
+                option_type,
+                pending_ce_orders=pending_ce,
+                pending_pe_orders=pending_pe
+            )
+
+            if not can_open:
+                logger.info(
+                    f"[BAR-CLOSE-SWITCH] {option_type}: Suppressing deferred switch to "
+                    f"{candidate['symbol']} - {reason}"
+                )
+                self._pending_switch[option_type] = None
+                continue
+
+            # Margin check before executing the switch (same guard as normal placement path)
+            try:
+                account_info = self.data_pipeline.client.get_account_details()
+                if account_info and account_info.get('status') == 'success':
+                    available_margin = float(account_info.get('data', {}).get('availablecash', 0))
+                    estimated_margin_required = candidate['entry_price'] * candidate['quantity']
+                    if available_margin < estimated_margin_required:
+                        logger.warning(
+                            f"[BAR-CLOSE-SWITCH] {option_type}: INSUFFICIENT MARGIN "
+                            f"Available: Rs{available_margin:,.0f} < "
+                            f"Required: Rs{estimated_margin_required:,.0f} "
+                            f"({candidate['symbol']}) - switch suppressed"
+                        )
+                        self._pending_switch[option_type] = None
+                        continue
+            except Exception as e:
+                logger.warning(
+                    f"[BAR-CLOSE-SWITCH] {option_type}: Margin check failed: {e}. "
+                    f"Proceeding with switch (margin not verified)"
+                )
+
+            logger.info(
+                f"[BAR-CLOSE-SWITCH] {option_type}: Executing deferred switch to "
+                f"{candidate['symbol']} trigger={candidate['swing_low'] - 0.05:.2f} "
+                f"limit={limit_price:.2f}"
+            )
+            result = self.order_manager.manage_limit_order_for_type(option_type, candidate, limit_price)
+            if result == 'kept':
+                logger.warning(
+                    f"[BAR-CLOSE-SWITCH] {option_type}: Switch to {candidate['symbol']} "
+                    f"could not complete - cancel of old order failed, old order kept"
+                )
+            else:
+                logger.info(f"[BAR-CLOSE-SWITCH] {option_type}: Switch result: {result}")
+
+            self._pending_switch[option_type] = None
 
     def handle_order_fill(self, fill: Dict, current_prices: Dict):
         """Handle filled limit order"""
