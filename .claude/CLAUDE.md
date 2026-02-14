@@ -27,6 +27,17 @@ docker exec -u root openalgo_angelone mkdir -p /app/logs && docker exec -u root 
 
 ---
 
+### Container Health Monitor (EC2 cron job)
+Sends Telegram alert if any Docker container crashes. Set up once on EC2:
+```bash
+crontab -e
+# Add: */2 * * * * cd ~/nifty_options_agent && python -m baseline_v1_live.container_monitor >> /var/log/container_monitor.log 2>&1
+```
+Also set `EC2_HOST=ubuntu@13.233.211.15` in `.env` for SSH instructions in alerts.
+See `CONTAINER_MONITOR_SETUP.md` for full instructions.
+
+---
+
 ### Daily Login Required (Zerodha + Angel One)
 **Both sessions expire daily.** Every morning before 9:15 AM:
 1. Open **https://openalgo.ronniedreams.in** (admin / Trading@2026) → Log in with Zerodha (TOTP 2FA)
@@ -43,7 +54,7 @@ docker-compose stop trading_agent && docker-compose rm -f trading_agent && docke
 
 | # | Task | Notes |
 |---|------|-------|
-| 2 | Upgrade Zerodha OpenAlgo to v2.0.0.0 | Check changelog for breaking changes, test paper mode first |
+| 2 | ~~Upgrade Zerodha OpenAlgo to v2.0.0.0~~ | Done — EC2 running v2.0.0.0 (git pull in openalgo-zerodha/openalgo + docker rebuild; sync worker preserved) |
 | 3 | Verify Zerodha WebSocket ATP matches Kite VWAP | Critical — Stage-1 VWAP filter depends on this |
 | 4 | Check if Angel One WebSocket provides VWAP/ATP values | If absent, need fallback strategy |
 
@@ -119,6 +130,9 @@ git tag pre-market-YYYYMMDD-my-feature && git push --tags
 | `state_manager.py` | SQLite persistence (~280 lines) |
 | `telegram_notifier.py` | Trade notifications (~150 lines) |
 | `check_system.py` | Pre-flight validation |
+| `auto_detector.py` | ATM + expiry auto-detection with graceful degradation (~370 lines) |
+| `login_handler.py` | Automated TOTP login for Zerodha + Angel One (~240 lines) |
+| `container_monitor.py` | Docker container health monitor — run via cron on EC2 (~210 lines) |
 | `monitor_dashboard/` | Streamlit monitoring dashboard |
 
 ---
@@ -148,6 +162,14 @@ ANGELONE_HOST = 'http://127.0.0.1:5001'
 ANGELONE_WS_URL = 'ws://127.0.0.1:8766'
 FAILOVER_NO_TICK_THRESHOLD = 15       # Seconds before switching
 FAILOVER_SWITCHBACK_THRESHOLD = 10    # Seconds stable before switchback
+
+# Automated Login (paper trading only — set in .env)
+AUTOMATED_LOGIN = False               # Enable TOTP-based auto login at startup
+OPENALGO_USERNAME = ''                # OpenAlgo dashboard username
+OPENALGO_PASSWORD = ''                # OpenAlgo dashboard password
+ZERODHA_TOTP_SECRET = ''             # Zerodha TOTP secret (base32)
+ANGELONE_TOTP_SECRET = ''            # Angel One TOTP secret (base32)
+# Also needed in .env: ZERODHA_USER_ID, ZERODHA_PASSWORD, ANGELONE_USER_ID, ANGELONE_PASSWORD
 ```
 
 ---
@@ -164,8 +186,11 @@ cd D:\nifty_options_agent\openalgo-angelone\openalgo && python app.py
 # System check
 python -m baseline_v1_live.check_system
 
-# Start trading (paper mode)
+# Start trading (paper mode, manual expiry/ATM)
 python -m baseline_v1_live.baseline_v1_live --expiry 30JAN25 --atm 23500
+
+# Start trading (auto mode — auto-detect ATM + expiry, auto-login if AUTOMATED_LOGIN=true)
+python -m baseline_v1_live.baseline_v1_live --auto
 ```
 
 ---
