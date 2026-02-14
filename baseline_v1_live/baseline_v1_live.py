@@ -33,7 +33,7 @@ import sys
 import time
 import asyncio
 import signal
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 from typing import Dict, Optional
 import pytz
 import os
@@ -360,7 +360,7 @@ class BaselineV1Live:
 
         self.data_pipeline.load_historical_data(symbols=self.symbols)
         
-        # 🔧 FIX: Fill any gap between last historical bar and current time
+        # FIX: Fill any gap between last historical bar and current time
         # This handles mid-session starts where the current minute bar is incomplete
         logger.info("[GAP-FILL] Checking for missing bars...")
         self.data_pipeline.fill_initial_gap()
@@ -606,12 +606,12 @@ class BaselineV1Live:
 
                         # Send Telegram alert about reconnection attempt
                         self.telegram.send_message(
-                            f"[WARNING]️ [WATCHDOG ALERT] STALE DATA\n\n"
+                            f"[WARNING] [WATCHDOG ALERT] STALE DATA\n\n"
                             f"Reason: {stale_reason}\n"
                             f"Data coverage: {health['data_coverage']:.1%}\n"
                             f"Fresh symbols: {health['symbols_with_data']}/{health['subscribed_symbols']}\n"
                             f"Stale symbols: {health['stale_symbols']}\n\n"
-                            f"🔄 Attempting automatic reconnection..."
+                            f"Attempting automatic reconnection..."
                         )
 
                         # Attempt automatic reconnection
@@ -630,7 +630,7 @@ class BaselineV1Live:
                         if reconnect_success:
                             logger.info("[WATCHDOG] Reconnection successful, reconciling orders...")
 
-                            # 🔧 CRITICAL: Reconcile orders with broker after reconnection
+                            # CRITICAL: Reconcile orders with broker after reconnection
                             # This ensures local state matches broker reality
                             try:
                                 # Get current open positions for reconciliation
@@ -683,7 +683,7 @@ class BaselineV1Live:
                                     )
 
                                     self.telegram.send_message(
-                                        f"❌ [EMERGENCY] Shutting down due to missing SL orders\n"
+                                        f"[FAILED] [EMERGENCY] Shutting down due to missing SL orders\n"
                                         f"Check broker manually for positions:\n"
                                         f"{', '.join(reconcile_results['sl_orders_missing'])}"
                                     )
@@ -700,14 +700,14 @@ class BaselineV1Live:
 
                                 # Send error notification but continue
                                 self.telegram.send_message(
-                                    f"[WARNING]️ [WARNING] Order reconciliation failed\n\n"
+                                    f"[WARNING] Order reconciliation failed\n\n"
                                     f"Error: {str(e)}\n\n"
                                     f"Check positions manually at broker!"
                                 )
 
                             # Send success notification
                             self.telegram.send_message(
-                                f"✅ [WATCHDOG] RECONNECTION SUCCESSFUL\n\n"
+                                f"[OK] [WATCHDOG] RECONNECTION SUCCESSFUL\n\n"
                                 f"WebSocket reconnected and operational.\n"
                                 f"Orders reconciled with broker.\n"
                                 f"Trading system continuing normally."
@@ -725,10 +725,10 @@ class BaselineV1Live:
 
                             # Send critical Telegram alert
                             self.telegram.send_message(
-                                f"❌ [WATCHDOG CRITICAL] RECONNECTION FAILED\n\n"
+                                f"[FAILED] [WATCHDOG CRITICAL] RECONNECTION FAILED\n\n"
                                 f"Reason: {stale_reason}\n"
                                 f"Reconnection attempts: All failed\n\n"
-                                f"🚨 Emergency shutdown initiated...\n"
+                                f"Emergency shutdown initiated...\n"
                                 f"All positions will be closed at market."
                             )
 
@@ -903,7 +903,7 @@ class BaselineV1Live:
                 self.previous_best_strikes[option_type] = None
 
         # Persist best strikes to DB for dashboard
-        # 🔧 CRITICAL: Always call save_best_strikes(), even when both are None
+        # CRITICAL: Always call save_best_strikes(), even when both are None
         # This ensures stale records get cleared when swings are replaced by unqualified ones
         try:
             self.state_manager.save_best_strikes(best_ce, best_pe)
@@ -1164,19 +1164,19 @@ class BaselineV1Live:
         if sl_order_id:
             logger.info(f"[SL-ORDER] {symbol} @ {live_sl_price:.2f} | Order: {sl_order_id}")
         else:
-            # 🚨 CRITICAL: SL placement failed - position has unlimited risk
+            # CRITICAL: SL placement failed - position has unlimited risk
             logger.critical(
                 f"[CRITICAL] SL PLACEMENT FAILED for {symbol} - Initiating emergency market exit"
             )
             
             # Send immediate Telegram alert
             self.telegram.send_message(
-                f"🚨 CRITICAL: SL PLACEMENT FAILED\n\n"
+                f"[CRITICAL] SL PLACEMENT FAILED\n\n"
                 f"Symbol: {symbol}\n"
-                f"Entry: ₹{fill_price:.2f}\n"
+                f"Entry: Rs{fill_price:.2f}\n"
                 f"Qty: {quantity}\n"
-                f"Expected SL: ₹{live_sl_price:.2f}\n\n"
-                f"[WARNING]️ Initiating emergency MARKET exit..."
+                f"Expected SL: Rs{live_sl_price:.2f}\n\n"
+                f"[WARNING] Initiating emergency MARKET exit..."
             )
             
             # Attempt emergency market exit
@@ -1194,7 +1194,7 @@ class BaselineV1Live:
                 
                 # Send success confirmation
                 self.telegram.send_message(
-                    f"✅ Emergency exit order placed\n\n"
+                    f"[OK] Emergency exit order placed\n\n"
                     f"Symbol: {symbol}\n"
                     f"Order ID: {emergency_order_id}\n"
                     f"Type: MARKET (force close)\n\n"
@@ -1214,10 +1214,10 @@ class BaselineV1Live:
                 
                 # Send critical failure alert
                 self.telegram.send_message(
-                    f"❌ EMERGENCY EXIT FAILED\n\n"
+                    f"[FAILED] EMERGENCY EXIT FAILED\n\n"
                     f"Symbol: {symbol}\n"
                     f"Qty: {quantity}\n\n"
-                    f"🚨 MANUAL BROKER INTERVENTION REQUIRED!\n"
+                    f"[CRITICAL] MANUAL BROKER INTERVENTION REQUIRED!\n"
                     f"Position has NO STOP LOSS - close immediately in broker!"
                 )
             
@@ -1227,7 +1227,7 @@ class BaselineV1Live:
                 
                 # Send halt notification
                 self.telegram.send_message(
-                    f"🛑 TRADING HALTED\n\n"
+                    f"[HALT] TRADING HALTED\n\n"
                     f"Reason: {self.order_manager.consecutive_sl_failures} consecutive SL failures\n"
                     f"Threshold: {self.order_manager.consecutive_sl_failures}/3\n\n"
                     f"System initiating emergency shutdown..."
@@ -1421,11 +1421,11 @@ class BaselineV1Live:
             # 4. Send Telegram alert
             summary = self.position_tracker.get_position_summary()
             self.telegram.send_message(
-                f"🚨 EMERGENCY SHUTDOWN\n\n"
+                f"[CRITICAL] EMERGENCY SHUTDOWN\n\n"
                 f"Reason: Repeated SL placement failures\n"
                 f"Cumulative R: {summary['cumulative_R']:.2f}R\n"
                 f"Closed positions: {summary['total_positions']}\n\n"
-                f"[WARNING]️ Check broker positions manually!"
+                f"[WARNING] Check broker positions manually!"
             )
             
             logger.critical("Emergency shutdown complete - check broker positions manually")
@@ -1490,8 +1490,52 @@ def main():
         logger.info("[AUTO] Auto-detection mode enabled (WebSocket + API fallback)")
 
         from .auto_detector import AutoDetector
-        from .config import OPENALGO_API_KEY, OPENALGO_HOST
+        from .config import (
+            OPENALGO_API_KEY, OPENALGO_HOST, ANGELONE_HOST,
+            AUTOMATED_LOGIN, ZERODHA_TOTP_SECRET, ANGELONE_TOTP_SECRET
+        )
         from .data_pipeline import DataPipeline
+        from .login_handler import LoginHandler
+
+        # Attempt automated login if enabled (paper trading only)
+        if AUTOMATED_LOGIN:
+            if not PAPER_TRADING:
+                logger.warning(
+                    "[AUTO] AUTOMATED_LOGIN=true but PAPER_TRADING=false. "
+                    "Automated login is only permitted in paper trading mode. Skipping."
+                )
+            else:
+                logger.info("[AUTO] Automated login enabled (paper trading mode)")
+                # Try to load all credentials from environment
+                openalgo_username = os.getenv('OPENALGO_USERNAME', '')
+                openalgo_password = os.getenv('OPENALGO_PASSWORD', '')
+                zerodha_user_id = os.getenv('ZERODHA_USER_ID', '')
+                zerodha_password = os.getenv('ZERODHA_PASSWORD', '')
+                angelone_user_id = os.getenv('ANGELONE_USER_ID', '')
+                angelone_password = os.getenv('ANGELONE_PASSWORD', '')
+
+                required_creds = [
+                    openalgo_username, openalgo_password,
+                    zerodha_user_id, zerodha_password, angelone_user_id, angelone_password,
+                    ZERODHA_TOTP_SECRET, ANGELONE_TOTP_SECRET
+                ]
+
+                if all(required_creds):
+                    login_handler = LoginHandler(OPENALGO_HOST, OPENALGO_API_KEY)
+                    login_ok = login_handler.auto_login_all(
+                        openalgo_username, openalgo_password,
+                        zerodha_user_id, zerodha_password, ZERODHA_TOTP_SECRET,
+                        angelone_user_id, angelone_password, ANGELONE_TOTP_SECRET,
+                        ANGELONE_HOST
+                    )
+                    if login_ok:
+                        logger.info("[AUTO] Automated login successful, proceeding with auto-detect")
+                    else:
+                        logger.warning("[AUTO] Automated login failed, proceeding with auto-detect (may retry in wait mode)")
+                else:
+                    logger.warning("[AUTO] Automated login enabled but not all credentials configured in .env")
+        else:
+            logger.info("[AUTO] Automated login disabled (use manual login)")
 
         # Try WebSocket for spot price, fall back to API if it fails
         temp_pipeline = None
@@ -1512,12 +1556,37 @@ def main():
             logger.info("[AUTO] Will use API fallback for spot price")
             temp_pipeline = None  # Signal AutoDetector to skip WebSocket
 
+        # Initialize Telegram notifier for broker reconnection alerts
+        telegram_notifier = get_notifier()
+
+        # Wait until 9:16 AM IST for first candle to close
+        # (Market opens at 9:15, first candle closes at 9:16)
+        now = datetime.now(pytz.timezone('Asia/Kolkata'))
+        market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        auto_detect_time = market_open + timedelta(minutes=1)  # 9:16 AM
+
+        if now < auto_detect_time:
+            wait_seconds = (auto_detect_time - now).total_seconds()
+            logger.info(f"[AUTO] Waiting for first candle to close (9:16 AM IST)...")
+            logger.info(f"[AUTO] Will start auto-detection in {wait_seconds:.0f} seconds")
+
+            if telegram_notifier:
+                msg = f"[AUTO] Containers started. Waiting for market to open (9:15 AM) and first candle to close (9:16 AM IST). Will start auto-detect then."
+                telegram_notifier.send_message(msg)
+
+            time.sleep(wait_seconds)
+            logger.info(f"[AUTO] 9:16 AM reached. Starting auto-detection now...")
+        else:
+            logger.info(f"[AUTO] Already past 9:16 AM, proceeding immediately with auto-detection")
+
         # Run auto-detection (WebSocket if connected, else API fallback)
+        # With graceful degradation: enters wait mode if broker not connected
         detector = AutoDetector(
             api_key=OPENALGO_API_KEY,
             host=OPENALGO_HOST,
             data_pipeline=temp_pipeline,
-            spot_symbol=spot_symbol
+            spot_symbol=spot_symbol,
+            telegram_notifier=telegram_notifier
         )
         atm_strike, expiry_date = detector.auto_detect()
 

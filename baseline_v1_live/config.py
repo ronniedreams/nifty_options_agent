@@ -236,6 +236,25 @@ NOTIFY_ON_ERROR = True
 NOTIFY_ON_BEST_STRIKE_CHANGE = True  # Notify when best strike changes (not every tick)
 
 # ============================================================================
+# AUTOMATED LOGIN (Paper Trading Only - Disable for Live Trading)
+# ============================================================================
+
+# IMPORTANT: Only use for paper trading (testing phase)
+# For live trading with real money, disable this and use manual login (more secure)
+AUTOMATED_LOGIN = os.getenv('AUTOMATED_LOGIN', 'false').lower() == 'true'
+
+# OpenAlgo Credentials (for accessing OpenAlgo API)
+# Get from OpenAlgo dashboard → User Management
+OPENALGO_USERNAME = os.getenv('OPENALGO_USERNAME', '')
+OPENALGO_PASSWORD = os.getenv('OPENALGO_PASSWORD', '')
+
+# TOTP Secrets for automated 2FA login
+# Get these from Zerodha/Angel One Security Settings → 2FA → Base32 secret key
+# DO NOT share or commit these to git
+ZERODHA_TOTP_SECRET = os.getenv('ZERODHA_TOTP_SECRET', '')
+ANGELONE_TOTP_SECRET = os.getenv('ANGELONE_TOTP_SECRET', '')
+
+# ============================================================================
 # STARTUP & FAILURE HANDLING
 # ============================================================================
 

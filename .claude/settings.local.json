@@ -25,7 +25,39 @@
       "Bash(grep:*)",
       "Bash(wmic process:*)",
       "Bash(findstr:*)",
-      "Bash(tasklist /FI \"IMAGENAME eq python.exe\" /FO LIST)"
+      "Bash(tasklist /FI \"IMAGENAME eq python.exe\" /FO LIST)",
+      "Bash(powershell -Command:*)",
+      "Bash(netstat:*)",
+      "Bash(xargs kill)",
+      "Bash(tasklist:*)",
+      "Bash(curl:*)",
+      "Bash(find:*)",
+      "Bash(./venv/Scripts/pip.exe install:*)",
+      "Bash(./venv/Scripts/python.exe:*)",
+      "Bash(../venv/Scripts/python.exe:*)",
+      "Bash(./venv/Scripts/pip.exe:*)",
+      "Bash(venv/Scripts/pip.exe:*)",
+      "Bash(venv/Scripts/pip.exe install:*)",
+      "Bash(venv/Scripts/python.exe:*)",
+      "Bash(git fetch:*)",
+      "Bash(ping:*)",
+      "Bash(echo:*)",
+      "Bash(\"C:\\\\Users\\\\rajat\\\\AppData\\\\Local\\\\Programs\\\\Ollama\\\\ollama.exe\" serve)",
+      "Bash(\"C:\\\\Users\\\\rajat\\\\AppData\\\\Local\\\\Programs\\\\Ollama\\\\ollama.exe\" pull mistral)",
+      "WebSearch",
+      "Bash(claude mcp:*)",
+      "Bash(node:*)",
+      "mcp__ollama__ollama_chat",
+      "WebFetch(domain:docs.openclaw.ai)",
+      "Bash(ssh-keyscan:*)",
+      "Bash(~/.ssh/known_hosts)",
+      "Bash(timeout:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.openalgo.in)"
     ]
-  }
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "ollama"
+  ]
 }
