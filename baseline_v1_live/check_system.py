@@ -72,8 +72,14 @@ def check_openalgo_connection():
     
     try:
         import requests
-        response = requests.get(f"{OPENALGO_HOST}/api/v1/", timeout=5)
-        
+        from baseline_v1_live.config import OPENALGO_API_KEY
+        # Use a known-good POST endpoint (GET /api/v1/ is not defined in OpenAlgo v2)
+        response = requests.post(
+            f"{OPENALGO_HOST}/api/v1/funds",
+            json={"apikey": OPENALGO_API_KEY},
+            timeout=5
+        )
+
         if response.status_code == 200:
             logger.info(f"[OK] OpenAlgo is running at {OPENALGO_HOST}")
             return True
