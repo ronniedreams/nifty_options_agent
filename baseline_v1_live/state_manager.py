@@ -778,7 +778,7 @@ class StateManager:
         cursor = self.conn.cursor()
         
         cursor.execute('''
-            INSERT INTO all_swings_log 
+            INSERT OR IGNORE INTO all_swings_log
             (symbol, swing_type, swing_price, swing_time, vwap, bar_index, detected_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (
@@ -947,19 +947,25 @@ class StateManager:
     
     def reset_daily_dashboard_data(self):
         """
-        Reset dashboard-specific tables at start of new trading day
-        
+        Reset dashboard-specific tables on every startup.
+
+        Called unconditionally at startup (not just on new-day) to prevent
+        UNIQUE constraint errors when swing re-detection re-inserts the same
+        (symbol, swing_time, swing_type) rows into all_swings_log.
+
         Clears:
-        - swing_candidates (active swings from previous day)
-        - best_strikes (yesterday's best strikes - the bug fix!)
+        - swing_candidates (active swings from previous session)
+        - best_strikes (best strikes from previous session)
         - swing_history (swing break events)
         - filter_rejections (filter rejections log)
         - order_triggers (order trigger events)
-        
+        - all_swings_log (swing detection log — rebuilt from historical bars)
+
         Does NOT clear:
-        - positions (persist across days for audit)
+        - positions (persist for crash recovery)
         - trade_log (historical trades)
         - daily_state (historical daily summaries)
+        - pending_orders / active_sl_orders (persist for crash recovery)
         """
         cursor = self.conn.cursor()
         today = datetime.now(IST).date().isoformat()

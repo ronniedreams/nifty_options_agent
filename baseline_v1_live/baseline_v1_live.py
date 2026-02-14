@@ -126,15 +126,12 @@ class BaselineV1Live:
         # State manager must be initialized first
         self.state_manager = StateManager()
         
-        # FIX: Only reset dashboard data if it's a new day
-        last_state = self.state_manager.load_daily_state()
+        # Always reset dashboard data on startup to prevent UNIQUE constraint errors
+        # on same-day restart (swing re-detection inserts same symbol/time/type).
+        # Positions/orders are in separate tables and are NOT cleared here.
         today = datetime.now(IST).date().isoformat()
-        
-        if last_state is None or last_state.get('trade_date') != today:
-            logger.info(f"[NEW-DAY] Resetting dashboard data for new trading day: {today}")
-            self.state_manager.reset_daily_dashboard_data()
-        else:
-            logger.info(f"[RESTART] Same day restart detected ({today}), keeping dashboard data")
+        logger.info(f"[STARTUP] Resetting dashboard data for: {today}")
+        self.state_manager.reset_daily_dashboard_data()
         
         # Swing detector with callback for new swings
         self.swing_detector = MultiSwingDetector(

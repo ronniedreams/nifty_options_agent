@@ -43,11 +43,13 @@ docker-compose stop trading_agent && docker-compose rm -f trading_agent && docke
 
 | # | Task | Notes |
 |---|------|-------|
-| 1 | Fix cancel-verify failure when orderbook returns non-list response | `order_manager.py` — add type check before iterating orderbook response |
 | 2 | Upgrade Zerodha OpenAlgo to v2.0.0.0 | Check changelog for breaking changes, test paper mode first |
 | 3 | Verify Zerodha WebSocket ATP matches Kite VWAP | Critical — Stage-1 VWAP filter depends on this |
 | 4 | Check if Angel One WebSocket provides VWAP/ATP values | If absent, need fallback strategy |
-| 5 | Clear stale same-day entries from `all_swings_log` on restart | Clear `all_swings_log`, `filter_rejections`, `swing_candidates`, `best_strikes`. Do NOT clear positions/orders/daily_state |
+
+**Completed:**
+- ~~Task 1~~: cancel-verify non-list orderbook — fixed (`order_manager.py`, type check + string check before iterating)
+- ~~Task 5~~: stale `all_swings_log` on restart — fixed (`baseline_v1_live.py` always resets dashboard data on startup; `state_manager.py` uses `INSERT OR IGNORE`)
 
 ---
 
