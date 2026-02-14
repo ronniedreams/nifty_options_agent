@@ -55,7 +55,16 @@ def get_container_status():
             return None
 
         import json
-        containers = json.loads(result.stdout)
+        # docker-compose v2 returns NDJSON (one JSON object per line)
+        # docker-compose v1 returns a JSON array — handle both
+        raw = result.stdout.strip()
+        try:
+            parsed = json.loads(raw)
+            # v1: parsed is a list
+            containers = parsed if isinstance(parsed, list) else [parsed]
+        except json.JSONDecodeError:
+            # v2: NDJSON — parse line by line
+            containers = [json.loads(line) for line in raw.splitlines() if line.strip()]
 
         status = {}
         for container in containers:
