@@ -12,6 +12,7 @@ For live trading, disable and use manual login (more secure).
 """
 
 import logging
+import time
 import requests
 import pyotp
 from datetime import datetime
@@ -53,25 +54,38 @@ class LoginHandler:
             "password": openalgo_password,
         }
 
-        try:
-            logger.info(f"[LOGIN] Authenticating to OpenAlgo as {openalgo_username}...")
-            response = self.session.post(url, json=payload, timeout=10)
+        max_retries = 10
+        retry_delay = 3  # seconds between retries
 
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("status") == "success":
-                    logger.info("[LOGIN] OpenAlgo authentication successful")
-                    return True
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f"[LOGIN] Authenticating to OpenAlgo as {openalgo_username} (attempt {attempt}/{max_retries})...")
+                response = self.session.post(url, json=payload, timeout=10)
+
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("status") == "success":
+                        logger.info("[LOGIN] OpenAlgo authentication successful")
+                        return True
+                    else:
+                        logger.error(f"[LOGIN] OpenAlgo authentication failed: {data.get('message', 'Unknown error')}")
+                        return False  # Auth failure — no point retrying
                 else:
-                    logger.error(f"[LOGIN] OpenAlgo authentication failed: {data.get('message', 'Unknown error')}")
+                    logger.error(f"[LOGIN] OpenAlgo API error: {response.status_code} - {response.text}")
+                    return False  # Non-connection error — no point retrying
+
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                if attempt < max_retries:
+                    logger.warning(f"[LOGIN] OpenAlgo not ready yet, waiting {retry_delay}s... ({attempt}/{max_retries}): {type(e).__name__}")
+                    time.sleep(retry_delay)
+                else:
+                    logger.error(f"[LOGIN] OpenAlgo still not reachable after {max_retries} attempts: {e}")
                     return False
-            else:
-                logger.error(f"[LOGIN] OpenAlgo API error: {response.status_code} - {response.text}")
+            except Exception as e:
+                logger.error(f"[LOGIN] OpenAlgo authentication exception: {e}")
                 return False
 
-        except Exception as e:
-            logger.error(f"[LOGIN] OpenAlgo authentication exception: {e}")
-            return False
+        return False
 
     def generate_totp(self, totp_secret: str) -> str:
         """
