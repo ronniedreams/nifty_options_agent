@@ -54,8 +54,8 @@ class LoginHandler:
             "password": openalgo_password,
         }
 
-        max_retries = 20  # 20 x 3s = 60s max wait (covers EC2 cold boot)
-        retry_delay = 3  # seconds between retries
+        max_retries = 20  # 20 x 5s = 100s max wait (covers EC2 cold boot)
+        retry_delay = 5  # seconds between retries
 
         for attempt in range(1, max_retries + 1):
             try:
