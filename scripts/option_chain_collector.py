@@ -24,7 +24,7 @@ Usage:
     python -m scripts.option_chain_collector --cleanup-only
 
 EC2 Cron (3:35 PM IST = 10:05 UTC):
-    5 10 * * 1-5 cd ~/nifty_options_agent && python -m scripts.option_chain_collector >> /var/log/option_chain_collector.log 2>&1
+    35 15 * * 1-5 cd /home/ubuntu/nifty_options_agent && python3 -m scripts.option_chain_collector >> /home/ubuntu/nifty_options_agent/logs/option_chain_collector.log 2>&1
 
 Requirements:
     pip install requests pytz python-dotenv
@@ -197,6 +197,8 @@ class HistorifyClient:
         resp = self._session.post(
             f"{self.host}{path}", json=body, timeout=60
         )
+        if not resp.ok:
+            logger.error(f"POST {path} returned HTTP {resp.status_code}: {resp.text[:500]}")
         resp.raise_for_status()
         return resp.json()
 
@@ -250,6 +252,7 @@ class HistorifyClient:
                 "start_date": start_date,
                 "end_date": end_date,
                 "incremental": True,
+                "api_key": self.api_key,  # Bypass session.get("user") for programmatic access
             },
         )
         return resp.get("job_id", "")
@@ -446,6 +449,7 @@ def run_collection(client: HistorifyClient, today_str: str) -> int:
         for e, s in expiry_stats.items()
     )
     status_emoji = "✅" if final_status == "completed" else "⚠️"
+    status_plain = "OK" if final_status == "completed" else "WARN"
     cleanup_line = f"\nCleaned up: {removed_count} expired symbols" if removed_count > 0 else ""
 
     summary = (
@@ -459,8 +463,20 @@ def run_collection(client: HistorifyClient, today_str: str) -> int:
         + f"\nStorage: DuckDB (Historify)"
     )
 
+    # Plain-text version for logger (no emojis — Rule 16)
+    summary_plain = (
+        f"[{status_plain}] Option Chain Collected\n"
+        f"Date: {today_str}\n"
+        f"Expiries: {expiry_line}\n"
+        f"Downloaded: {completed_count}/{len(download_symbols)}"
+        + (f" | Failed: {failed_count}" if failed_count > 0 else " | OK")
+        + f"\nJob: {job_id} ({final_status})"
+        + cleanup_line
+        + f"\nStorage: DuckDB (Historify)"
+    )
+
     logger.info("=" * 60)
-    logger.info(summary.replace("<b>", "").replace("</b>", ""))
+    logger.info(summary_plain)
     logger.info("=" * 60)
     send_telegram(summary)
 

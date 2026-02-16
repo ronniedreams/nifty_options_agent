@@ -162,6 +162,9 @@ class DataPipeline:
         self.vwap_from_websocket = False      # True = use ATP instead of cumulative calc
         self.vwap_websocket_applied = set()   # Symbols already patched from ATP on first tick
 
+        # Optional Telegram notifier for failover/failback alerts (set by caller after init)
+        self.telegram = None
+
         logger.info("DataPipeline initialized")
 
     def _is_market_open(self):
@@ -1833,6 +1836,11 @@ class DataPipeline:
 
         if not self.angelone_is_connected:
             logger.error("[FAILOVER] Cannot failover - Angel One not connected")
+            if self.telegram:
+                self.telegram.send_message(
+                    f"[FAILOVER] CRITICAL: Zerodha feed lost but Angel One NOT connected!\n"
+                    f"Reason: {reason}\nRunning without backup — check Angel One login!"
+                )
             return
 
         with self.lock:
@@ -1845,6 +1853,11 @@ class DataPipeline:
 
         logger.warning(f"[FAILOVER] Switched to Angel One backup feed. Reason: {reason}")
         logger.warning("[FAILOVER] Zerodha reconnect running in background - will auto-switchback when ready")
+        if self.telegram:
+            self.telegram.send_message(
+                f"[FAILOVER] Switched to Angel One backup feed\nReason: {reason}\n"
+                "Zerodha reconnect running in background — will auto-switchback when stable."
+            )
 
     def _failback_to_zerodha(self):
         """
@@ -1864,6 +1877,11 @@ class DataPipeline:
                 self.first_data_received_at = min(self.last_tick_time.values())
 
         logger.info("[FAILBACK] Switched back to Zerodha primary feed")
+        if self.telegram:
+            self.telegram.send_message(
+                f"[FAILBACK] Switched back to Zerodha primary feed\n"
+                f"Zerodha stable for {FAILOVER_SWITCHBACK_THRESHOLD}s — Angel One back on standby."
+            )
 
     def disconnect(self):
         """Disconnect WebSocket and clean up"""

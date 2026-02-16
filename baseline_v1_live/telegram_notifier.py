@@ -233,6 +233,7 @@ Time: {datetime.now(IST).strftime('%H:%M:%S')}
         message = f"""
 {emoji} <b>DAILY TARGET HIT!</b>
 
+Date: {datetime.now(IST).strftime('%d %b %Y')}
 Cumulative R: <b>{cumulative_R:+.2f}R</b>
 Total P&L: ₹{total_pnl:,.0f}
 Trades: {closed_positions}
@@ -256,13 +257,25 @@ Time: {datetime.now(IST).strftime('%H:%M:%S')}
         cumulative_R = summary.get('cumulative_R', 0)
         total_pnl = summary.get('total_pnl', 0)
         closed_positions = summary.get('closed_positions_today', 0)
-        
+        daily_exit_triggered = summary.get('daily_exit_triggered', False)
+        daily_exit_reason = summary.get('daily_exit_reason', None)
+
+        if daily_exit_triggered and daily_exit_reason:
+            if 'TARGET' in daily_exit_reason:
+                reason_text = 'Daily +5R target hit'
+            elif 'STOP' in daily_exit_reason:
+                reason_text = 'Daily -5R stop hit'
+            else:
+                reason_text = daily_exit_reason
+        else:
+            reason_text = 'Market close (3:15 PM)'
+
         emoji = "📊"
         if cumulative_R >= 3:
             emoji = "🚀"
         elif cumulative_R <= -3:
             emoji = "📉"
-        
+
         message = f"""
 {emoji} <b>DAILY SUMMARY</b>
 
@@ -271,6 +284,7 @@ Date: {datetime.now(IST).strftime('%d %b %Y')}
 Cumulative R: <b>{cumulative_R:+.2f}R</b>
 Total P&L: ₹{total_pnl:,.0f}
 Trades: {closed_positions}
+Reason: {reason_text}
 
 Trading session ended.
         """

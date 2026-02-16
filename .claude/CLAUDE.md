@@ -57,6 +57,11 @@ docker-compose stop trading_agent && docker-compose rm -f trading_agent && docke
 | 2 | ~~Upgrade Zerodha OpenAlgo to v2.0.0.0~~ | Done — EC2 running v2.0.0.0 (git pull in openalgo-zerodha/openalgo + docker rebuild; sync worker preserved) |
 | 3 | Verify Zerodha WebSocket ATP matches Kite VWAP | Critical — Stage-1 VWAP filter depends on this |
 | 4 | Check if Angel One WebSocket provides VWAP/ATP values | If absent, need fallback strategy |
+| 5 | Debug live Positions and Orders tab in monitor dashboard | Tabs not showing live data correctly |
+| 6 | Rebuild baseline_v1_live image on EC2 after market close (16-Feb-2026 only) | EC2 will show uncommitted changes on `login_handler.py` (SCP'd) — safe to ignore. Run: `git checkout baseline_v1_live/login_handler.py && git pull origin version/with-openalgo-v2 && docker-compose build baseline_v1_live && docker-compose up -d baseline_v1_live` |
+| 7 | Debug mobile app — not connecting, returns HTTP 401 | Likely Basic Auth or session issue with the EC2 reverse proxy |
+| 8 | Add "Swing Lows" tab to monitor dashboard | Chronological table of all swing lows with VWAP, VWAP% gap, filter results, status (qualified/rejected/pending). Live text filter bar on strike (filters as user types). Row highlighting: green=qualified, red=rejected, yellow=pending. Summary count. Data from `swing_log` SQLite or `all_swings_log` in-memory. |
+| 9 | Add additional info to bar viewer (VWAP etc.) | Enhance the bar viewer tab in monitor dashboard to show per-bar VWAP alongside OHLCV data. Also show VWAP% gap and swing markers on the bar. |
 
 **Completed:**
 - ~~Task 1~~: cancel-verify non-list orderbook — fixed (`order_manager.py`, type check + string check before iterating)
@@ -213,6 +218,19 @@ docker-compose ps
 docker-compose logs -f trading_agent
 docker-compose restart trading_agent
 docker-compose down && docker-compose up -d
+```
+
+**NEVER use `docker-compose down -v`** — the `-v` flag deletes ALL named volumes permanently:
+- `openalgo_data` → Historify DuckDB (all option chain ML training data), OpenAlgo databases
+- `trading_state` → live_state.db (positions, orders, crash recovery)
+- `openalgo_angelone_data`, `openalgo_logs`, `openalgo_angelone_logs`
+
+If `docker-compose down -v` is ever truly necessary, **backup Historify first**:
+```bash
+# Backup Historify DuckDB before any volume-destructive operation
+docker cp openalgo_zerodha:/app/db/historify.duckdb ~/historify_backup_$(date +%Y%m%d_%H%M%S).duckdb
+# Also backup trading state
+docker cp baseline_v1_live:/app/state/live_state.db ~/live_state_backup_$(date +%Y%m%d_%H%M%S).db
 ```
 
 **Three-Way Sync (Laptop → GitHub → EC2):**

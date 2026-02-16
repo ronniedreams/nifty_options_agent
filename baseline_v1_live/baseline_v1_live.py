@@ -148,7 +148,8 @@ class BaselineV1Live:
         self.order_manager = OrderManager()
         self.position_tracker = PositionTracker(order_manager=self.order_manager)
         self.telegram = get_notifier()
-        
+        self.data_pipeline.telegram = self.telegram  # Enable failover/failback Telegram alerts
+
         # Initialize failure handling components
         self.notification_manager = NotificationManager(self.telegram, self.state_manager)
         self.startup_checker = StartupHealthCheck(self.notification_manager)
@@ -314,6 +315,14 @@ class BaselineV1Live:
         logger.info("Starting Baseline V1 Live Trading")
         logger.info("="*80)
         
+        # Send crash recovery status to Telegram
+        n_pos = len(self.position_tracker.open_positions)
+        n_orders = len(self.order_manager.pending_limit_orders) + len(self.order_manager.active_sl_orders)
+        if n_pos > 0 or n_orders > 0:
+            self.telegram.send_message(
+                f"[RECOVERY] Restored {n_pos} position(s) and {n_orders} order(s) from previous session."
+            )
+
         # 1. Run Startup Health Checks
         logger.info("Running pre-flight health checks...")
         success, error_type, error_msg = self.startup_checker.run_all_checks()
@@ -335,6 +344,11 @@ class BaselineV1Live:
                 logger.warning("Transient error detected. Entering waiting mode...")
                 self.enter_waiting_mode(error_type, error_msg)
         
+        # Health check passed
+        self.telegram.send_message(
+            f"[HEALTH] Pre-flight checks passed. Broker connected. Mode: {'PAPER' if PAPER_TRADING else 'LIVE'}"
+        )
+
         # 2. Update state to ACTIVE
         self.state_manager.update_operational_state('ACTIVE')
         self.notification_manager.send_error_notification(
@@ -354,7 +368,13 @@ class BaselineV1Live:
 
         # Subscribe Angel One to same symbols (backup, ticks ignored until failover)
         self.data_pipeline.subscribe_angelone_backup(self.symbols)
-        
+
+        # Report Angel One backup status to Telegram
+        if self.data_pipeline.angelone_is_connected:
+            self.telegram.send_message("[BACKUP] Angel One connected — failover ready")
+        else:
+            self.telegram.send_message("[BACKUP] Angel One NOT connected — running on Zerodha only")
+
         # Load today's historical data BEFORE starting live loop
         # This ensures swings are detected correctly even when starting mid-day
         logger.info("="*80)
@@ -519,12 +539,21 @@ class BaselineV1Live:
                 logger.warning(f"Data coverage {health['data_coverage']:.1%} < 50%, consider waiting longer")
             else:
                 logger.info(f"Data coverage: {health['data_coverage']:.1%} - Good!")
+            self.telegram.send_message(
+                f"[DATA] Historical data loaded: {health['symbols_with_data']}/{health['subscribed_symbols']} symbols "
+                f"({health['data_coverage']:.0%} coverage)"
+            )
         except Exception as e:
             logger.error(f"Error getting health status: {e}", exc_info=True)
             raise
         
         # Main trading loop (async)
         logger.info("Starting main trading loop (async)...")
+        n_restored = len(self.position_tracker.open_positions)
+        pos_str = f" | {n_restored} position(s) restored" if n_restored > 0 else ""
+        self.telegram.send_message(
+            f"[LIVE] Strategy running. Monitoring {len(self.symbols)} symbols.{pos_str}"
+        )
         asyncio.run(self.run_trading_loop())
 
     def enter_waiting_mode(self, error_type: str, error_msg: str):
@@ -1725,6 +1754,10 @@ def main():
             temp_pipeline.disconnect()
 
         logger.info(f"[AUTO] Detected ATM: {atm_strike}, Expiry: {expiry_date}")
+        if telegram_notifier:
+            telegram_notifier.send_message(
+                f"[AUTO] Auto-detect complete. Expiry: {expiry_date}, ATM: {atm_strike}. Strategy starting..."
+            )
     else:
         # Manual mode - require --expiry and --atm
         if not args.expiry or not args.atm:
