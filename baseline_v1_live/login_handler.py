@@ -232,6 +232,13 @@ class LoginHandler:
         openalgo_ok = self.login_to_openalgo(openalgo_username, openalgo_password)
         if not openalgo_ok:
             logger.error("[LOGIN] OpenAlgo authentication failed, cannot proceed with broker logins")
+            try:
+                from .telegram_notifier import get_notifier
+                notifier = get_notifier()
+                if notifier:
+                    notifier.send_message("[LOGIN] OpenAlgo auth FAILED — Zerodha and Angel One logins skipped. Manual login required.")
+            except Exception as e:
+                logger.warning(f"[LOGIN] Could not send Telegram notification: {e}")
             return False
 
         # Step 2: Try Zerodha broker login
@@ -239,6 +246,22 @@ class LoginHandler:
 
         # Step 3: Try Angel One broker login
         angelone_ok = self.login_angelone(angelone_user_id, angelone_password, angelone_totp_secret, angelone_host)
+
+        # Send Telegram notifications for login results
+        try:
+            from .telegram_notifier import get_notifier
+            notifier = get_notifier()
+            if notifier:
+                if zerodha_ok:
+                    notifier.send_message("[LOGIN] Zerodha login successful")
+                else:
+                    notifier.send_message("[LOGIN] Zerodha login FAILED — manual login required at openalgo.ronniedreams.in")
+                if angelone_ok:
+                    notifier.send_message("[LOGIN] Angel One login successful")
+                else:
+                    notifier.send_message("[LOGIN] Angel One login FAILED — check Angel One credentials/TOTP")
+        except Exception as e:
+            logger.warning(f"[LOGIN] Could not send Telegram notification: {e}")
 
         if zerodha_ok and angelone_ok:
             logger.info("[LOGIN] All logins successful (OpenAlgo + Zerodha + Angel One)")
