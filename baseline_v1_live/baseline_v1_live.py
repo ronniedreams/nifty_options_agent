@@ -50,6 +50,8 @@ from .config import (
     SHUTDOWN_TIMEOUT,
     WAITING_MODE_CHECK_INTERVAL,
     WAITING_MODE_SEND_HOURLY_STATUS,
+    STALE_SYMBOL_THRESHOLD,
+    STALE_SYMBOL_HARD_THRESHOLD,
 )
 from .data_pipeline import DataPipeline
 from .swing_detector import MultiSwingDetector
@@ -1077,8 +1079,6 @@ class BaselineV1Live:
         # 5.5 Stale-symbol detection: if a pending order's symbol has stopped
         # producing bars (e.g., OpenAlgo LTP downgrade killed the feed),
         # attempt re-subscription and eventually cancel the order.
-        STALE_SYMBOL_THRESHOLD = 120  # seconds — soft: re-subscribe
-        STALE_SYMBOL_HARD_THRESHOLD = 240  # seconds — hard: cancel order
         now = datetime.now(IST)
         if now.time() >= MARKET_START_TIME and now.time() <= MARKET_END_TIME:
             for option_type in ['CE', 'PE']:

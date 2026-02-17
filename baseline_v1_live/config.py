@@ -151,6 +151,8 @@ DATA_FRESHNESS_CHECK_INTERVAL = 30  # Check data freshness every 30 seconds
 MIN_DATA_COVERAGE_THRESHOLD = 0.5   # Shutdown if <50% symbols have fresh data
 STALE_DATA_TIMEOUT = 30  # Shutdown if no fresh data for 30 seconds
 MAX_BAR_AGE_SECONDS = 120  # Shutdown if last bar >2 minutes old
+STALE_SYMBOL_THRESHOLD = 120  # Seconds before soft re-subscribe for stale symbol
+STALE_SYMBOL_HARD_THRESHOLD = 240  # Seconds before hard cancel for stale symbol
 
 # ============================================================================
 # OPENALGO INTEGRATION
