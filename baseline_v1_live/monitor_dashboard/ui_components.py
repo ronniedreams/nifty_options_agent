@@ -55,8 +55,8 @@ def kpi(label, value, color="#2c3e50"):
             text-align:center;
             color:white;
         ">
-            <h4 style="margin-bottom:4px;">{label}</h4>
-            <h2 style="margin:0;">{value}</h2>
+            <h4 style="margin-bottom:4px; color:white;">{label}</h4>
+            <h2 style="margin:0; color:white;">{value}</h2>
         </div>
         """,
         unsafe_allow_html=True
