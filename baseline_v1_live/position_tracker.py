@@ -417,11 +417,13 @@ class PositionTracker:
                     if not order_id:
                         logger.error(
                             f"[EXIT] Failed to place market order for {symbol}. "
-                            f"Position will auto-square at 3:15 PM (MIS product)."
+                            f"Position kept open for reconciliation/MIS auto-square."
                         )
-                        # Continue with other positions
+                        # Do NOT mark closed — leave in open_positions so
+                        # reconciliation can detect and retry, or MIS auto-squares.
+                        continue
 
-                # Update internal state (existing logic)
+                # Update internal state only after broker order succeeded (or no order_manager)
                 self.close_position(symbol, exit_price, exit_reason)
 
             except Exception as e:
@@ -577,14 +579,42 @@ class PositionTracker:
             
             for symbol in phantom_symbols:
                 position = self.open_positions[symbol]
-                
+
                 logger.critical(
                     f"[WARNING] PHANTOM POSITION DETECTED: {symbol} | "
                     f"We track, broker doesn't have (likely SL hit)"
                 )
-                
-                # Close locally with last known price
-                self.close_position(symbol, position.current_price, 'SL_HIT_RECONCILED')
+
+                # Try to get actual SL fill price from broker orderbook
+                exit_price = position.current_price  # fallback
+                if self.order_manager and symbol in self.order_manager.active_sl_orders:
+                    sl_order_id = self.order_manager.active_sl_orders[symbol].get('order_id')
+                    if sl_order_id:
+                        try:
+                            ob_response = self.client.orderbook(strategy="baseline_v1_live")
+                            if ob_response.get('status') == 'success':
+                                orders = ob_response.get('data', [])
+                                if isinstance(orders, dict):
+                                    for key in ['orders', 'data', 'orderbook']:
+                                        if key in orders and isinstance(orders[key], list):
+                                            orders = orders[key]
+                                            break
+                                if isinstance(orders, list):
+                                    for order in orders:
+                                        if isinstance(order, dict) and order.get('orderid') == sl_order_id:
+                                            fill_price = order.get('average_price', order.get('averageprice', 0))
+                                            if fill_price and float(fill_price) > 0:
+                                                exit_price = float(fill_price)
+                                                logger.info(
+                                                    f"[PHANTOM] {symbol}: Got actual SL fill price "
+                                                    f"{exit_price:.2f} from orderbook (vs stale {position.current_price:.2f})"
+                                                )
+                                            break
+                        except Exception as e:
+                            logger.warning(f"[PHANTOM] {symbol}: Could not fetch SL fill price: {e}")
+
+                # Close locally with best available price
+                self.close_position(symbol, exit_price, 'SL_HIT_RECONCILED')
                 
                 # Send Telegram alert
                 if self.telegram:
@@ -598,8 +628,17 @@ class PositionTracker:
 
             for symbol in orphaned_symbols:
                 broker_pos = broker_positions_map[symbol]
-                quantity = abs(int(broker_pos.get('quantity', 0)))
-                avg_price = float(broker_pos.get('averageprice', 0))
+                # Use same multi-key fallback as the parsing loop above
+                quantity_raw = broker_pos.get('quantity', broker_pos.get('qty', 0))
+                avg_price_raw = broker_pos.get('averageprice', broker_pos.get('average_price', broker_pos.get('avgprice', 0)))
+                try:
+                    quantity = abs(int(quantity_raw)) if quantity_raw is not None else 0
+                except (ValueError, TypeError):
+                    quantity = 0
+                try:
+                    avg_price = float(avg_price_raw) if avg_price_raw is not None else 0.0
+                except (ValueError, TypeError):
+                    avg_price = 0.0
 
                 logger.critical(
                     f"[WARNING] ORPHANED POSITION DETECTED: {symbol} | "

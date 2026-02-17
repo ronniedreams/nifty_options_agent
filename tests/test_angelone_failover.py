@@ -147,7 +147,7 @@ class TestZerodhaCallback(unittest.TestCase):
         tick = self._make_tick()
         self.pipeline.active_source = 'zerodha'
         self.pipeline._on_quote_update_zerodha(tick)
-        self.pipeline._process_tick.assert_called_once_with(tick)
+        self.pipeline._process_tick.assert_called_once_with(tick, source='zerodha')
 
     def test_does_not_call_process_tick_when_active_source_is_angelone(self):
         tick = self._make_tick()
@@ -184,7 +184,7 @@ class TestAngelOneCallback(unittest.TestCase):
         tick = self._make_tick()
         self.pipeline.active_source = 'angelone'
         self.pipeline._on_quote_update_angelone(tick)
-        self.pipeline._process_tick.assert_called_once_with(tick)
+        self.pipeline._process_tick.assert_called_once_with(tick, source='angelone')
 
     def test_does_not_call_process_tick_when_active_source_is_zerodha(self):
         tick = self._make_tick()

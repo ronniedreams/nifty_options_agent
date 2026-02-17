@@ -74,6 +74,9 @@ class OrderManager:
         self.consecutive_sl_failures = 0
         self.emergency_exit_triggered = False
         
+        # Callback invoked after any order is placed (for data feed re-subscription)
+        self._on_order_placed_callback = None
+
         logger.info("OrderManager initialized (option-type based tracking)")
 
     def restore_state(self, pending_limit: Dict, active_sl: Dict):
@@ -364,10 +367,17 @@ class OrderManager:
                     f"{symbol} BUY {quantity} @ trigger {trigger_price:.2f}, "
                     f"limit {limit_price:.2f}"
                 )
-                
+
                 # Reset failure counter on success
                 self.consecutive_sl_failures = 0
-                
+
+                # Re-subscribe symbol in QUOTE mode (counteracts OpenAlgo v2 LTP downgrade)
+                if self._on_order_placed_callback:
+                    try:
+                        self._on_order_placed_callback(symbol)
+                    except Exception as cb_err:
+                        logger.warning(f"[RESUB] Callback failed for {symbol}: {cb_err}")
+
                 return order_id
             else:
                 logger.error(f"Failed to place SL order: {response}")
@@ -635,7 +645,7 @@ class OrderManager:
         
         try:
             # Get orderbook
-            response = self.client.orderbook()
+            response = self.client.orderbook(strategy="baseline_v1_live")
             
             if response.get('status') != 'success':
                 logger.error(f"Failed to fetch orderbook: {response}")
@@ -885,7 +895,7 @@ class OrderManager:
             return 'failed'
         
         # Case 4: Same symbol, check if trigger or limit price changed significantly
-        # CRITICAL FIX: Use MODIFICATION_THRESHOLD (0.50 Rs) instead of 0.01 to reduce
+        # CRITICAL FIX: Use MODIFICATION_THRESHOLD (1.00 Rs) instead of 0.01 to reduce
         # unnecessary order modifications that can cause duplicate orders
         trigger_diff = abs(existing['trigger_price'] - trigger_price)
         limit_diff = abs(existing['limit_price'] - limit_price_entry)
@@ -970,6 +980,12 @@ class OrderManager:
                 if response.get('status') == 'success':
                     order_id = response.get('orderid')
                     logger.info(f"[ORDER-PLACED] {symbol} SL trigger {trigger_price:.2f} limit {limit_price:.2f} QTY {quantity} | ID: {order_id}")
+                    # Re-subscribe symbol in QUOTE mode (counteracts OpenAlgo v2 LTP downgrade)
+                    if self._on_order_placed_callback:
+                        try:
+                            self._on_order_placed_callback(symbol)
+                        except Exception as cb_err:
+                            logger.warning(f"[RESUB] Callback failed for {symbol}: {cb_err}")
                     return order_id
                 else:
                     error_msg = response.get('message', 'Unknown error')
@@ -1008,14 +1024,20 @@ class OrderManager:
                 if response.get('status') == 'success':
                     order_id = response.get('orderid')
                     logger.info(f"[ORDER-PLACED] {symbol} LIMIT @ {price} QTY {quantity} | ID: {order_id}")
+                    # Re-subscribe symbol in QUOTE mode (counteracts OpenAlgo v2 LTP downgrade)
+                    if self._on_order_placed_callback:
+                        try:
+                            self._on_order_placed_callback(symbol)
+                        except Exception as cb_err:
+                            logger.warning(f"[RESUB] Callback failed for {symbol}: {cb_err}")
                     return order_id
                 else:
                     error_msg = response.get('message', 'Unknown error')
                     logger.error(f"Limit order failed (attempt {attempt + 1}/{MAX_ORDER_RETRIES}): {error_msg}")
-                    
+
                     if attempt < MAX_ORDER_RETRIES - 1:
                         time.sleep(ORDER_RETRY_DELAY)
-                    
+
             except Exception as e:
                 logger.error(f"Exception placing limit order (attempt {attempt + 1}/{MAX_ORDER_RETRIES}): {e}")
                 if attempt < MAX_ORDER_RETRIES - 1:
@@ -1090,7 +1112,7 @@ class OrderManager:
             time.sleep(delay)
 
             try:
-                response = self.client.orderbook()
+                response = self.client.orderbook(strategy="baseline_v1_live")
 
                 if response.get('status') != 'success':
                     logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook fetch failed")
@@ -1103,9 +1125,23 @@ class OrderManager:
                     logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook returned string: {orders}")
                     continue
 
+                # Unwrap dict-wrapped orderbook (OpenAlgo v2 returns {'orders': [...]})
+                if isinstance(orders, dict):
+                    for key in ['orders', 'data', 'orderbook']:
+                        if key in orders and isinstance(orders[key], list):
+                            logger.debug(f"[CANCEL-VERIFY] Unwrapped orders list from nested key '{key}'")
+                            orders = orders[key]
+                            break
+                    else:
+                        # No nested list found
+                        if not orders:
+                            logger.info(f"[CANCEL-VERIFIED] Order {order_id} not in orderbook (empty dict, attempt {attempt}/{max_retries})")
+                            return True
+                        logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook data is dict with no list (keys={list(orders.keys())})")
+                        continue
+
                 if not isinstance(orders, list):
                     logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook data is not a list (type={type(orders).__name__}, value={str(orders)[:100]})")
-                    # Empty/falsy response (e.g. {}) means no orders in book — treat as cancelled
                     if not orders:
                         logger.info(f"[CANCEL-VERIFIED] Order {order_id} not in orderbook (empty response, attempt {attempt}/{max_retries})")
                         return True
@@ -1173,7 +1209,7 @@ class OrderManager:
             return fills  # No pending orders to check
 
         try:
-            response = self.client.orderbook()
+            response = self.client.orderbook(strategy="baseline_v1_live")
 
             # CRITICAL: Validate response is a dict
             if not isinstance(response, dict):
@@ -1361,7 +1397,7 @@ class OrderManager:
 
         try:
             # Fetch current orderbook from broker
-            response = self.client.orderbook()
+            response = self.client.orderbook(strategy="baseline_v1_live")
 
             if response.get('status') != 'success':
                 logger.error(f"[RECONCILE] Failed to fetch orderbook: {response}")

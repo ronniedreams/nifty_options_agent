@@ -57,8 +57,8 @@ class TestConfigNewConstants:
     @patch.dict(os.environ, {"PAPER_TRADING": "true"}, clear=False)
     def test_modification_threshold_value(self):
         cfg = self._load_config()
-        assert cfg.MODIFICATION_THRESHOLD == 0.50, (
-            f"MODIFICATION_THRESHOLD should be 0.50, got {cfg.MODIFICATION_THRESHOLD}"
+        assert cfg.MODIFICATION_THRESHOLD == 1.00, (
+            f"MODIFICATION_THRESHOLD should be 1.00, got {cfg.MODIFICATION_THRESHOLD}"
         )
 
     @patch.dict(os.environ, {"PAPER_TRADING": "true"}, clear=False)
@@ -292,7 +292,7 @@ def _make_order_manager(dry_run=True):
     """
     import baseline_v1_live.order_manager as om_mod
     om_mod.DRY_RUN = dry_run
-    om_mod.MODIFICATION_THRESHOLD = 0.50
+    om_mod.MODIFICATION_THRESHOLD = 1.00
     from baseline_v1_live.order_manager import OrderManager
     mock_client = MagicMock()
     om = OrderManager(client=mock_client)
@@ -360,10 +360,15 @@ class TestOrderManagerCase3SymbolSwitch:
             "candidate_info": _candidate("NIFTY06FEB2626000CE"),
         }
         client.cancelorder.return_value = {"status": "success"}
+        client.orderbook.return_value = {
+            "status": "success",
+            "data": {"orders": [{"orderid": "OLD_222", "order_status": "cancelled"}]}
+        }
         client.placeorder.return_value = {"status": "success", "orderid": "NEW_333"}
 
-        new_cand = _candidate(symbol="NIFTY06FEB2626100CE", swing_low=140.00)
-        result = om.manage_limit_order_for_type("CE", new_cand, 137.00)
+        with patch('time.sleep'):
+            new_cand = _candidate(symbol="NIFTY06FEB2626100CE", swing_low=140.00)
+            result = om.manage_limit_order_for_type("CE", new_cand, 137.00)
 
         assert result == "modified", (
             f"Expected 'modified' on successful symbol switch, got '{result}'"
@@ -424,7 +429,7 @@ class TestOrderManagerCase4PriceChange:
         client.placeorder.assert_not_called()
 
     def test_price_change_above_threshold_cancel_succeeds_modifies(self):
-        """Price diff > 0.50 and cancel succeeds => new order placed, return 'modified'."""
+        """Price diff > 1.00 and cancel succeeds => new order placed, return 'modified'."""
         om, client = _make_order_manager(dry_run=False)
         om.pending_limit_orders["CE"] = {
             "order_id": "EXIST_3",
@@ -437,22 +442,27 @@ class TestOrderManagerCase4PriceChange:
             "candidate_info": _candidate("NIFTY06FEB2626000CE", swing_low=130.00),
         }
         client.cancelorder.return_value = {"status": "success"}
+        client.orderbook.return_value = {
+            "status": "success",
+            "data": {"orders": [{"orderid": "EXIST_3", "order_status": "cancelled"}]}
+        }
         client.placeorder.return_value = {"status": "success", "orderid": "MOD_44"}
 
         # swing_low = 132 => trigger = 131.95, limit = 128.95
-        cand = _candidate("NIFTY06FEB2626000CE", swing_low=132.00)
-        result = om.manage_limit_order_for_type("CE", cand, 128.95)
+        with patch('time.sleep'):
+            cand = _candidate("NIFTY06FEB2626000CE", swing_low=132.00)
+            result = om.manage_limit_order_for_type("CE", cand, 128.95)
 
         assert result == "modified"
         assert om.pending_limit_orders["CE"]["order_id"] == "MOD_44"
         assert om.pending_limit_orders["CE"]["trigger_price"] == 131.95
 
     def test_modification_threshold_boundary_exactly_at_threshold(self):
-        """Price diff == exactly 0.50 should NOT trigger modification (> not >=)."""
+        """Price diff == exactly 1.00 should NOT trigger modification (> not >=)."""
         om, client = _make_order_manager(dry_run=False)
-        # Set existing trigger so that new trigger is exactly 0.50 away
-        # existing trigger = 130.00; new swing_low = 130.55 => new trigger = 130.50
-        # diff = 0.50 -- the code uses >, so 0.50 is NOT > 0.50
+        # Set existing trigger so that new trigger is exactly 1.00 away
+        # existing trigger = 130.00; new swing_low = 131.05 => new trigger = 131.00
+        # diff = 1.00 -- the code uses >, so 1.00 is NOT > 1.00
         om.pending_limit_orders["CE"] = {
             "order_id": "BOUNDARY",
             "symbol": "NIFTY06FEB2626000CE",
@@ -463,13 +473,13 @@ class TestOrderManagerCase4PriceChange:
             "placed_at": datetime.now(IST),
             "candidate_info": _candidate("NIFTY06FEB2626000CE", swing_low=130.05),
         }
-        # new swing_low = 130.55 => trigger = 130.50 (diff = 0.50 exactly)
-        # new limit = 130.50 - 3 = 127.50 (diff from 127.00 = 0.50 exactly)
-        cand = _candidate("NIFTY06FEB2626000CE", swing_low=130.55)
-        result = om.manage_limit_order_for_type("CE", cand, 127.50)
+        # new swing_low = 131.05 => trigger = 131.00 (diff = 1.00 exactly)
+        # new limit = 131.00 - 3 = 128.00 (diff from 127.00 = 1.00 exactly)
+        cand = _candidate("NIFTY06FEB2626000CE", swing_low=131.05)
+        result = om.manage_limit_order_for_type("CE", cand, 128.00)
 
         assert result == "kept", (
-            f"At exactly threshold boundary (0.50), should keep. Got '{result}'"
+            f"At exactly threshold boundary (1.00), should keep. Got '{result}'"
         )
         client.cancelorder.assert_not_called()
 
@@ -795,21 +805,19 @@ class TestBaselineV1LiveSwingCallback:
 
 class TestBaselineV1LiveHandleDailySummaryBug:
     """
-    Pre-existing bug detection: handle_daily_exit uses 'summary' on line 839
-    BEFORE it is assigned on line 841.
-
-    This test documents the bug for the record. It does NOT test that the bug
-    is fixed -- it verifies the bug IS present in the current source so the
-    team knows about it.
+    Previously documented bug: handle_daily_exit used 'summary' before assignment.
+    This bug has been FIXED — summary is now assigned before notify_daily_target.
+    This test verifies the fix is in place.
     """
 
-    def test_handle_daily_exit_summary_used_before_assignment(self):
+    def test_handle_daily_exit_summary_assigned_before_use(self):
         """
-        In handle_daily_exit:
-            self.telegram.notify_daily_target(summary)   <-- line 839 (uses summary)
-            summary = self.position_tracker.get_position_summary()  <-- line 841 (assigns summary)
+        Verify that in handle_daily_exit:
+            summary = self.position_tracker.get_position_summary()  <-- assigned first
+            ...
+            self.telegram.notify_daily_target(summary)              <-- used after
 
-        This is a NameError at runtime. Documenting as a known issue.
+        Previously this was reversed (NameError at runtime). Now fixed.
         """
         src_path = os.path.join(PKG_DIR, "baseline_v1_live.py")
         with open(src_path, "r", encoding="utf-8") as f:
@@ -834,11 +842,11 @@ class TestBaselineV1LiveHandleDailySummaryBug:
         # Both lines must exist
         assert notify_line is not None, "notify_daily_target(summary) call not found"
         assert assign_line is not None, "summary = ...get_position_summary() not found"
-        # Bug: notify comes BEFORE assignment
-        assert notify_line < assign_line, (
-            f"KNOWN BUG: notify_daily_target(summary) at line {notify_line+1} uses 'summary' "
-            f"before it is assigned at line {assign_line+1}. "
-            f"This will cause a NameError at runtime."
+        # Fix verified: assignment comes BEFORE notify
+        assert assign_line < notify_line, (
+            f"REGRESSION: summary must be assigned (line {assign_line+1}) "
+            f"before notify_daily_target(summary) (line {notify_line+1}). "
+            f"This was a known bug that was fixed — do not revert."
         )
 
 
@@ -883,13 +891,23 @@ class TestOrderManagerFullLifecycle:
 
         # Step 3: Same symbol, big price change -> modify
         client.placeorder.return_value = {"status": "success", "orderid": "LC_002"}
+        client.orderbook.return_value = {
+            "status": "success",
+            "data": {"orders": [{"orderid": "LC_001", "order_status": "cancelled"}]}
+        }
         cand_new = _candidate("NIFTY06FEB2626000CE", swing_low=135.00)
-        r3 = om.manage_limit_order_for_type("CE", cand_new, 132.00)
+        with patch('time.sleep'):
+            r3 = om.manage_limit_order_for_type("CE", cand_new, 132.00)
         assert r3 == "modified"
         assert om.pending_limit_orders["CE"]["order_id"] == "LC_002"
 
         # Step 4: Cancel
-        r4 = om.manage_limit_order_for_type("CE", None, None)
+        client.orderbook.return_value = {
+            "status": "success",
+            "data": {"orders": [{"orderid": "LC_002", "order_status": "cancelled"}]}
+        }
+        with patch('time.sleep'):
+            r4 = om.manage_limit_order_for_type("CE", None, None)
         assert r4 == "cancelled"
         assert "CE" not in om.pending_limit_orders
 
@@ -944,10 +962,15 @@ class TestOrderManagerPlacementFailure:
             "candidate_info": _candidate("NIFTY06FEB2626000CE"),
         }
         client.cancelorder.return_value = {"status": "success"}
+        client.orderbook.return_value = {
+            "status": "success",
+            "data": {"orders": [{"orderid": "OLD_X", "order_status": "cancelled"}]}
+        }
         client.placeorder.return_value = {"status": "error", "message": "bad symbol"}
 
-        new_cand = _candidate("NIFTY06FEB2626100CE", swing_low=140.00)
-        result = om.manage_limit_order_for_type("CE", new_cand, 137.00)
+        with patch('time.sleep'):
+            new_cand = _candidate("NIFTY06FEB2626100CE", swing_low=140.00)
+            result = om.manage_limit_order_for_type("CE", new_cand, 137.00)
         assert result == "failed"
 
 

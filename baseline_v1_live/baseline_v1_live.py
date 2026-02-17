@@ -146,6 +146,10 @@ class BaselineV1Live:
         self.continuous_filter.reset_daily_data()
         
         self.order_manager = OrderManager()
+        # Wire re-subscribe callback: after any order placement, re-subscribe the symbol
+        # in QUOTE mode to counteract OpenAlgo v2's internal LTP downgrade.
+        self.order_manager._on_order_placed_callback = lambda sym: self.data_pipeline.resubscribe_symbol(sym)
+
         self.position_tracker = PositionTracker(order_manager=self.order_manager)
         self.telegram = get_notifier()
         self.data_pipeline.telegram = self.telegram  # Enable failover/failback Telegram alerts
@@ -1013,44 +1017,6 @@ class BaselineV1Live:
                     )
                     continue  # Skip order action this tick
 
-                # Check available margin before attempting order (CRITICAL FIX #5)
-                try:
-                    # Query broker for account info
-                    account_info = self.data_pipeline.client.get_account_details()
-
-                    if account_info and account_info.get('status') == 'success':
-                        available_margin = float(account_info.get('data', {}).get('availablecash', 0))
-
-                        # Rough margin estimate: entry_price × quantity (conservative - actual may be lower)
-                        estimated_margin_required = candidate['entry_price'] * candidate['quantity']
-
-                        if available_margin < estimated_margin_required:
-                            logger.warning(
-                                f"[MARGIN-CHECK-{option_type}] INSUFFICIENT MARGIN "
-                                f"Available: ₹{available_margin:,.0f} < Required: ₹{estimated_margin_required:,.0f} "
-                                f"(Symbol: {candidate['symbol']}, Qty: {candidate['quantity']})"
-                            )
-                            # Skip order placement - insufficient margin
-                            self.order_manager.manage_limit_order_for_type(option_type, None, None)
-                            continue
-                        else:
-                            logger.debug(
-                                f"[MARGIN-CHECK-{option_type}] OK "
-                                f"Available: ₹{available_margin:,.0f} >= Required: ₹{estimated_margin_required:,.0f}"
-                            )
-                    else:
-                        # If margin check fails, log warning but proceed (don't block on API failure)
-                        logger.warning(
-                            f"[MARGIN-CHECK-{option_type}] API call failed: {account_info}. "
-                            f"Proceeding with order (margin not verified)"
-                        )
-                except Exception as e:
-                    # If margin check throws exception, log but proceed
-                    logger.warning(
-                        f"[MARGIN-CHECK-{option_type}] Exception during margin check: {e}. "
-                        f"Proceeding with order (margin not verified)"
-                    )
-
                 # Check if we can open position for this type (include pending orders)
                 pending_ce = 1 if self.order_manager.pending_limit_orders.get('CE') else 0
                 pending_pe = 1 if self.order_manager.pending_limit_orders.get('PE') else 0
@@ -1108,6 +1074,43 @@ class BaselineV1Live:
                     )
                     self._pending_switch[option_type] = None
         
+        # 5.5 Stale-symbol detection: if a pending order's symbol has stopped
+        # producing bars (e.g., OpenAlgo LTP downgrade killed the feed),
+        # attempt re-subscription and eventually cancel the order.
+        STALE_SYMBOL_THRESHOLD = 120  # seconds — soft: re-subscribe
+        STALE_SYMBOL_HARD_THRESHOLD = 240  # seconds — hard: cancel order
+        now = datetime.now(IST)
+        if now.time() >= MARKET_START_TIME and now.time() <= MARKET_END_TIME:
+            for option_type in ['CE', 'PE']:
+                pending = self.order_manager.pending_limit_orders.get(option_type)
+                if not pending:
+                    continue
+                symbol = pending.get('symbol')
+                if not symbol:
+                    continue
+                last_bar_time = self.data_pipeline.last_bar_timestamp.get(symbol)
+                if last_bar_time:
+                    staleness = (now - last_bar_time).total_seconds()
+                    if staleness > STALE_SYMBOL_HARD_THRESHOLD:
+                        logger.error(
+                            f"[STALE-SYMBOL] {symbol} no bars for {staleness:.0f}s "
+                            f"(>{STALE_SYMBOL_HARD_THRESHOLD}s) -- cancelling {option_type} order"
+                        )
+                        self.order_manager.manage_limit_order_for_type(option_type, None, None)
+                        try:
+                            self.telegram.send_message(
+                                f"[STALE-SYMBOL] Cancelled {option_type} order for {symbol}\n"
+                                f"No bar data for {staleness:.0f}s. Possible OpenAlgo feed issue."
+                            )
+                        except Exception:
+                            pass
+                    elif staleness > STALE_SYMBOL_THRESHOLD:
+                        logger.warning(
+                            f"[STALE-SYMBOL] {symbol} no bars for {staleness:.0f}s "
+                            f"(>{STALE_SYMBOL_THRESHOLD}s) -- re-subscribing"
+                        )
+                        self.data_pipeline.resubscribe_symbol(symbol)
+
         # 6. Check for order fills
         fills = self.order_manager.check_fills_by_type()
 
@@ -1240,27 +1243,6 @@ class BaselineV1Live:
                 )
                 self._pending_switch[option_type] = None
                 continue
-
-            # Margin check before executing the switch (same guard as normal placement path)
-            try:
-                account_info = self.data_pipeline.client.get_account_details()
-                if account_info and account_info.get('status') == 'success':
-                    available_margin = float(account_info.get('data', {}).get('availablecash', 0))
-                    estimated_margin_required = candidate['entry_price'] * candidate['quantity']
-                    if available_margin < estimated_margin_required:
-                        logger.warning(
-                            f"[BAR-CLOSE-SWITCH] {option_type}: INSUFFICIENT MARGIN "
-                            f"Available: Rs{available_margin:,.0f} < "
-                            f"Required: Rs{estimated_margin_required:,.0f} "
-                            f"({candidate['symbol']}) - switch suppressed"
-                        )
-                        self._pending_switch[option_type] = None
-                        continue
-            except Exception as e:
-                logger.warning(
-                    f"[BAR-CLOSE-SWITCH] {option_type}: Margin check failed: {e}. "
-                    f"Proceeding with switch (margin not verified)"
-                )
 
             logger.info(
                 f"[BAR-CLOSE-SWITCH] {option_type}: Executing deferred switch to "

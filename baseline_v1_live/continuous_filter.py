@@ -152,28 +152,16 @@ class ContinuousFilterEngine:
         option_type = swing_info.get('option_type')
 
         if vwap_premium < MIN_VWAP_PREMIUM:
-            # New swing FAILED VWAP - reject it AND remove old swing (new swing pattern formed)
+            # New swing FAILED VWAP - reject new swing but KEEP old swing if it exists
+            # Per STRIKE_FILTRATION_THEORY.md: "Old swing STAYS in pool (unaffected)"
             if symbol in self.swing_candidates:
                 old_swing = self.swing_candidates[symbol]
                 logger.warning(
                     f"[VWAP-REJECT] {symbol}: New swing @ Rs.{swing_price:.2f} "
                     f"VWAP premium {vwap_premium:.1%} < {MIN_VWAP_PREMIUM:.1%} "
                     f"(VWAP @ swing: Rs.{vwap_at_swing:.2f}) - REJECTED. "
-                    f"Removing old swing @ Rs.{old_swing['price']:.2f} (stale)"
+                    f"Old swing @ Rs.{old_swing['price']:.2f} kept in pool"
                 )
-
-                # Remove old swing from candidates
-                del self.swing_candidates[symbol]
-
-                # Clear evaluation state
-                if symbol in self.last_evaluation_state:
-                    del self.last_evaluation_state[symbol]
-
-                # Remove from stage1 pool
-                self.stage1_swings_by_type[option_type] = [
-                    s for s in self.stage1_swings_by_type[option_type]
-                    if s.get('symbol') != symbol
-                ]
             else:
                 logger.warning(
                     f"[VWAP-REJECT] {symbol}: New swing @ Rs.{swing_price:.2f} "
@@ -196,11 +184,14 @@ class ContinuousFilterEngine:
                     }])
                 except Exception as e:
                     logger.debug(f"Failed to save VWAP rejection to DB: {e}")
-            return  # New swing rejected, old swing removed
+            return  # New swing rejected; old swing preserved in pool if it exists
 
         # New swing PASSED both static filters - replace old swing
+        # Preserve broke_in_history flag from old swing (startup protection must survive updates)
+        old_broke_in_history = False
         if symbol in self.swing_candidates:
             old_swing = self.swing_candidates[symbol]
+            old_broke_in_history = old_swing.get('broke_in_history', False)
             logger.info(
                 f"[SWING-REPLACED] {symbol}: Old swing @ Rs.{old_swing['price']:.2f} "
                 f"replaced by new swing @ Rs.{swing_price:.2f}"
@@ -209,6 +200,11 @@ class ContinuousFilterEngine:
         # Add new swing to candidates (make a copy to avoid reference issues)
         # CRITICAL: Use deepcopy() to prevent modifications to swing_info from affecting stored value
         self.swing_candidates[symbol] = copy.deepcopy(swing_info)
+        if old_broke_in_history:
+            self.swing_candidates[symbol]['broke_in_history'] = True
+            logger.info(
+                f"[SWING-REPLACED] {symbol}: Preserved broke_in_history=True from old swing"
+            )
 
         # Clear any previous evaluation state for this symbol (new swing detected)
         if symbol in self.last_evaluation_state:
@@ -725,7 +721,7 @@ class ContinuousFilterEngine:
         
         # Log selected strike
         logger.info(
-            f"✅ SELECTED: {selected_symbol}\n"
+            f"[SELECTED] {selected_symbol}\n"
             f"   Entry Price:    Rs.{selected_candidate['swing_low']:.2f}\n"
             f"   Current Price:  Rs.{selected_candidate['current_price']:.2f}\n"
             f"   SL Price:       Rs.{selected_candidate['sl_price']:.2f}\n"
@@ -781,7 +777,7 @@ class ContinuousFilterEngine:
         
         # Log rejected candidates
         if rejected_candidates:
-            logger.info(f"\n❌ REJECTED CANDIDATES ({len(rejected_candidates)}):")
+            logger.info(f"\n[REJECTED CANDIDATES] ({len(rejected_candidates)}):")
             for rej in rejected_candidates:
                 reasons_str = ", ".join(rej['reasons'])
                 logger.info(
@@ -790,7 +786,7 @@ class ContinuousFilterEngine:
         
         # Log qualified but not selected
         if qualified_not_selected:
-            logger.info(f"\n[WARNING]️  QUALIFIED BUT NOT SELECTED ({len(qualified_not_selected)}):")
+            logger.info(f"\n[QUALIFIED NOT SELECTED] ({len(qualified_not_selected)}):")
             for qual in qualified_not_selected:
                 logger.info(
                     f"   {qual['symbol']}: Entry Rs.{qual['swing_low']:.2f}, "
