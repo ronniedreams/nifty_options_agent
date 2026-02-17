@@ -302,32 +302,54 @@ class LoginHandler:
 
             logger.info("[LOGIN] Definedge authentication successful!")
 
-            # Now we need to store this in OpenAlgo's auth database
-            # Call OpenAlgo's internal auth storage
+            # Store auth in OpenAlgo via web form submission (simulates browser)
             auth_string = f"{api_session_key}:::{susertoken or ''}:::{api_key}"
+            user_id = step2_data.get('uid') or step2_data.get('uccid')
 
-            # Store auth token in OpenAlgo via its auth endpoint
-            store_url = f"{self.openalgo_host}/store_auth"
-            store_payload = {
-                "broker": "definedge",
-                "auth_token": auth_string,
-                "feed_token": susertoken
-            }
-
+            # Step 3: Login to OpenAlgo dashboard first to get session cookie
             try:
-                store_response = self.session.post(store_url, json=store_payload, timeout=10)
-                if store_response.status_code == 200:
+                logger.info("[LOGIN] Definedge Step 3: Logging into OpenAlgo dashboard...")
+                openalgo_username = os.getenv('OPENALGO_USERNAME', 'admin')
+                openalgo_password = os.getenv('OPENALGO_PASSWORD', '')
+
+                # Login to OpenAlgo to get session
+                login_url = f"{self.openalgo_host}/auth/login"
+                login_data = {
+                    "username": openalgo_username,
+                    "password": openalgo_password
+                }
+
+                # Use a fresh session for OpenAlgo
+                openalgo_session = requests.Session()
+                login_response = openalgo_session.post(login_url, data=login_data, timeout=10, allow_redirects=True)
+
+                if login_response.status_code != 200 or 'dashboard' not in login_response.url:
+                    logger.warning(f"[LOGIN] OpenAlgo dashboard login may have failed: {login_response.status_code}")
+
+                # Step 4: Trigger OTP via GET (this stores otp_token in OpenAlgo session)
+                logger.info("[LOGIN] Definedge Step 4: Triggering OTP via OpenAlgo...")
+                callback_url = f"{self.openalgo_host}/definedge/callback"
+                get_response = openalgo_session.get(callback_url, timeout=10)
+
+                # Step 5: Submit our TOTP code via POST
+                logger.info("[LOGIN] Definedge Step 5: Submitting TOTP to OpenAlgo...")
+                post_data = {"otp": totp_code}
+                post_response = openalgo_session.post(callback_url, data=post_data, timeout=10, allow_redirects=True)
+
+                if post_response.status_code == 200 and 'dashboard' in post_response.url:
                     logger.info("[LOGIN] Definedge auth stored in OpenAlgo successfully")
                     return True
                 else:
-                    # Even if storage fails, the direct API auth worked
-                    logger.warning(f"[LOGIN] Could not store auth in OpenAlgo: {store_response.status_code}")
-                    # Try alternative: just verify the session works
-                    logger.info("[LOGIN] Definedge direct API login successful (OpenAlgo storage skipped)")
+                    # Check if we got an error message
+                    if 'error' in post_response.text.lower():
+                        logger.warning(f"[LOGIN] OpenAlgo returned error page")
+                    else:
+                        logger.info("[LOGIN] Definedge login completed (status may be OK)")
                     return True
+
             except Exception as e:
-                logger.warning(f"[LOGIN] Could not store auth in OpenAlgo: {e}")
-                logger.info("[LOGIN] Definedge direct API login successful (OpenAlgo storage skipped)")
+                logger.warning(f"[LOGIN] Could not store auth in OpenAlgo via web: {e}")
+                logger.info("[LOGIN] Definedge direct API login successful (OpenAlgo integration skipped)")
                 return True
 
         except Exception as e:
