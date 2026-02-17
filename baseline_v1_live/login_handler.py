@@ -38,7 +38,23 @@ class LoginHandler:
         """
         self.openalgo_host = openalgo_host.rstrip('/')
         self.openalgo_api_key = openalgo_api_key
-        self.session = requests.Session()
+        self.session = self._make_session()
+
+    @staticmethod
+    def _make_session() -> requests.Session:
+        """
+        Create a requests.Session that strips the Secure flag from all cookies
+        after every response. Required because OpenAlgo v2 sets USE_HTTPS=True,
+        which gives cookies Secure=True. Python's cookiejar won't send Secure
+        cookies over plain HTTP (http://openalgo:5000 inside Docker).
+        """
+        def _strip_secure(response, *args, **kwargs):
+            for cookie in response.cookies:
+                cookie.secure = False
+
+        session = requests.Session()
+        session.hooks["response"].append(_strip_secure)
+        return session
 
     def _get_csrf_token(self, host: str) -> str | None:
         """
@@ -58,12 +74,6 @@ class LoginHandler:
                 data = response.json()
                 token = data.get("csrf_token")
                 if token:
-                    # OpenAlgo v2 sets session cookies with Secure=True (USE_HTTPS=True).
-                    # Python's requests.Session won't send Secure cookies over plain HTTP
-                    # (Docker internal: http://openalgo:5000). Strip the flag so the
-                    # session cookie is included in subsequent HTTP requests.
-                    for cookie in self.session.cookies:
-                        cookie.secure = False
                     return token
                 logger.error(f"[LOGIN] CSRF token response missing csrf_token field: {data}")
             else:
@@ -389,9 +399,8 @@ class LoginHandler:
 
         # Use a separate session for Angel One's OpenAlgo instance so it doesn't
         # interfere with the Zerodha OpenAlgo session
-        angelone_session = requests.Session()
         angelone_handler = LoginHandler(host)
-        angelone_handler.session = angelone_session
+        # angelone_handler already has a _make_session() session with the Secure-strip hook
 
         # Step 1: Authenticate to Angel One's OpenAlgo instance
         if openalgo_username and openalgo_password:
@@ -423,7 +432,7 @@ class LoginHandler:
 
         try:
             logger.info(f"[LOGIN] Attempting Angel One broker login for {user_id}...")
-            response = angelone_session.post(
+            response = angelone_handler.session.post(
                 callback_url, data=payload, timeout=15, allow_redirects=True
             )
 
