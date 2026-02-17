@@ -78,6 +78,7 @@ tabs = st.tabs([
     "📌 Live Positions",
     "📦 Orders",
     "🔬 Filter Pipeline (3 Stages)",
+    "📉 Swing Lows",
     "🚨 Events",
     "📊 Performance",
     "📈 Chart",
@@ -199,26 +200,77 @@ with tabs[2]:
     df_table(rej, height=300)
 
 # ─────────────────────────────────────────────
-# TAB 4: EVENTS
+# TAB 4: SWING LOWS
 # ─────────────────────────────────────────────
 with tabs[3]:
+    st.subheader("Swing Lows — Today's Session (Price 100–300)")
+
+    swings_tab_df = read_df(q.SWING_LOWS_TAB)
+
+    if swings_tab_df.empty:
+        st.info("No swing lows detected yet for today in the 100–300 price range.")
+    else:
+        # Summary counts
+        total = len(swings_tab_df)
+        qualified = (swings_tab_df['status'] == 'Qualified').sum()
+        pending   = (swings_tab_df['status'] == 'Pending').sum()
+        rejected  = (swings_tab_df['status'] == 'Rejected').sum()
+        expired   = (swings_tab_df['status'] == 'Expired').sum()
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Total", total)
+        c2.metric("Qualified", qualified)
+        c3.metric("Pending", pending)
+        c4.metric("Rejected", rejected)
+        c5.metric("Expired", expired)
+
+        st.divider()
+
+        # Live filter bar
+        filter_text = st.text_input("Filter by strike (e.g. 25700)", key="swing_lows_filter")
+
+        display_df = swings_tab_df.copy()
+        if filter_text.strip():
+            display_df = display_df[display_df['symbol'].str.contains(filter_text.strip(), case=False, na=False)]
+
+        # Format timestamp
+        display_df['swing_time'] = display_df['swing_time'].apply(format_timestamp)
+
+        # Row highlighting by status
+        def highlight_status(row):
+            color_map = {
+                'Qualified': 'background-color: #1a4a1a; color: white',
+                'Rejected':  'background-color: #4a1a1a; color: white',
+                'Pending':   'background-color: #4a3a00; color: white',
+                'Expired':   '',
+            }
+            style = color_map.get(row['status'], '')
+            return [style] * len(row)
+
+        styled = display_df.style.apply(highlight_status, axis=1)
+        st.dataframe(styled, use_container_width=True, height=500)
+
+# ─────────────────────────────────────────────
+# TAB 5: EVENTS
+# ─────────────────────────────────────────────
+with tabs[4]:
     st.subheader("Recent Trade Events")
     trades = read_df(q.TRADE_LOG)
     df_table(trades)
 
 # ─────────────────────────────────────────────
-# TAB 5: PERFORMANCE
+# TAB 6: PERFORMANCE
 # ─────────────────────────────────────────────
-with tabs[4]:
+with tabs[5]:
     if not trades.empty:
         st.subheader("R Distribution")
         fig = px.histogram(trades, x="realized_R", nbins=20)
         st.plotly_chart(fig, use_container_width=True)
 
 # ─────────────────────────────────────────────
-# TAB 6: CHART
+# TAB 7: CHART
 # ─────────────────────────────────────────────
-with tabs[5]:
+with tabs[6]:
     st.subheader("Option Price Chart")
 
     # Get current expiry from daily_state (set by baseline strategy)
@@ -333,9 +385,9 @@ with tabs[5]:
             st.success(f"**Active Position** | Entry: ₹{pos['entry_price']:.2f} | SL: ₹{pos['sl_price']:.2f}")
 
 # ─────────────────────────────────────────────
-# TAB 7: BAR VIEWER (Full Session from 9:15 AM)
+# TAB 8: BAR VIEWER (Full Session from 9:15 AM)
 # ─────────────────────────────────────────────
-with tabs[6]:
+with tabs[7]:
     st.subheader("🔍 Bar Viewer - Full Session (9:15 AM onwards) with Swing Labels")
 
     # Get current expiry from daily_state (set by baseline strategy)
@@ -443,7 +495,7 @@ with tabs[6]:
             table_display = display_df.copy()
             table_display['timestamp'] = table_display['timestamp'].apply(format_timestamp)
             # Reorder columns to show swing_label after timestamp
-            cols = ['timestamp', 'swing_label', 'open', 'high', 'low', 'close', 'volume']
+            cols = ['timestamp', 'swing_label', 'open', 'high', 'low', 'close', 'vwap', 'atp', 'volume']
             st.dataframe(table_display[cols], use_container_width=True, height=600)
 
             # Display swing summary if any
@@ -454,9 +506,9 @@ with tabs[6]:
                 st.dataframe(swing_summary, use_container_width=True)
 
 # ─────────────────────────────────────────────
-# TAB 8: CONTROLS (SAFE)
+# TAB 9: CONTROLS (SAFE)
 # ─────────────────────────────────────────────
-with tabs[7]:
+with tabs[8]:
     st.warning("Controls are SAFE MODE (no orders)")
 
     if st.button("⏸ Pause New Entries"):

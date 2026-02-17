@@ -67,6 +67,7 @@ class BarData:
         self.close = None
         self.volume = 0
         self.vwap = None
+        self.atp = None   # Exchange-provided session ATP (average_price from WebSocket tick)
         self.tick_count = 0
     
     def update_tick(self, ltp, volume=1):
@@ -97,6 +98,7 @@ class BarData:
             'close': self.close,
             'volume': self.volume,
             'vwap': self.vwap,
+            'atp': self.atp,
             'tick_count': self.tick_count,
         }
 
@@ -1193,6 +1195,10 @@ class DataPipeline:
 
                             # Store updated cumulative values
                             self.session_vwap_data[symbol] = vwap_data
+
+                        # Capture exchange ATP at bar close
+                        if average_price > 0:
+                            current_bar.atp = average_price
 
                         self.bars[symbol].append(current_bar)
                         # Store when bar was RECEIVED, not bar's timestamp (for watchdog)

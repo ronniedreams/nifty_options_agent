@@ -166,9 +166,46 @@ WHERE symbol LIKE ?
 ORDER BY symbol
 """
 
+# Swing Lows Tab — today's swing lows (price 100-300 only), with status derived from filter pipeline
+SWING_LOWS_TAB = """
+SELECT
+    asl.swing_time,
+    asl.symbol,
+    ROUND(asl.swing_price, 2)  AS swing_price,
+    ROUND(asl.vwap, 2)         AS vwap,
+    ROUND(((asl.swing_price - asl.vwap) / asl.vwap) * 100, 2) AS vwap_pct,
+    CASE
+        WHEN fr.symbol IS NOT NULL THEN 'Rejected'
+        WHEN sc.symbol IS NOT NULL
+             AND ((COALESCE(b.highest_high, asl.swing_price) + 1 - asl.swing_price) / asl.swing_price) >= 0.02
+             AND ((COALESCE(b.highest_high, asl.swing_price) + 1 - asl.swing_price) / asl.swing_price) <= 0.10
+             THEN 'Qualified'
+        WHEN sc.symbol IS NOT NULL THEN 'Pending'
+        ELSE 'Expired'
+    END AS status,
+    COALESCE(fr.rejection_reason, '') AS rejection_reason
+FROM all_swings_log asl
+LEFT JOIN swing_candidates sc
+    ON asl.symbol = sc.symbol AND sc.active = 1
+LEFT JOIN (
+    SELECT symbol, rejection_reason
+    FROM filter_rejections
+    WHERE (symbol, timestamp) IN (
+        SELECT symbol, MAX(timestamp) FROM filter_rejections GROUP BY symbol
+    )
+) fr ON asl.symbol = fr.symbol
+LEFT JOIN (
+    SELECT symbol, MAX(high) AS highest_high FROM bars GROUP BY symbol
+) b ON asl.symbol = b.symbol
+WHERE asl.swing_type = 'Low'
+AND asl.swing_price BETWEEN 100 AND 300
+AND DATE(asl.swing_time) = DATE('now', 'localtime')
+ORDER BY asl.swing_time DESC
+"""
+
 # Bar Viewer - All bars from 9:15 AM onwards (today's session)
 LAST_20_BARS = """
-SELECT timestamp, open, high, low, close, volume
+SELECT timestamp, open, high, low, close, vwap, atp, volume
 FROM bars
 WHERE symbol = ?
 AND DATE(timestamp) = DATE('now', 'localtime')

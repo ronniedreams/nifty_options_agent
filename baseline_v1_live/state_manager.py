@@ -273,6 +273,8 @@ class StateManager:
                 high REAL,
                 low REAL,
                 close REAL,
+                vwap REAL,
+                atp REAL,
                 volume REAL,
                 PRIMARY KEY (symbol, timestamp)
             )
@@ -414,6 +416,24 @@ class StateManager:
             logger.info("Migration complete: Created operational_state table")
         else:
             logger.debug("operational_state table already exists")
+
+        # Migration 5: Add vwap column to bars table
+        cursor.execute("PRAGMA table_info(bars)")
+        bars_columns = {col[1] for col in cursor.fetchall()}
+        if 'vwap' not in bars_columns:
+            logger.info("Migrating bars table to add vwap column...")
+            cursor.execute("ALTER TABLE bars ADD COLUMN vwap REAL")
+            self.conn.commit()
+            logger.info("Migration complete: Added vwap column to bars")
+
+        # Migration 6: Add atp column to bars table
+        cursor.execute("PRAGMA table_info(bars)")
+        bars_columns = {col[1] for col in cursor.fetchall()}
+        if 'atp' not in bars_columns:
+            logger.info("Migrating bars table to add atp column...")
+            cursor.execute("ALTER TABLE bars ADD COLUMN atp REAL")
+            self.conn.commit()
+            logger.info("Migration complete: Added atp column to bars")
 
     @atomic_transaction
     def save_positions(self, positions: List[Dict]):
@@ -899,7 +919,9 @@ class StateManager:
 
         for symbol, bar in bars_dict.items():
             cursor.execute('''
-                INSERT OR REPLACE INTO bars VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO bars
+                (symbol, timestamp, open, high, low, close, vwap, atp, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 symbol,
                 bar['timestamp'],
@@ -907,6 +929,8 @@ class StateManager:
                 bar['high'],
                 bar['low'],
                 bar['close'],
+                bar.get('vwap'),
+                bar.get('atp'),
                 bar['volume']
             ))
 

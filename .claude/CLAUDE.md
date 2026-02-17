@@ -59,7 +59,8 @@ docker-compose stop trading_agent && docker-compose rm -f trading_agent && docke
 | 5 | Debug live Positions and Orders tab in monitor dashboard | Tabs not showing live data correctly |
 | 7 | Debug mobile app — not connecting, returns HTTP 401 | Likely Basic Auth or session issue with the EC2 reverse proxy |
 | 8 | Add "Swing Lows" tab to monitor dashboard | Chronological table of all swing lows with VWAP, VWAP% gap, filter results, status (qualified/rejected/pending). Live text filter bar on strike (filters as user types). Row highlighting: green=qualified, red=rejected, yellow=pending. Summary count. Data from `swing_log` SQLite or `all_swings_log` in-memory. |
-| 9 | Add additional info to bar viewer (VWAP etc.) | Enhance the bar viewer tab in monitor dashboard to show per-bar VWAP alongside OHLCV data. Also show VWAP% gap and swing markers on the bar. |
+| ~~9~~ | ~~Add additional info to bar viewer (VWAP etc.)~~ | ~~Enhance the bar viewer tab in monitor dashboard to show per-bar VWAP alongside OHLCV data.~~ |
+| 10 | Debug Toggle EC2 button (Samsung Android) | Find bugs/errors in the EC2 start/stop shortcut button created for Samsung Android phone |
 
 **Completed:**
 - ~~Task 1~~: cancel-verify non-list orderbook — fixed (`order_manager.py`, type check + string check before iterating)
