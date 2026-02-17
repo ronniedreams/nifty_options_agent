@@ -393,3 +393,5 @@ Use this to see: exact order payloads, broker responses, cancel confirmations, f
 python -m baseline_v1_live.check_system
 python -m baseline_v1_live.baseline_v1_live --expiry 30JAN25 --atm 23500
 ```
+
+**NEVER commit real credentials.** No passwords, API keys, TOTP secrets, or tokens in any committed file — including `.claude/` docs, theory docs, skill files, or comments. Always use `<placeholder>` or reference `.env`. If a credential appears anywhere in tracked files, it will be pushed to GitHub and exposed publicly.
