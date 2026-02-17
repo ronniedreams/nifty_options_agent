@@ -155,6 +155,7 @@ class DataPipeline:
         self.is_failover_active = False
         self.last_zerodha_tick_time = {}     # Zerodha ticks tracked even when on Angel One
         self.zerodha_continuous_tick_start = None  # When Zerodha ticks resumed (for switchback)
+        self.subscription_started_at = None       # When subscribe_options() was last called
 
         # VWAP fallback: if history API lag prevents complete VWAP from 9:15 AM,
         # fall back to exchange-provided average_price (ATP) from WebSocket ticks.
@@ -831,6 +832,8 @@ class DataPipeline:
 
             with self.lock:
                 self.subscribed_symbols.update(all_symbols)
+                if self.subscription_started_at is None:
+                    self.subscription_started_at = datetime.now(IST)
 
             logger.info(f"Subscribed to {len(symbols)} option symbols + {1 if spot_symbol else 0} spot symbol")
 
@@ -898,6 +901,32 @@ class DataPipeline:
 
                 # Check 2 & 3: Data flow (only check if we have subscribed symbols and data has started)
                 with self.lock:
+                    # NEW Check 2a: Subscribed but no ticks EVER received.
+                    # Catches "WS proxy up but Zerodha session expired" — the proxy TCP
+                    # connection stays alive so is_connected stays True, but Zerodha
+                    # rejects its own WebSocket with HTTP 403. No ticks flow, so
+                    # first_data_received_at is never set and the staleness checks below
+                    # are skipped indefinitely. We detect this by timing how long we've
+                    # been subscribed with zero ticks.
+                    if (self.subscribed_symbols
+                            and self.first_data_received_at is None
+                            and self.subscription_started_at is not None
+                            and self._is_market_open()):
+                        _now = datetime.now(IST)
+                        seconds_since_subscribed = (
+                            _now - self.subscription_started_at
+                        ).total_seconds()
+                        if seconds_since_subscribed > FAILOVER_NO_TICK_THRESHOLD:
+                            logger.warning(
+                                f"[MONITOR] No ticks received {seconds_since_subscribed:.0f}s "
+                                f"since subscription (threshold: {FAILOVER_NO_TICK_THRESHOLD}s)"
+                                f" - triggering failover"
+                            )
+                            self._trigger_failover_or_reconnect(
+                                f"NO_TICKS_SINCE_SUBSCRIBE:{seconds_since_subscribed:.0f}s"
+                            )
+                            continue
+
                     if self.subscribed_symbols and self.first_data_received_at is not None:
                         now = datetime.now(IST)
 
@@ -911,14 +940,14 @@ class DataPipeline:
                             continue
 
                         # --- Zerodha tick staleness check ---
-                        # Use last_zerodha_tick_time (always updated by Zerodha callback)
-                        zerodha_tick_source = self.last_zerodha_tick_time if self.last_zerodha_tick_time else self.last_tick_time
-                        if zerodha_tick_source:
-                            most_recent_zerodha_tick = max(zerodha_tick_source.values())
-                            seconds_since_zerodha_tick = (now - most_recent_zerodha_tick).total_seconds()
-
-                            if not self.is_failover_active:
-                                # On Zerodha: no ticks for threshold → failover to Angel One
+                        if not self.is_failover_active:
+                            # On Zerodha: check if ticks have gone stale → failover
+                            # Fall back to last_tick_time if last_zerodha_tick_time empty
+                            # (both are Zerodha ticks when active_source == 'zerodha')
+                            zerodha_tick_source = self.last_zerodha_tick_time if self.last_zerodha_tick_time else self.last_tick_time
+                            if zerodha_tick_source:
+                                most_recent_zerodha_tick = max(zerodha_tick_source.values())
+                                seconds_since_zerodha_tick = (now - most_recent_zerodha_tick).total_seconds()
                                 if seconds_since_zerodha_tick > FAILOVER_NO_TICK_THRESHOLD:
                                     logger.warning(
                                         f"[MONITOR] No Zerodha ticks for {seconds_since_zerodha_tick:.0f}s "
@@ -926,8 +955,14 @@ class DataPipeline:
                                     )
                                     self._trigger_failover_or_reconnect(f"NO_TICKS:{seconds_since_zerodha_tick:.0f}s")
                                     continue
-                            else:
-                                # On Angel One: check if Zerodha ticks have resumed for switchback
+                        else:
+                            # On Angel One: check if Zerodha ticks have RESUMED → switchback.
+                            # MUST use last_zerodha_tick_time ONLY — last_tick_time contains
+                            # Angel One ticks which would falsely indicate Zerodha is alive
+                            # and trigger a premature switchback to the dead Zerodha feed.
+                            if self.last_zerodha_tick_time:
+                                most_recent_zerodha_tick = max(self.last_zerodha_tick_time.values())
+                                seconds_since_zerodha_tick = (now - most_recent_zerodha_tick).total_seconds()
                                 if seconds_since_zerodha_tick <= FAILOVER_NO_TICK_THRESHOLD:
                                     # Zerodha ticks are flowing again - track how long
                                     if self.zerodha_continuous_tick_start is None:
@@ -943,6 +978,9 @@ class DataPipeline:
                                 else:
                                     # Zerodha ticks not flowing yet - reset the counter
                                     self.zerodha_continuous_tick_start = None
+                            else:
+                                # No Zerodha ticks at all — don't attempt switchback
+                                self.zerodha_continuous_tick_start = None
 
                         # Count fresh symbols (from active source)
                         fresh_count = 0
@@ -1518,6 +1556,7 @@ class DataPipeline:
 
                         with self.lock:
                             self.subscribed_symbols.update(symbols_to_resubscribe)
+                            self.subscription_started_at = datetime.now(IST)
 
                         logger.info(f"[RECONNECT]  Resubscribed to {len(symbols_to_resubscribe)} symbols")
 
