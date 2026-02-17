@@ -323,14 +323,28 @@ class LoginHandler:
                 allow_redirects=True,
             )
             if r.status_code == 200:
-                # OpenAlgo redirects to /broker or /dashboard on success
-                if "dashboard" in r.url or "broker" in r.url or r.status_code == 200:
+                url_lower = r.url.lower()
+                # Check for failure — redirect to login page means auth failed
+                if "login" in url_lower and "dashboard" not in url_lower:
+                    logger.error(
+                        f"[LOGIN] Zerodha callback failed — redirected to login page: {r.url}"
+                    )
+                    return False
+                if "dashboard" in url_lower:
                     logger.info("[LOGIN] Zerodha broker login successful via OpenAlgo callback")
                     return True
-                else:
+                # Fallback — try to parse JSON response
+                try:
+                    data = r.json()
+                    if data.get("status") == "success":
+                        logger.info("[LOGIN] Zerodha broker login successful")
+                        return True
+                    else:
+                        logger.error(f"[LOGIN] Zerodha callback error: {data}")
+                        return False
+                except Exception:
                     logger.error(
-                        f"[LOGIN] OpenAlgo /zerodha/callback unexpected response: "
-                        f"url={r.url}, status={r.status_code}"
+                        f"[LOGIN] Zerodha callback unexpected response: url={r.url}"
                     )
                     return False
             else:
@@ -444,10 +458,21 @@ class LoginHandler:
             )
 
             if response.status_code == 200:
-                # OpenAlgo redirects to /broker or /dashboard on success
-                if "dashboard" in response.url or "broker" in response.url:
+                # Check for failure indicators first — OpenAlgo redirects to
+                # /auth/broker-login or /login on auth failure, which falsely
+                # matches a naive "broker" in URL check.
+                url_lower = response.url.lower()
+                if "login" in url_lower and "dashboard" not in url_lower:
+                    logger.error(
+                        f"[LOGIN] Angel One login failed — redirected to login page: "
+                        f"{response.url}"
+                    )
+                    return False
+
+                if "dashboard" in url_lower:
                     logger.info("[LOGIN] Angel One broker login successful via OpenAlgo callback")
                     return True
+
                 # Check response body for success indicators
                 try:
                     data = response.json()
@@ -460,16 +485,12 @@ class LoginHandler:
                         )
                         return False
                 except Exception:
-                    # HTML response — check URL
-                    if "error" in response.url.lower() or "login" in response.url.lower():
-                        logger.error(
-                            f"[LOGIN] Angel One login redirected to error/login: {response.url}"
-                        )
-                        return False
-                    logger.info(
-                        f"[LOGIN] Angel One login OK (redirected to {response.url})"
+                    # HTML response — if we got here without dashboard in URL,
+                    # it's likely a failure page
+                    logger.error(
+                        f"[LOGIN] Angel One login — unexpected response page: {response.url}"
                     )
-                    return True
+                    return False
             else:
                 logger.error(
                     f"[LOGIN] Angel One /angel/callback HTTP {response.status_code}: "
