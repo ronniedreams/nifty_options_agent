@@ -97,7 +97,8 @@ Use ASCII only in all `logger.*()` calls and `print()` statements:
 ## Rule 17: EC2 Deployment Safety
 - **Never deploy during market hours (9:15 AM – 3:30 PM IST)**
 - Always `git pull` and test locally first
-- `docker-compose down` is safe; `docker-compose down -v` is DESTRUCTIVE (deletes volumes)
+- `docker-compose down` and `docker-compose down -v` are both safe (data is in bind mounts under `./data/`, not named volumes)
+- **Never delete `./data/` directory** on EC2 — contains Historify DuckDB, trading state, logs
 - Container health monitor via cron (every 2 min) — sends Telegram on crash
 
 ## Rule 18: Three-Way Sync
@@ -118,5 +119,5 @@ Laptop ↔ GitHub ↔ EC2: always pull before making changes; never force push; 
 | SL Circuit Breaker | Halt after 3 consecutive failures |
 | Intraday Only | MIS product, close by 3:15 PM |
 | No Emojis | ASCII only in logs/terminal |
-| No Volume Deletion | Never `docker-compose down -v` |
+| No Data Deletion | Never delete `./data/` dir on EC2 |
 | No Market Hours Deploy | Before 9:15 AM or after 3:30 PM |

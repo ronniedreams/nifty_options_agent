@@ -125,4 +125,4 @@ Pre-flight validation with error classification:
 | Angel One WS | ws://127.0.0.1:8766 | ws://openalgo_angelone:8766 |
 | Container name | — | baseline_v1_live |
 | Logs | file system | docker logs + host-mounted ./baseline_v1_live/logs |
-| State DB | live_state.db local | /app/state/live_state.db (named volume `trading_state`) |
+| State DB | live_state.db local | /app/state/live_state.db (bind mount `./data/trading_state`) |

@@ -144,19 +144,15 @@ docker compose up -d openalgo
 ## Volume Management
 
 ```bash
-# List volumes
-docker volume ls
+# Data is in bind mounts under ./data/ (not named volumes)
+ls -lh data/trading_state/
+ls -lh data/openalgo_db/
 
-# Inspect state volume
-docker volume inspect nifty_options_agent_trading_state
+# Backup (simple — data is on host filesystem)
+cp -r data/ backups/data_backup_$(date +%Y%m%d_%H%M%S)/
 
-# Backup volume
-docker run --rm -v nifty_options_agent_trading_state:/state -v $(pwd)/backups:/backup \
-  ubuntu tar czf /backup/state_backup_$(date +%Y%m%d_%H%M%S).tar.gz /state
-
-# Restore volume
-docker run --rm -v nifty_options_agent_trading_state:/state -v $(pwd)/backups:/backup \
-  ubuntu tar xzf /backup/state_backup_YYYYMMDD_HHMMSS.tar.gz -C /
+# Restore
+cp -r backups/data_backup_YYYYMMDD_HHMMSS/* data/
 ```
 
 ## Troubleshooting

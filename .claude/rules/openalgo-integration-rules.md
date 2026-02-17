@@ -16,12 +16,12 @@ paths: order_manager.py, data_pipeline.py, position_tracker.py, baseline_v1_live
 | Monitor | http://localhost:8050 | https://monitor.ronniedreams.in |
 
 ## Docker Services (docker-compose.yaml)
-- `openalgo` — Zerodha OpenAlgo, ports 5000+8765, volume `openalgo_data:/app/db`
-- `openalgo_angelone` — Angel One OpenAlgo, ports 5001+8766, volume `openalgo_angelone_data:/app/db`
-- `baseline_v1_live` — Trading agent, depends on both, volume `trading_state:/app/state`
-- `trading_monitor` — Streamlit dashboard, port 8050, read-only access to `trading_state`
+- `openalgo` — Zerodha OpenAlgo, ports 5000+8765, bind mount `./data/openalgo_db:/app/db`
+- `openalgo_angelone` — Angel One OpenAlgo, ports 5001+8766, bind mount `./data/openalgo_angelone_db:/app/db`
+- `baseline_v1_live` — Trading agent, depends on both, bind mount `./data/trading_state:/app/state`
+- `trading_monitor` — Streamlit dashboard, port 8050, read-only access to `./data/trading_state`
 
-**Named volumes (NEVER delete with `-v`):** `openalgo_data`, `openalgo_angelone_data`, `trading_state`, `openalgo_logs`, `openalgo_angelone_logs`
+**Persistent data (bind mounts under `./data/`):** All DB files (Historify DuckDB, OpenAlgo SQLite, trading state) live on the host filesystem and survive container rebuilds, `docker-compose down -v`, and Docker prune.
 
 ## OpenAlgo Python SDK (openalgo package)
 
@@ -75,7 +75,7 @@ response = client.positionbook(strategy="baseline_v1_live")
 Reconcile every 60 seconds. Trust broker as source of truth.
 
 ## API Analyzer (Best Debug Tool)
-OpenAlgo dashboard → **API Analyzer** tab logs every API call with full request/response. Persists across restarts (stored in named volume). Use for order debugging before looking at Python logs.
+OpenAlgo dashboard → **API Analyzer** tab logs every API call with full request/response. Persists across restarts (stored in bind-mounted `./data/openalgo_db/`). Use for order debugging before looking at Python logs.
 
 ## Error Handling
 - 3-retry with 2s delay for all broker calls
@@ -125,4 +125,4 @@ docker-compose stop baseline_v1_live && docker-compose rm -f baseline_v1_live &&
 3. Reconcile positions every 60s (trust broker)
 4. Monitor heartbeat for data quality
 5. Never hardcode API keys (use .env)
-6. **Never `docker-compose down -v`** — deletes all named volumes including Historify DuckDB and trading state
+6. **Persistent data is in `./data/`** — bind-mounted, survives Docker cleanup. Back up before deleting `data/` directory.

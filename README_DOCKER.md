@@ -54,8 +54,8 @@ docker compose logs -f trading_agent
 └─────────────────────────────────────────────────┘
         │                 │              │
         ▼                 ▼              ▼
-   Volumes:         Volumes:        Volumes:
-   openalgo_data    trading_state   logs/
+   Bind mounts:          Bind mounts:         Bind mounts:
+   ./data/openalgo_db    ./data/trading_state  logs/
 ```
 
 ## Services
@@ -266,8 +266,8 @@ docker compose logs trading_agent
 # Verify env file
 docker compose exec trading_agent cat baseline_v1_live/.env
 
-# Rebuild from scratch
-docker compose down -v
+# Rebuild from scratch (safe — data is in bind mounts under ./data/)
+docker compose down
 docker compose build --no-cache
 docker compose up -d
 ```
@@ -381,7 +381,7 @@ docker compose logs -f trading_agent
 ## Support & Maintenance
 
 - **Logs location**: `./logs/` (host) and `/app/logs` (container)
-- **State location**: Docker volume `trading_state`
+- **State location**: `./data/trading_state/` (bind mount on host)
 - **Config location**: `./baseline_v1_live/.env`
 - **Dashboard**: http://localhost:8050 (monitor only - no trading controls)
 

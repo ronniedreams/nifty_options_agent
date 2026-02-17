@@ -220,17 +220,14 @@ docker-compose restart trading_agent
 docker-compose down && docker-compose up -d
 ```
 
-**NEVER use `docker-compose down -v`** — the `-v` flag deletes ALL named volumes permanently:
-- `openalgo_data` → Historify DuckDB (all option chain ML training data), OpenAlgo databases
-- `trading_state` → live_state.db (positions, orders, crash recovery)
-- `openalgo_angelone_data`, `openalgo_logs`, `openalgo_angelone_logs`
+**Persistent data uses bind mounts** (under `./data/`), not named Docker volumes:
+- `./data/openalgo_db/` → Historify DuckDB, OpenAlgo databases (survives rebuilds + `docker-compose down -v`)
+- `./data/trading_state/` → live_state.db (positions, orders, crash recovery)
+- `./data/openalgo_angelone_db/`, `./data/openalgo_logs/`, `./data/openalgo_angelone_logs/`
 
-If `docker-compose down -v` is ever truly necessary, **backup Historify first**:
+**NEVER delete the `./data/` directory** on EC2 — it contains all persistent state. To back up:
 ```bash
-# Backup Historify DuckDB before any volume-destructive operation
-docker cp openalgo_zerodha:/app/db/historify.duckdb ~/historify_backup_$(date +%Y%m%d_%H%M%S).duckdb
-# Also backup trading state
-docker cp baseline_v1_live:/app/state/live_state.db ~/live_state_backup_$(date +%Y%m%d_%H%M%S).db
+cp -r ~/nifty_options_agent/data ~/data_backup_$(date +%Y%m%d_%H%M%S)
 ```
 
 **Three-Way Sync (Laptop → GitHub → EC2):**
@@ -318,7 +315,7 @@ logger.info("[TAG] Message")  # Tags: [SWING], [ORDER], [FILL], [RECOVERY]
 When investigating order problems, check these sources **in order**:
 
 ### 1. OpenAlgo API Analyzer (BEST for order debugging)
-The OpenAlgo dashboard has a built-in **API Analyzer** that logs every API call (place order, cancel, orderbook, etc.) with full request/response details. **This persists across EC2 restarts** because it's stored in a named Docker volume (`openalgo_data:/app/db`).
+The OpenAlgo dashboard has a built-in **API Analyzer** that logs every API call (place order, cancel, orderbook, etc.) with full request/response details. **This persists across EC2 restarts** because it's stored in a bind-mounted host directory (`./data/openalgo_db/`).
 
 - **Local:** http://127.0.0.1:5000 → API Analyzer tab
 - **EC2:** https://openalgo.ronniedreams.in → API Analyzer tab (admin / <your-dashboard-password>)
@@ -331,7 +328,7 @@ Use this to see: exact order payloads, broker responses, cancel confirmations, f
 - Note: Logs were NOT persisted before the docker-compose volume fix (Feb 13, 2026). Logs prior to that date may be unavailable.
 
 ### 3. SQLite Database
-- Located at `~/nifty_options_agent/baseline_v1_live/live_state.db` (host) or `/app/state/live_state.db` (container via named volume — persists)
+- Located at `~/nifty_options_agent/data/trading_state/live_state.db` (host) or `/app/state/live_state.db` (container via bind mount)
 - Tables: `pending_orders`, `trade_log`, `positions`, `order_triggers`
 - Query via Python inside container: `docker exec baseline_v1_live python3 -c "import sqlite3; ..."`
 
