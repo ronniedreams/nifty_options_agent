@@ -994,6 +994,9 @@ class DataPipeline:
 
         logger.warning(f"[MONITOR] Data failure detected: {reason}")
 
+        # Send Telegram alert for data failure
+        self._send_telegram_alert(f"[DATA ALERT] WebSocket data failure: {reason}")
+
         if self.angelone_is_connected and not self.is_failover_active:
             # Angel One is ready - failover immediately
             self._failover_to_angelone(reason)
@@ -1574,6 +1577,11 @@ class DataPipeline:
             logger.critical(
                 f"[RECONNECT] Failed to reconnect after {WEBSOCKET_MAX_RECONNECT_ATTEMPTS} attempts"
             )
+            # Send critical Telegram alert
+            self._send_telegram_alert(
+                f"[CRITICAL] WebSocket reconnection FAILED after {WEBSOCKET_MAX_RECONNECT_ATTEMPTS} attempts. "
+                f"Manual intervention required at https://openalgo.somiljain.in"
+            )
             return False
 
         finally:
@@ -1845,6 +1853,7 @@ class DataPipeline:
 
         logger.warning(f"[FAILOVER] Switched to Angel One backup feed. Reason: {reason}")
         logger.warning("[FAILOVER] Zerodha reconnect running in background - will auto-switchback when ready")
+        self._send_telegram_alert(f"[FAILOVER] Switched to backup data feed. Reason: {reason}")
 
     def _failback_to_zerodha(self):
         """
@@ -1864,6 +1873,17 @@ class DataPipeline:
                 self.first_data_received_at = min(self.last_tick_time.values())
 
         logger.info("[FAILBACK] Switched back to Zerodha primary feed")
+        self._send_telegram_alert("[RECOVERY] Switched back to primary data feed (Zerodha)")
+
+    def _send_telegram_alert(self, message: str):
+        """Send Telegram notification for data pipeline alerts (throttled)"""
+        try:
+            from .telegram_notifier import get_notifier
+            notifier = get_notifier()
+            if notifier:
+                notifier.send_message(message)
+        except Exception as e:
+            logger.warning(f"[TELEGRAM] Could not send alert: {e}")
 
     def disconnect(self):
         """Disconnect WebSocket and clean up"""
