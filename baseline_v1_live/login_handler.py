@@ -38,40 +38,30 @@ class LoginHandler:
         """
         self.openalgo_host = openalgo_host.rstrip('/')
         self.openalgo_api_key = openalgo_api_key
-        self.session = self._make_session()
+        self.session = requests.Session()
 
-    @staticmethod
-    def _make_session() -> requests.Session:
+    def _get(self, url, **kwargs):
+        """GET with Secure cookie workaround for Docker HTTP connections."""
+        r = self.session.get(url, **kwargs)
+        self._strip_secure_cookies()
+        return r
+
+    def _post(self, url, **kwargs):
+        """POST with Secure cookie workaround for Docker HTTP connections."""
+        r = self.session.post(url, **kwargs)
+        self._strip_secure_cookies()
+        return r
+
+    def _strip_secure_cookies(self):
+        """Strip Secure flag from all session cookies.
+
+        OpenAlgo v2 sets USE_HTTPS=True, giving all cookies Secure=True.
+        Python's http.cookiejar refuses to send Secure cookies over plain HTTP
+        (http://openalgo:5000 inside Docker). Stripping Secure=False after
+        each response ensures cookies are included in subsequent HTTP requests.
         """
-        Create a requests.Session that sends Secure cookies over plain HTTP.
-
-        OpenAlgo v2 sets USE_HTTPS=True which marks all session cookies with
-        Secure=True. Python's http.cookiejar won't send Secure cookies over
-        HTTP (Docker internal: http://openalgo:5000). Two complementary fixes:
-
-        1. Cookie policy override: return_ok_secure() always returns True so
-           the cookiejar includes Secure cookies in HTTP requests.
-        2. Response hook: strips Secure=False from session.cookies after every
-           response so any newly-set cookies are also sent over HTTP.
-        """
-        import http.cookiejar
-
-        class _NoSecurePolicy(http.cookiejar.DefaultCookiePolicy):
-            def return_ok_secure(self, cookie, request):
-                return True   # send Secure cookies over HTTP too
-            def set_ok_secure(self, cookie, request):
-                return True   # accept Secure cookies from HTTP responses
-
-        session = requests.Session()
-        session.cookies.set_policy(_NoSecurePolicy())
-
-        def _strip_secure_hook(response, *args, **kwargs):
-            # Belt-and-suspenders: also flip the flag directly on stored cookies
-            for cookie in session.cookies:
-                cookie.secure = False
-
-        session.hooks["response"].append(_strip_secure_hook)
-        return session
+        for cookie in self.session.cookies:
+            cookie.secure = False
 
     def _get_csrf_token(self, host: str) -> str | None:
         """
@@ -86,7 +76,7 @@ class LoginHandler:
         """
         url = f"{host.rstrip('/')}/auth/csrf-token"
         try:
-            response = self.session.get(url, timeout=10)
+            response = self._get(url, timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 token = data.get("csrf_token")
@@ -135,7 +125,7 @@ class LoginHandler:
                 # Step 2: POST with form data + CSRF header
                 headers = {"X-CSRFToken": csrf_token}
                 payload = {"username": openalgo_username, "password": openalgo_password}
-                response = self.session.post(
+                response = self._post(
                     login_url, data=payload, headers=headers, timeout=10
                 )
 
@@ -326,7 +316,7 @@ class LoginHandler:
             # Step 4: Pass request_token to OpenAlgo callback (uses existing session cookie)
             callback_url = f"{self.openalgo_host}/zerodha/callback"
             logger.info("[LOGIN] Passing request_token to OpenAlgo /zerodha/callback...")
-            r = self.session.get(
+            r = self._get(
                 callback_url,
                 params={"request_token": request_token, "action": "login", "status": "success"},
                 timeout=15,
@@ -376,7 +366,7 @@ class LoginHandler:
         """
         url = f"{self.openalgo_host}/auth/broker-config"
         try:
-            r = self.session.get(url, timeout=10)
+            r = self._get(url, timeout=10)
             if r.status_code == 200:
                 data = r.json()
                 api_key = data.get("api_key") or data.get("broker_api_key")
@@ -449,7 +439,7 @@ class LoginHandler:
 
         try:
             logger.info(f"[LOGIN] Attempting Angel One broker login for {user_id}...")
-            response = angelone_handler.session.post(
+            response = angelone_handler._post(
                 callback_url, data=payload, timeout=15, allow_redirects=True
             )
 
