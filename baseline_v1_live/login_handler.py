@@ -43,17 +43,34 @@ class LoginHandler:
     @staticmethod
     def _make_session() -> requests.Session:
         """
-        Create a requests.Session that strips the Secure flag from all cookies
-        after every response. Required because OpenAlgo v2 sets USE_HTTPS=True,
-        which gives cookies Secure=True. Python's cookiejar won't send Secure
-        cookies over plain HTTP (http://openalgo:5000 inside Docker).
+        Create a requests.Session that sends Secure cookies over plain HTTP.
+
+        OpenAlgo v2 sets USE_HTTPS=True which marks all session cookies with
+        Secure=True. Python's http.cookiejar won't send Secure cookies over
+        HTTP (Docker internal: http://openalgo:5000). Two complementary fixes:
+
+        1. Cookie policy override: return_ok_secure() always returns True so
+           the cookiejar includes Secure cookies in HTTP requests.
+        2. Response hook: strips Secure=False from session.cookies after every
+           response so any newly-set cookies are also sent over HTTP.
         """
-        def _strip_secure(response, *args, **kwargs):
-            for cookie in response.cookies:
-                cookie.secure = False
+        import http.cookiejar
+
+        class _NoSecurePolicy(http.cookiejar.DefaultCookiePolicy):
+            def return_ok_secure(self, cookie, request):
+                return True   # send Secure cookies over HTTP too
+            def set_ok_secure(self, cookie, request):
+                return True   # accept Secure cookies from HTTP responses
 
         session = requests.Session()
-        session.hooks["response"].append(_strip_secure)
+        session.cookies.set_policy(_NoSecurePolicy())
+
+        def _strip_secure_hook(response, *args, **kwargs):
+            # Belt-and-suspenders: also flip the flag directly on stored cookies
+            for cookie in session.cookies:
+                cookie.secure = False
+
+        session.hooks["response"].append(_strip_secure_hook)
         return session
 
     def _get_csrf_token(self, host: str) -> str | None:
