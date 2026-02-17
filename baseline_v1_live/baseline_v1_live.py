@@ -1621,7 +1621,8 @@ def main():
         from .auto_detector import AutoDetector
         from .config import (
             OPENALGO_API_KEY, OPENALGO_HOST, ANGELONE_HOST,
-            AUTOMATED_LOGIN, ZERODHA_TOTP_SECRET, ANGELONE_TOTP_SECRET
+            AUTOMATED_LOGIN, ZERODHA_TOTP_SECRET, ANGELONE_TOTP_SECRET,
+            DEFINEDGE_TOTP_SECRET, DEFINEDGE_USER_ID, DEFINEDGE_PASSWORD
         )
         from .data_pipeline import DataPipeline
         from .login_handler import LoginHandler
@@ -1638,31 +1639,50 @@ def main():
                 # Try to load all credentials from environment
                 openalgo_username = os.getenv('OPENALGO_USERNAME', '')
                 openalgo_password = os.getenv('OPENALGO_PASSWORD', '')
-                zerodha_user_id = os.getenv('ZERODHA_USER_ID', '')
-                zerodha_password = os.getenv('ZERODHA_PASSWORD', '')
-                angelone_user_id = os.getenv('ANGELONE_USER_ID', '')
-                angelone_password = os.getenv('ANGELONE_PASSWORD', '')
 
-                required_creds = [
-                    openalgo_username, openalgo_password,
-                    zerodha_user_id, zerodha_password, angelone_user_id, angelone_password,
-                    ZERODHA_TOTP_SECRET, ANGELONE_TOTP_SECRET
-                ]
-
-                if all(required_creds):
-                    login_handler = LoginHandler(OPENALGO_HOST, OPENALGO_API_KEY)
-                    login_ok = login_handler.auto_login_all(
-                        openalgo_username, openalgo_password,
-                        zerodha_user_id, zerodha_password, ZERODHA_TOTP_SECRET,
-                        angelone_user_id, angelone_password, ANGELONE_TOTP_SECRET,
-                        ANGELONE_HOST
-                    )
-                    if login_ok:
-                        logger.info("[AUTO] Automated login successful, proceeding with auto-detect")
+                # Check if Definedge credentials are configured
+                if DEFINEDGE_USER_ID and DEFINEDGE_PASSWORD and DEFINEDGE_TOTP_SECRET:
+                    # Use Definedge auto-login
+                    logger.info("[AUTO] Using Definedge broker auto-login")
+                    if openalgo_username and openalgo_password:
+                        login_handler = LoginHandler(OPENALGO_HOST, OPENALGO_API_KEY)
+                        login_ok = login_handler.auto_login_definedge(
+                            openalgo_username, openalgo_password,
+                            DEFINEDGE_USER_ID, DEFINEDGE_PASSWORD, DEFINEDGE_TOTP_SECRET
+                        )
+                        if login_ok:
+                            logger.info("[AUTO] Definedge automated login successful, proceeding with auto-detect")
+                        else:
+                            logger.warning("[AUTO] Definedge automated login failed, proceeding with auto-detect (may retry in wait mode)")
                     else:
-                        logger.warning("[AUTO] Automated login failed, proceeding with auto-detect (may retry in wait mode)")
+                        logger.warning("[AUTO] Definedge credentials configured but OpenAlgo credentials missing")
                 else:
-                    logger.warning("[AUTO] Automated login enabled but not all credentials configured in .env")
+                    # Fall back to Zerodha/Angel One auto-login
+                    zerodha_user_id = os.getenv('ZERODHA_USER_ID', '')
+                    zerodha_password = os.getenv('ZERODHA_PASSWORD', '')
+                    angelone_user_id = os.getenv('ANGELONE_USER_ID', '')
+                    angelone_password = os.getenv('ANGELONE_PASSWORD', '')
+
+                    required_creds = [
+                        openalgo_username, openalgo_password,
+                        zerodha_user_id, zerodha_password, angelone_user_id, angelone_password,
+                        ZERODHA_TOTP_SECRET, ANGELONE_TOTP_SECRET
+                    ]
+
+                    if all(required_creds):
+                        login_handler = LoginHandler(OPENALGO_HOST, OPENALGO_API_KEY)
+                        login_ok = login_handler.auto_login_all(
+                            openalgo_username, openalgo_password,
+                            zerodha_user_id, zerodha_password, ZERODHA_TOTP_SECRET,
+                            angelone_user_id, angelone_password, ANGELONE_TOTP_SECRET,
+                            ANGELONE_HOST
+                        )
+                        if login_ok:
+                            logger.info("[AUTO] Automated login successful, proceeding with auto-detect")
+                        else:
+                            logger.warning("[AUTO] Automated login failed, proceeding with auto-detect (may retry in wait mode)")
+                    else:
+                        logger.warning("[AUTO] Automated login enabled but not all credentials configured in .env")
         else:
             logger.info("[AUTO] Automated login disabled (use manual login)")
 

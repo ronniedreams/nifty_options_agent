@@ -249,10 +249,15 @@ OPENALGO_USERNAME = os.getenv('OPENALGO_USERNAME', '')
 OPENALGO_PASSWORD = os.getenv('OPENALGO_PASSWORD', '')
 
 # TOTP Secrets for automated 2FA login
-# Get these from Zerodha/Angel One Security Settings → 2FA → Base32 secret key
+# Get these from Broker Security Settings → 2FA → Base32 secret key
 # DO NOT share or commit these to git
 ZERODHA_TOTP_SECRET = os.getenv('ZERODHA_TOTP_SECRET', '')
 ANGELONE_TOTP_SECRET = os.getenv('ANGELONE_TOTP_SECRET', '')
+DEFINEDGE_TOTP_SECRET = os.getenv('DEFINEDGE_TOTP_SECRET', '')
+
+# Definedge Broker Credentials (for automated login)
+DEFINEDGE_USER_ID = os.getenv('DEFINEDGE_USER_ID', '')
+DEFINEDGE_PASSWORD = os.getenv('DEFINEDGE_PASSWORD', '')
 
 # ============================================================================
 # STARTUP & FAILURE HANDLING

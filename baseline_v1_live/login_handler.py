@@ -1,14 +1,15 @@
 """
-Automated Login Handler for Zerodha and Angel One
+Automated Login Handler for Zerodha, Angel One, and Definedge
 
 Login sequence:
 1. Authenticate to OpenAlgo (<username> / <password>)
-2. Log in to Zerodha via OpenAlgo (with TOTP)
-3. Log in to Angel One via OpenAlgo (with TOTP)
+2. Log in to broker via OpenAlgo (with TOTP)
 
 Generates TOTP codes and attempts automated login via OpenAlgo API.
 Only use for paper trading (testing phase).
 For live trading, disable and use manual login (more secure).
+
+Supported brokers: Zerodha, Angel One, Definedge
 """
 
 import logging
@@ -200,6 +201,111 @@ class LoginHandler:
 
         except Exception as e:
             logger.error(f"[LOGIN] Angel One broker login exception: {e}")
+            return False
+
+    def login_definedge(self, user_id: str, password: str, totp_secret: str) -> bool:
+        """
+        Attempt automated Definedge broker login via OpenAlgo
+        (Requires prior OpenAlgo authentication)
+
+        Prerequisites:
+        1. Enable External TOTP in Definedge MyAccount → Security → Two-Factor Authentication
+        2. Get the TOTP secret key when setting up authenticator app
+
+        Args:
+            user_id: Definedge user ID
+            password: Definedge password
+            totp_secret: TOTP secret for 2FA (from Definedge MyAccount setup)
+
+        Returns:
+            True if login successful, False otherwise
+        """
+        totp_code = self.generate_totp(totp_secret)
+        if not totp_code:
+            logger.error("[LOGIN] Failed to generate TOTP code for Definedge")
+            return False
+
+        url = f"{self.openalgo_host}/api/v1/brokerlogin"
+        payload = {
+            "broker": "definedge",
+            "user_id": user_id,
+            "password": password,
+            "twofa": totp_code,
+        }
+
+        try:
+            logger.info(f"[LOGIN] Attempting Definedge broker login for {user_id}...")
+            response = self.session.post(url, json=payload, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "success":
+                    logger.info("[LOGIN] Definedge broker login successful")
+                    return True
+                else:
+                    logger.error(f"[LOGIN] Definedge broker login failed: {data.get('message', 'Unknown error')}")
+                    return False
+            else:
+                logger.error(f"[LOGIN] Definedge broker login API error: {response.status_code} - {response.text}")
+                return False
+
+        except Exception as e:
+            logger.error(f"[LOGIN] Definedge broker login exception: {e}")
+            return False
+
+    def auto_login_definedge(self, openalgo_username: str, openalgo_password: str,
+                              definedge_user_id: str, definedge_password: str,
+                              definedge_totp_secret: str) -> bool:
+        """
+        Perform automated login sequence for Definedge:
+        1. OpenAlgo authentication
+        2. Definedge broker login
+
+        Args:
+            openalgo_username: OpenAlgo username
+            openalgo_password: OpenAlgo password
+            definedge_user_id: Definedge user ID
+            definedge_password: Definedge password
+            definedge_totp_secret: Definedge TOTP secret
+
+        Returns:
+            True if all logins successful, False if any fails
+        """
+        logger.info("[LOGIN] Starting Definedge automated login sequence...")
+
+        # Step 1: Authenticate to OpenAlgo first
+        openalgo_ok = self.login_to_openalgo(openalgo_username, openalgo_password)
+        if not openalgo_ok:
+            logger.error("[LOGIN] OpenAlgo authentication failed, cannot proceed with Definedge login")
+            try:
+                from .telegram_notifier import get_notifier
+                notifier = get_notifier()
+                if notifier:
+                    notifier.send_message("[LOGIN] OpenAlgo auth FAILED — Definedge login skipped. Manual login required.")
+            except Exception as e:
+                logger.warning(f"[LOGIN] Could not send Telegram notification: {e}")
+            return False
+
+        # Step 2: Definedge broker login
+        definedge_ok = self.login_definedge(definedge_user_id, definedge_password, definedge_totp_secret)
+
+        # Send Telegram notification
+        try:
+            from .telegram_notifier import get_notifier
+            notifier = get_notifier()
+            if notifier:
+                if definedge_ok:
+                    notifier.send_message("[LOGIN] Definedge login successful")
+                else:
+                    notifier.send_message("[LOGIN] Definedge login FAILED — manual login required")
+        except Exception as e:
+            logger.warning(f"[LOGIN] Could not send Telegram notification: {e}")
+
+        if definedge_ok:
+            logger.info("[LOGIN] Definedge login successful")
+            return True
+        else:
+            logger.error("[LOGIN] Definedge broker login failed")
             return False
 
     def auto_login_all(self, openalgo_username: str, openalgo_password: str,
