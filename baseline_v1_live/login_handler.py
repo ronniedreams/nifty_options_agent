@@ -58,6 +58,12 @@ class LoginHandler:
                 data = response.json()
                 token = data.get("csrf_token")
                 if token:
+                    # OpenAlgo v2 sets session cookies with Secure=True (USE_HTTPS=True).
+                    # Python's requests.Session won't send Secure cookies over plain HTTP
+                    # (Docker internal: http://openalgo:5000). Strip the flag so the
+                    # session cookie is included in subsequent HTTP requests.
+                    for cookie in self.session.cookies:
+                        cookie.secure = False
                     return token
                 logger.error(f"[LOGIN] CSRF token response missing csrf_token field: {data}")
             else:
