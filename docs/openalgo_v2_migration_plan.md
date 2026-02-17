@@ -330,7 +330,7 @@ docker exec -it trading_agent python -m baseline_v1_live.check_system
 #### Step 2.6: Verify Dashboard Access
 - Open https://openalgo.ronniedreams.in
 - Clear browser cache
-- Login with Basic Auth (admin / your-dashboard-password)
+- Login with Basic Auth (admin / <your-dashboard-password>)
 - Verify React UI loads
 - Check broker connection status
 

@@ -40,7 +40,7 @@ See `CONTAINER_MONITOR_SETUP.md` for full instructions.
 
 ### Daily Login Required (Zerodha + Angel One)
 **Both sessions expire daily.** Every morning before 9:15 AM:
-1. Open **https://openalgo.ronniedreams.in** (admin / your-dashboard-password) → Log in with Zerodha (TOTP 2FA)
+1. Open **https://openalgo.ronniedreams.in** → Log in with Zerodha (TOTP 2FA)
 2. Open Angel One OpenAlgo URL → log in with Angel One
 
 **After login, restart trading agent:**
@@ -56,16 +56,16 @@ docker-compose stop trading_agent && docker-compose rm -f trading_agent && docke
 |---|------|-------|
 | 2 | ~~Upgrade Zerodha OpenAlgo to v2.0.0.0~~ | Done — EC2 running v2.0.0.0 (git pull in openalgo-zerodha/openalgo + docker rebuild; sync worker preserved) |
 | 3 | Verify Zerodha WebSocket ATP matches Kite VWAP | Critical — Stage-1 VWAP filter depends on this |
-| 4 | Check if Angel One WebSocket provides VWAP/ATP values | If absent, need fallback strategy |
 | 5 | Debug live Positions and Orders tab in monitor dashboard | Tabs not showing live data correctly |
-| 6 | Rebuild baseline_v1_live image on EC2 after market close (16-Feb-2026 only) | EC2 will show uncommitted changes on `login_handler.py` (SCP'd) — safe to ignore. Run: `git checkout baseline_v1_live/login_handler.py && git pull origin version/with-openalgo-v2 && docker-compose build baseline_v1_live && docker-compose up -d baseline_v1_live` |
 | 7 | Debug mobile app — not connecting, returns HTTP 401 | Likely Basic Auth or session issue with the EC2 reverse proxy |
 | 8 | Add "Swing Lows" tab to monitor dashboard | Chronological table of all swing lows with VWAP, VWAP% gap, filter results, status (qualified/rejected/pending). Live text filter bar on strike (filters as user types). Row highlighting: green=qualified, red=rejected, yellow=pending. Summary count. Data from `swing_log` SQLite or `all_swings_log` in-memory. |
 | 9 | Add additional info to bar viewer (VWAP etc.) | Enhance the bar viewer tab in monitor dashboard to show per-bar VWAP alongside OHLCV data. Also show VWAP% gap and swing markers on the bar. |
 
 **Completed:**
 - ~~Task 1~~: cancel-verify non-list orderbook — fixed (`order_manager.py`, type check + string check before iterating)
+- ~~Task 4~~: Check if Angel One WebSocket provides VWAP/ATP values — confirmed (Angel One provides VWAP data)
 - ~~Task 5~~: stale `all_swings_log` on restart — fixed (`baseline_v1_live.py` always resets dashboard data on startup; `state_manager.py` uses `INSERT OR IGNORE`)
+- ~~Task 6~~: Rebuild baseline_v1_live image on EC2 — completed
 
 ---
 
@@ -205,7 +205,7 @@ python -m baseline_v1_live.baseline_v1_live --auto
 - **EC2**: Ubuntu 22.04 | **IP**: 13.233.211.15 | **Domain**: ronniedreams.in
 - **SSH**: `ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15`
 - **Deploy**: `cd ~/nifty_options_agent && ./deploy.sh`
-- **Basic Auth**: admin / your-dashboard-password
+- **Basic Auth**: admin / <your-dashboard-password>
 
 | Service | URL |
 |---------|-----|
@@ -321,7 +321,7 @@ When investigating order problems, check these sources **in order**:
 The OpenAlgo dashboard has a built-in **API Analyzer** that logs every API call (place order, cancel, orderbook, etc.) with full request/response details. **This persists across EC2 restarts** because it's stored in a named Docker volume (`openalgo_data:/app/db`).
 
 - **Local:** http://127.0.0.1:5000 → API Analyzer tab
-- **EC2:** https://openalgo.ronniedreams.in → API Analyzer tab (admin / your-dashboard-password)
+- **EC2:** https://openalgo.ronniedreams.in → API Analyzer tab (admin / <your-dashboard-password>)
 
 Use this to see: exact order payloads, broker responses, cancel confirmations, fill timestamps.
 

@@ -12,7 +12,7 @@ paths: order_manager.py, data_pipeline.py, position_tracker.py, baseline_v1_live
 | Angel One OpenAlgo | http://127.0.0.1:5001 | http://openalgo_angelone:5000 |
 | Zerodha WS | ws://127.0.0.1:8765 | ws://openalgo:8765 |
 | Angel One WS | ws://127.0.0.1:8766 | ws://openalgo_angelone:8766 |
-| EC2 Dashboard | — | https://openalgo.ronniedreams.in (admin/your-dashboard-password) |
+| EC2 Dashboard | — | https://openalgo.ronniedreams.in (admin/<your-dashboard-password>) |
 | Monitor | http://localhost:8050 | https://monitor.ronniedreams.in |
 
 ## Docker Services (docker-compose.yaml)
