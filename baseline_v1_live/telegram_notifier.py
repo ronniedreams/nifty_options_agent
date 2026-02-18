@@ -493,20 +493,20 @@ class TelegramCommandListener:
         self._running = False
 
     def _poll_loop(self):
-        """Poll getUpdates every 3 seconds."""
+        """Long-poll getUpdates (returns instantly when a message arrives)."""
         while self._running:
             try:
                 self._process_updates()
             except Exception as e:
                 logger.error(f"[TELEGRAM-CMD] Poll error: {e}")
-            import time as _t
-            _t.sleep(3)
+                import time as _t
+                _t.sleep(3)  # Only sleep on error to avoid tight retry loop
 
     def _process_updates(self):
         url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
-        params = {'offset': self._offset, 'timeout': 1}
+        params = {'offset': self._offset, 'timeout': 15}
         try:
-            resp = requests.get(url, params=params, timeout=5)
+            resp = requests.get(url, params=params, timeout=20)
             if resp.status_code != 200:
                 return
             data = resp.json()
