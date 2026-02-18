@@ -373,26 +373,34 @@ class LoginHandler:
                 return token[0]
         return None
 
-    def _get_zerodha_api_key(self) -> str | None:
+    def _get_zerodha_api_key(self, max_retries: int = 3) -> str | None:
         """
         Fetch the Zerodha broker API key from OpenAlgo's /auth/broker-config.
-        Requires an authenticated session.
+        Requires an authenticated session. Retries on timeout.
         """
         url = f"{self.openalgo_host}/auth/broker-config"
-        try:
-            r = self._get(url, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                api_key = data.get("api_key") or data.get("broker_api_key")
-                if api_key:
-                    logger.info("[LOGIN] Retrieved Zerodha API key from OpenAlgo broker-config")
-                    return api_key
-            logger.error(
-                f"[LOGIN] Could not get Zerodha API key from broker-config: "
-                f"HTTP {r.status_code} {r.text[:200]}"
-            )
-        except Exception as e:
-            logger.error(f"[LOGIN] Exception fetching broker-config: {e}")
+        for attempt in range(1, max_retries + 1):
+            try:
+                r = self._get(url, timeout=15)
+                if r.status_code == 200:
+                    data = r.json()
+                    api_key = data.get("api_key") or data.get("broker_api_key")
+                    if api_key:
+                        logger.info("[LOGIN] Retrieved Zerodha API key from OpenAlgo broker-config")
+                        return api_key
+                logger.error(
+                    f"[LOGIN] Could not get Zerodha API key from broker-config: "
+                    f"HTTP {r.status_code} {r.text[:200]}"
+                )
+                return None  # Non-timeout error, don't retry
+            except Exception as e:
+                logger.warning(
+                    f"[LOGIN] broker-config fetch failed (attempt {attempt}/{max_retries}): {e}"
+                )
+                if attempt < max_retries:
+                    import time as _t
+                    _t.sleep(5)
+        logger.error("[LOGIN] Zerodha API key not available after retries")
         return None
 
     def login_angelone(self, user_id: str, password: str, totp_secret: str,
