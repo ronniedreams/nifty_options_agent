@@ -184,9 +184,6 @@ class OrderManager:
         self.consecutive_sl_failures = 0
         self.emergency_exit_triggered = False
         
-        # Callback invoked after any order is placed (for data feed re-subscription)
-        self._on_order_placed_callback = None
-
         # Churn detector: prevents runaway cancel/place loops
         self.churn_detector = OrderChurnDetector()
 
@@ -483,13 +480,6 @@ class OrderManager:
 
                 # Reset failure counter on success
                 self.consecutive_sl_failures = 0
-
-                # Re-subscribe symbol in QUOTE mode (counteracts OpenAlgo v2 LTP downgrade)
-                if self._on_order_placed_callback:
-                    try:
-                        self._on_order_placed_callback(symbol)
-                    except Exception as cb_err:
-                        logger.warning(f"[RESUB] Callback failed for {symbol}: {cb_err}")
 
                 return order_id
             else:
@@ -1113,12 +1103,6 @@ class OrderManager:
                 if response.get('status') == 'success':
                     order_id = response.get('orderid')
                     logger.info(f"[ORDER-PLACED] {symbol} SL trigger {trigger_price:.2f} limit {limit_price:.2f} QTY {quantity} | ID: {order_id}")
-                    # Re-subscribe symbol in QUOTE mode (counteracts OpenAlgo v2 LTP downgrade)
-                    if self._on_order_placed_callback:
-                        try:
-                            self._on_order_placed_callback(symbol)
-                        except Exception as cb_err:
-                            logger.warning(f"[RESUB] Callback failed for {symbol}: {cb_err}")
                     return order_id
                 else:
                     error_msg = response.get('message', 'Unknown error')
@@ -1157,12 +1141,6 @@ class OrderManager:
                 if response.get('status') == 'success':
                     order_id = response.get('orderid')
                     logger.info(f"[ORDER-PLACED] {symbol} LIMIT @ {price} QTY {quantity} | ID: {order_id}")
-                    # Re-subscribe symbol in QUOTE mode (counteracts OpenAlgo v2 LTP downgrade)
-                    if self._on_order_placed_callback:
-                        try:
-                            self._on_order_placed_callback(symbol)
-                        except Exception as cb_err:
-                            logger.warning(f"[RESUB] Callback failed for {symbol}: {cb_err}")
                     return order_id
                 else:
                     error_msg = response.get('message', 'Unknown error')

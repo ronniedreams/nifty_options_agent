@@ -150,10 +150,6 @@ class BaselineV1Live:
         self.continuous_filter.reset_daily_data()
         
         self.order_manager = OrderManager()
-        # Wire re-subscribe callback: after any order placement, re-subscribe the symbol
-        # in QUOTE mode to counteract OpenAlgo v2's internal LTP downgrade.
-        self.order_manager._on_order_placed_callback = lambda sym: self.data_pipeline.resubscribe_symbol(sym)
-
         self.position_tracker = PositionTracker(order_manager=self.order_manager)
         self.telegram = get_notifier()
         self.data_pipeline.telegram = self.telegram  # Enable failover/failback Telegram alerts
@@ -936,21 +932,6 @@ class BaselineV1Live:
                         f"Stale: {health['stale_symbols']}"
                     )
 
-                    # Periodic re-subscribe: symbols with pending orders may have
-                    # been downgraded to LTP by OpenAlgo v2 since the last resub.
-                    try:
-                        pending_symbols = set()
-                        for opt_type in ['CE', 'PE']:
-                            pending = self.order_manager.pending_limit_orders.get(opt_type)
-                            if pending and isinstance(pending, dict):
-                                sym = pending.get('symbol')
-                                if sym:
-                                    pending_symbols.add(sym)
-                        if pending_symbols:
-                            self.data_pipeline.resubscribe_symbols_batch(list(pending_symbols))
-                    except Exception as e:
-                        logger.warning(f"[HEARTBEAT] Periodic re-subscribe failed: {e}")
-
                     last_heartbeat = time.time()
                 
                 # Sleep until next check
@@ -1320,9 +1301,8 @@ class BaselineV1Live:
                     elif staleness > STALE_SYMBOL_THRESHOLD:
                         logger.warning(
                             f"[STALE-SYMBOL] {symbol} no bars for {staleness:.0f}s "
-                            f"(>{STALE_SYMBOL_THRESHOLD}s) -- re-subscribing"
+                            f"(>{STALE_SYMBOL_THRESHOLD}s)"
                         )
-                        self.data_pipeline.resubscribe_symbol(symbol)
 
             # Unblock stale symbols whose bars have resumed
             for symbol in list(self._stale_blocked_symbols):

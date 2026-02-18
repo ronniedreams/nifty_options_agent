@@ -847,57 +847,6 @@ class DataPipeline:
             logger.error(f"Failed to subscribe to options: {e}")
             raise
 
-    def resubscribe_symbol(self, symbol: str):
-        """Re-subscribe a single symbol in QUOTE mode after order placement.
-
-        OpenAlgo v2 internally re-subscribes ordered symbols in LTP mode
-        (for order monitoring), which kills our QUOTE mode feed. This method
-        uses a 3-second delayed thread to let OpenAlgo v2's LTP downgrade
-        happen first, then overrides with QUOTE mode.
-        """
-        if not self.is_connected:
-            logger.warning(f"[RESUB] Cannot re-subscribe {symbol}: WebSocket not connected")
-            return
-
-        def _delayed_resub():
-            import time as _time
-            _time.sleep(3)  # Let OpenAlgo v2 LTP downgrade happen first
-            if not self.is_connected:
-                logger.warning(f"[RESUB] Delayed re-subscribe aborted for {symbol}: disconnected")
-                return
-            instruments = [{"exchange": EXCHANGE, "symbol": symbol}]
-            try:
-                self.client.subscribe_quote(
-                    instruments,
-                    on_data_received=self._on_quote_update_zerodha
-                )
-                logger.info(f"[RESUB] Re-subscribed {symbol} in QUOTE mode (3s delay)")
-            except Exception as e:
-                logger.warning(f"[RESUB] Failed to re-subscribe {symbol}: {e}")
-
-        import threading
-        t = threading.Thread(target=_delayed_resub, daemon=True, name=f"resub-{symbol}")
-        t.start()
-
-    def resubscribe_symbols_batch(self, symbols):
-        """Re-subscribe multiple symbols in QUOTE mode (for periodic heartbeat resub).
-
-        Unlike resubscribe_symbol(), this is immediate (no delay) since it's called
-        periodically from the heartbeat block, not right after order placement.
-        """
-        if not self.is_connected or not symbols:
-            return
-
-        instruments = [{"exchange": EXCHANGE, "symbol": s} for s in symbols]
-        try:
-            self.client.subscribe_quote(
-                instruments,
-                on_data_received=self._on_quote_update_zerodha
-            )
-            logger.info(f"[RESUB-BATCH] Re-subscribed {len(symbols)} symbols in QUOTE mode")
-        except Exception as e:
-            logger.warning(f"[RESUB-BATCH] Failed to batch re-subscribe: {e}")
-
     def start_connection_monitor(self):
         """
         Start background thread to monitor WebSocket connection health
