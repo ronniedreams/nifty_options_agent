@@ -468,10 +468,26 @@ class TelegramCommandListener:
         """Start the polling thread."""
         if self._running:
             return
+        # Flush all pending updates so we don't process stale commands from before startup
+        self._flush_pending_updates()
         self._running = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True, name="telegram-cmd")
         self._thread.start()
         logger.info("[TELEGRAM-CMD] Command listener started")
+
+    def _flush_pending_updates(self):
+        """Skip all queued updates so only new commands after startup are processed."""
+        try:
+            url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
+            resp = requests.get(url, params={'offset': self._offset, 'timeout': 1}, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get('result', [])
+                if results:
+                    self._offset = results[-1]['update_id'] + 1
+                    logger.info(f"[TELEGRAM-CMD] Flushed {len(results)} pending updates on startup")
+        except Exception as e:
+            logger.debug(f"[TELEGRAM-CMD] Flush error (non-critical): {e}")
 
     def stop(self):
         self._running = False

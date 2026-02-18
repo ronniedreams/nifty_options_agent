@@ -237,6 +237,48 @@ class BaselineV1Live:
             # 4. Load pending and active orders
             pending_limit, active_sl = self.state_manager.load_orders()
 
+            # 4b. Discard orders from a different expiry (stale cross-day orders)
+            current_expiry = self.expiry_date  # e.g. '24FEB26'
+            stale_limit = {}
+            for otype, order in list(pending_limit.items()):
+                sym = order.get('symbol', '')
+                if current_expiry and current_expiry not in sym:
+                    logger.warning(
+                        f"[RECOVERY] Discarding stale limit order for {sym} "
+                        f"(expiry mismatch, current: {current_expiry})"
+                    )
+                    stale_limit[otype] = order
+                    del pending_limit[otype]
+
+            stale_sl = {}
+            for sym, order in list(active_sl.items()):
+                if current_expiry and current_expiry not in sym:
+                    logger.warning(
+                        f"[RECOVERY] Discarding stale SL order for {sym} "
+                        f"(expiry mismatch, current: {current_expiry})"
+                    )
+                    stale_sl[sym] = order
+                    del active_sl[sym]
+
+            if stale_limit or stale_sl:
+                total_stale = len(stale_limit) + len(stale_sl)
+                logger.warning(
+                    f"[RECOVERY] Discarded {total_stale} stale orders from previous expiry"
+                )
+
+            # Also discard positions from a different expiry
+            stale_positions = [
+                p for p in open_positions_data
+                if current_expiry and current_expiry not in p.get('symbol', '')
+            ]
+            if stale_positions:
+                for p in stale_positions:
+                    logger.warning(
+                        f"[RECOVERY] Discarding stale position for {p.get('symbol')} "
+                        f"(expiry mismatch, current: {current_expiry})"
+                    )
+                    open_positions_data.remove(p)
+
             # 5. Restore to OrderManager
             self.order_manager.restore_state(pending_limit, active_sl)
 
