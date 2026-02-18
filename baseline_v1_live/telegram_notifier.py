@@ -433,6 +433,176 @@ Detection: {datetime.now(IST).strftime('%H:%M:%S')}
         self.send_message(message.strip())
 
 
+class TelegramCommandListener:
+    """
+    Background daemon thread polling Telegram getUpdates API for commands.
+
+    Recognizes commands from authorized chat_id only:
+    - /kill  -> creates KILL_SWITCH file
+    - /pause -> creates PAUSE_SWITCH file
+    - /resume -> removes PAUSE_SWITCH file
+    - /status -> reports current state
+    """
+
+    def __init__(self, bot_token: str, chat_id: str, state_dir: str,
+                 notifier: 'TelegramNotifier' = None,
+                 status_callback=None):
+        self.bot_token = bot_token
+        self.chat_id = str(chat_id)
+        self.state_dir = state_dir
+        self.notifier = notifier
+        self.status_callback = status_callback  # callable returning status string
+        self._offset = 0
+        self._running = False
+        self._thread = None
+
+    @property
+    def kill_switch_file(self):
+        return os.path.join(self.state_dir, 'KILL_SWITCH')
+
+    @property
+    def pause_switch_file(self):
+        return os.path.join(self.state_dir, 'PAUSE_SWITCH')
+
+    def start(self):
+        """Start the polling thread."""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True, name="telegram-cmd")
+        self._thread.start()
+        logger.info("[TELEGRAM-CMD] Command listener started")
+
+    def stop(self):
+        self._running = False
+
+    def _poll_loop(self):
+        """Poll getUpdates every 3 seconds."""
+        while self._running:
+            try:
+                self._process_updates()
+            except Exception as e:
+                logger.error(f"[TELEGRAM-CMD] Poll error: {e}")
+            import time as _t
+            _t.sleep(3)
+
+    def _process_updates(self):
+        url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
+        params = {'offset': self._offset, 'timeout': 1}
+        try:
+            resp = requests.get(url, params=params, timeout=5)
+            if resp.status_code != 200:
+                return
+            data = resp.json()
+            if not data.get('ok'):
+                return
+            for update in data.get('result', []):
+                self._offset = update['update_id'] + 1
+                msg = update.get('message', {})
+                chat_id = str(msg.get('chat', {}).get('id', ''))
+                text = (msg.get('text') or '').strip().lower()
+
+                if chat_id != self.chat_id:
+                    continue  # Ignore messages from unauthorized chats
+
+                if text == '/kill':
+                    self._handle_kill()
+                elif text == '/pause':
+                    self._handle_pause()
+                elif text == '/resume':
+                    self._handle_resume()
+                elif text == '/status':
+                    self._handle_status()
+                elif text in ('/menu', '/help', '/start'):
+                    self._handle_menu()
+        except requests.exceptions.Timeout:
+            pass
+        except Exception as e:
+            logger.debug(f"[TELEGRAM-CMD] Update fetch error: {e}")
+
+    def _handle_kill(self):
+        with open(self.kill_switch_file, 'w') as f:
+            f.write(f"triggered via Telegram /kill at {datetime.now(IST).isoformat()}")
+        logger.critical("[TELEGRAM-CMD] /kill received -- KILL_SWITCH file created")
+        if self.notifier:
+            self.notifier.send_message(
+                "[CRITICAL] /kill received.\n"
+                "All pending entry orders will be cancelled.\n"
+                "Strategy will stop within 5 seconds.\n"
+                "Existing positions retained (SL orders active at broker).\n"
+                "To restart: delete KILL_SWITCH file and restart container."
+            )
+
+    def _handle_pause(self):
+        with open(self.pause_switch_file, 'w') as f:
+            f.write(f"triggered via Telegram /pause at {datetime.now(IST).isoformat()}")
+        logger.warning("[TELEGRAM-CMD] /pause received -- PAUSE_SWITCH file created")
+
+        # Report pending orders so user knows what's still live at broker
+        pending_info = ""
+        if self.status_callback:
+            try:
+                status = self.status_callback()
+                # Extract pending orders line from status
+                for line in status.split('\n'):
+                    if 'Pending orders' in line:
+                        pending_info = f"\n{line}"
+                        break
+            except Exception:
+                pass
+
+        if self.notifier:
+            self.notifier.send_message(
+                f"[PAUSE] /pause received. Strategy paused.\n"
+                f"No new orders will be placed or modified.\n"
+                f"Existing pending orders remain live at broker.{pending_info}\n"
+                f"Send /resume to resume."
+            )
+
+    def _handle_resume(self):
+        if os.path.exists(self.pause_switch_file):
+            os.remove(self.pause_switch_file)
+        logger.info("[TELEGRAM-CMD] /resume received -- PAUSE_SWITCH file removed")
+        if self.notifier:
+            self.notifier.send_message(
+                "[RESUME] /resume received. Strategy resuming.\n"
+                "Order placement re-enabled."
+            )
+
+    def _handle_status(self):
+        is_paused = os.path.exists(self.pause_switch_file)
+        is_killed = os.path.exists(self.kill_switch_file)
+
+        if is_killed:
+            state = "KILLED"
+        elif is_paused:
+            state = "PAUSED"
+        else:
+            state = "ACTIVE"
+
+        extra = ""
+        if self.status_callback:
+            try:
+                extra = self.status_callback()
+            except Exception:
+                extra = "(status callback error)"
+
+        msg = f"[STATUS] State: {state}\n{extra}" if extra else f"[STATUS] State: {state}"
+        if self.notifier:
+            self.notifier.send_message(msg)
+
+    def _handle_menu(self):
+        if self.notifier:
+            self.notifier.send_message(
+                "Available commands:\n\n"
+                "/status - Current state, positions, R, blocked symbols\n"
+                "/pause - Pause order placement (monitoring continues)\n"
+                "/resume - Resume order placement\n"
+                "/kill - Emergency shutdown (cancels pending orders + stops strategy). Existing positions kept with SL at broker. Requires restart.\n"
+                "/menu - Show this list"
+            )
+
+
 # Global instance
 _notifier = None
 

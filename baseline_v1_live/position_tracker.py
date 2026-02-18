@@ -591,7 +591,7 @@ class PositionTracker:
                     sl_order_id = self.order_manager.active_sl_orders[symbol].get('order_id')
                     if sl_order_id:
                         try:
-                            ob_response = self.client.orderbook(strategy="baseline_v1_live")
+                            ob_response = self.client.orderbook()
                             if ob_response.get('status') == 'success':
                                 orders = ob_response.get('data', [])
                                 if isinstance(orders, dict):

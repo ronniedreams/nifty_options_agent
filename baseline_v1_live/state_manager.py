@@ -435,6 +435,38 @@ class StateManager:
             self.conn.commit()
             logger.info("Migration complete: Added atp column to bars")
 
+        # Migration 7: Add pause_requested and kill_requested columns to operational_state
+        cursor.execute("PRAGMA table_info(operational_state)")
+        op_columns = {col[1] for col in cursor.fetchall()}
+        if 'pause_requested' not in op_columns:
+            logger.info("Migrating operational_state to add pause_requested/kill_requested columns...")
+            cursor.execute("ALTER TABLE operational_state ADD COLUMN pause_requested INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE operational_state ADD COLUMN kill_requested INTEGER DEFAULT 0")
+            self.conn.commit()
+            logger.info("Migration complete: Added pause/kill columns to operational_state")
+
+    def set_control_flag(self, flag_name: str, value: int):
+        """Set a control flag (pause_requested or kill_requested) in operational_state."""
+        if flag_name not in ('pause_requested', 'kill_requested'):
+            logger.error(f"Invalid control flag: {flag_name}")
+            return
+        cursor = self.conn.cursor()
+        cursor.execute(
+            f"UPDATE operational_state SET {flag_name} = ?, updated_at = ? WHERE id = 1",
+            (value, datetime.now(IST).isoformat())
+        )
+        self.conn.commit()
+        logger.info(f"[CONTROL] Set {flag_name} = {value}")
+
+    def get_control_flags(self) -> dict:
+        """Get current control flags from operational_state."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT pause_requested, kill_requested FROM operational_state WHERE id = 1")
+        row = cursor.fetchone()
+        if row:
+            return {'pause_requested': row[0] or 0, 'kill_requested': row[1] or 0}
+        return {'pause_requested': 0, 'kill_requested': 0}
+
     @atomic_transaction
     def save_positions(self, positions: List[Dict]):
         """Save all positions (open + closed) to database"""

@@ -210,6 +210,11 @@ ORDER_RETRY_DELAY = 2  # Seconds between retries
 STATE_DB_PATH = os.getenv('STATE_DB_PATH', os.path.join(os.path.dirname(__file__), 'live_state.db'))
 STATE_SAVE_INTERVAL = 30  # Save state every 30 seconds
 
+# Kill/Pause switch files (file-based, works even if DB locked)
+_STATE_DIR = os.getenv('STATE_DIR', os.path.dirname(__file__))
+KILL_SWITCH_FILE = os.path.join(_STATE_DIR, 'KILL_SWITCH')
+PAUSE_SWITCH_FILE = os.path.join(_STATE_DIR, 'PAUSE_SWITCH')
+
 # ============================================================================
 # LOGGING
 # ============================================================================

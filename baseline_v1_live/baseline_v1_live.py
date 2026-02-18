@@ -52,6 +52,8 @@ from .config import (
     WAITING_MODE_SEND_HOURLY_STATUS,
     STALE_SYMBOL_THRESHOLD,
     STALE_SYMBOL_HARD_THRESHOLD,
+    KILL_SWITCH_FILE,
+    PAUSE_SWITCH_FILE,
 )
 from .data_pipeline import DataPipeline
 from .swing_detector import MultiSwingDetector
@@ -60,7 +62,7 @@ from .continuous_filter import ContinuousFilterEngine
 from .order_manager import OrderManager
 from .position_tracker import PositionTracker
 from .state_manager import StateManager
-from .telegram_notifier import get_notifier
+from .telegram_notifier import get_notifier, TelegramCommandListener
 from .notification_manager import NotificationManager
 from .startup_health_check import StartupHealthCheck
 
@@ -160,6 +162,8 @@ class BaselineV1Live:
         self.notification_manager = NotificationManager(self.telegram, self.state_manager)
         self.startup_checker = StartupHealthCheck(self.notification_manager)
         self.shutdown_requested = False
+        self._is_paused = False
+        self._pause_alerted = False  # Prevent repeated pause Telegram alerts
 
         # Track historical data loading state (to prevent notification spam)
         self.loading_historical_data = False
@@ -202,6 +206,14 @@ class BaselineV1Live:
         # to avoid brief naked-position windows and excessive API churn.
         # Structure: {'CE': {'candidate': ..., 'limit_price': ...} or None, 'PE': ...}
         self._pending_switch = {'CE': None, 'PE': None}
+
+        # Stale-blocked symbols: symbols cancelled due to stale data, not re-selectable
+        # until their bars resume (fresh last_bar_timestamp)
+        self._stale_blocked_symbols = set()
+
+        # Telegram throttling for stale-symbol alerts (prevent spam)
+        self._last_stale_telegram = {}    # {symbol: last_alert_timestamp}
+        self._stale_suppress_count = {}   # {symbol: count of suppressed alerts}
 
         # FIX: Load previous state from database (CRITICAL for crash recovery)
         self.load_state()
@@ -553,6 +565,35 @@ class BaselineV1Live:
             logger.error(f"Error getting health status: {e}", exc_info=True)
             raise
         
+        # Start Telegram command listener (/kill, /pause, /resume, /status)
+        from .config import TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+        if TELEGRAM_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            state_dir = os.getenv('STATE_DIR', os.path.dirname(__file__))
+
+            def _status_callback():
+                n_pos = len(self.position_tracker.open_positions)
+                summary = self.position_tracker.get_position_summary()
+                blocked = self._stale_blocked_symbols | self.order_manager.churn_detector.blocked_symbols
+                pending = self.order_manager.debug_pending_orders()
+                return (
+                    f"Positions: {n_pos}\n"
+                    f"Cumulative R: {summary.get('cumulative_R', 0):+.2f}\n"
+                    f"Pending orders: {pending}\n"
+                    f"Blocked symbols: {blocked or 'none'}"
+                )
+
+            self._telegram_cmd = TelegramCommandListener(
+                bot_token=TELEGRAM_BOT_TOKEN,
+                chat_id=TELEGRAM_CHAT_ID,
+                state_dir=state_dir,
+                notifier=self.telegram,
+                status_callback=_status_callback
+            )
+            self._telegram_cmd.start()
+            logger.info("[STARTUP] Telegram command listener started (/kill, /pause, /resume, /status)")
+        else:
+            self._telegram_cmd = None
+
         # Main trading loop (async)
         logger.info("Starting main trading loop (async)...")
         n_restored = len(self.position_tracker.open_positions)
@@ -631,7 +672,50 @@ class BaselineV1Live:
         while not self.shutdown_requested:
             try:
                 tick_count += 1
-                
+
+                # [CRITICAL] DB FLAGS -> FILE SYNC (dashboard writes DB, we sync to files)
+                try:
+                    db_flags = self.state_manager.get_control_flags()
+                    if db_flags.get('kill_requested') == 1 and not os.path.exists(KILL_SWITCH_FILE):
+                        with open(KILL_SWITCH_FILE, 'w') as f:
+                            f.write(f"triggered from DB flag at {datetime.now(IST).isoformat()}")
+                    if db_flags.get('pause_requested') == 1 and not os.path.exists(PAUSE_SWITCH_FILE):
+                        with open(PAUSE_SWITCH_FILE, 'w') as f:
+                            f.write(f"triggered from DB flag at {datetime.now(IST).isoformat()}")
+                    if db_flags.get('pause_requested') == 0 and os.path.exists(PAUSE_SWITCH_FILE):
+                        # Only remove if DB says unpause (dashboard resume button)
+                        # Don't remove if file was created by circuit breaker or Telegram
+                        pass  # Let file-based check handle removal
+                except Exception:
+                    pass  # DB read failure should not block kill switch check
+
+                # [CRITICAL] KILL SWITCH CHECK (file-based, most reliable)
+                if os.path.exists(KILL_SWITCH_FILE):
+                    logger.critical("[KILL-SWITCH] KILL_SWITCH file detected -- initiating emergency shutdown")
+                    self.telegram.send_message(
+                        "[CRITICAL] [KILL-SWITCH] Emergency shutdown triggered via kill switch file"
+                    )
+                    self._emergency_kill_shutdown()
+                    break
+
+                # [CRITICAL] PAUSE SWITCH CHECK (file-based)
+                if os.path.exists(PAUSE_SWITCH_FILE):
+                    if not self._is_paused:
+                        self._is_paused = True
+                        self._pause_alerted = True
+                        logger.warning("[PAUSE] PAUSE_SWITCH file detected -- pausing order placement")
+                        self.telegram.send_message(
+                            "[PAUSE] Strategy paused via pause switch file.\n"
+                            "Data pipeline and monitoring continue.\n"
+                            "Remove PAUSE_SWITCH file or send /resume to resume."
+                        )
+                else:
+                    if self._is_paused:
+                        self._is_paused = False
+                        self._pause_alerted = False
+                        logger.info("[RESUME] PAUSE_SWITCH file removed -- resuming order placement")
+                        self.telegram.send_message("[RESUME] Strategy resumed. Order placement re-enabled.")
+
                 # [CRITICAL] WATCHDOG: Check data freshness every 30 seconds
                 if time.time() - last_watchdog_check > 30:
 
@@ -810,6 +894,21 @@ class BaselineV1Live:
                         f"Stale: {health['stale_symbols']}"
                     )
 
+                    # Periodic re-subscribe: symbols with pending orders may have
+                    # been downgraded to LTP by OpenAlgo v2 since the last resub.
+                    try:
+                        pending_symbols = set()
+                        for opt_type in ['CE', 'PE']:
+                            pending = self.order_manager.pending_limit_orders.get(opt_type)
+                            if pending and isinstance(pending, dict):
+                                sym = pending.get('symbol')
+                                if sym:
+                                    pending_symbols.add(sym)
+                        if pending_symbols:
+                            self.data_pipeline.resubscribe_symbols_batch(list(pending_symbols))
+                    except Exception as e:
+                        logger.warning(f"[HEARTBEAT] Periodic re-subscribe failed: {e}")
+
                     last_heartbeat = time.time()
                 
                 # Sleep until next check
@@ -891,6 +990,17 @@ class BaselineV1Live:
             open_position_symbols=set(self.position_tracker.open_positions.keys())
         )
         
+        # Filter out stale-blocked and churn-blocked symbols from best strikes
+        blocked_set = self._stale_blocked_symbols | self.order_manager.churn_detector.blocked_symbols
+        for option_type in ['CE', 'PE']:
+            candidate = best_strikes.get(option_type)
+            if candidate and candidate['symbol'] in blocked_set:
+                logger.info(
+                    f"[BLOCKED-FILTER] {option_type}: {candidate['symbol']} blocked "
+                    f"(stale or churn) -- removing from best strikes"
+                )
+                best_strikes[option_type] = None
+
         # Log current best strikes and candidates (INFO level for visibility)
         summary = self.continuous_filter.get_summary()
         if summary['total_candidates'] > 0:
@@ -968,6 +1078,31 @@ class BaselineV1Live:
         except Exception as e:
             logger.warning(f"Failed to save latest bars: {e}")
         
+        # 4. Skip order placement when paused (keep data pipeline + swing detection running)
+        if self._is_paused:
+            logger.debug("[PAUSED] Skipping order placement steps (paused)")
+            # Still process fills, positions, and state saving below
+            # Jump directly to step 6
+            fills = self.order_manager.check_fills_by_type()
+            current_prices = {symbol: bar.close for symbol, bar in latest_bars.items()}
+            for opt_type in ['CE', 'PE']:
+                if fills[opt_type]:
+                    self.handle_order_fill(fills[opt_type], current_prices)
+            self.position_tracker.update_prices(current_prices)
+            was_already_triggered = self.position_tracker.daily_exit_triggered
+            exit_reason = self.position_tracker.check_daily_exit()
+            if exit_reason and not was_already_triggered:
+                self.handle_daily_exit(exit_reason, current_prices)
+            if self.last_bar_update is None or \
+               (datetime.now(IST) - self.last_bar_update).total_seconds() > 60:
+                phantom_closed = self.position_tracker.reconcile_with_broker()
+                if phantom_closed:
+                    for sym in phantom_closed:
+                        self.continuous_filter.remove_swing_candidate(sym)
+                self.last_bar_update = datetime.now(IST)
+            self.save_state()
+            return
+
         # 4. Get order triggers based on price proximity and existing orders
         # Use CURRENT bars for real-time price checking, LATEST bars for metrics
         pending_orders = self.order_manager.get_pending_orders_by_type()
@@ -1042,6 +1177,30 @@ class BaselineV1Live:
                         limit_price
                     )
                     logger.info(f"[ORDER-RESULT-{option_type}] {result}: {candidate['symbol']} @ {limit_price:.2f}")
+
+                    # Handle churn circuit breaker signals
+                    if result == 'symbol_blocked':
+                        self.telegram.send_message(
+                            f"[CIRCUIT-BREAKER] {candidate['symbol']} blocked due to order churn\n"
+                            f"Rapid cancel/place loop detected. Symbol blocked until bars resume."
+                        )
+                    elif result == 'strategy_pause':
+                        logger.critical("[CIRCUIT-BREAKER] Global churn limit exceeded -- auto-pausing strategy")
+                        self.telegram.send_message(
+                            f"[CRITICAL] [CIRCUIT-BREAKER] Strategy auto-paused\n"
+                            f"Too many cancel/place cycles across all symbols.\n"
+                            f"Blocked symbols: {self.order_manager.churn_detector.blocked_symbols}\n"
+                            f"Manual intervention required: remove PAUSE_SWITCH file or send /resume"
+                        )
+                        self._is_paused = True
+                        # Create PAUSE_SWITCH file for persistent pause
+                        try:
+                            from .config import PAUSE_SWITCH_FILE
+                            with open(PAUSE_SWITCH_FILE, 'w') as f:
+                                f.write(f"auto-paused by circuit breaker at {datetime.now(IST).isoformat()}")
+                        except Exception as e:
+                            logger.error(f"Failed to create PAUSE_SWITCH file: {e}")
+                        return  # Stop processing this tick
                 else:
                     # Can't open - cancel any existing order
                     self.order_manager.manage_limit_order_for_type(option_type, None, None)
@@ -1097,19 +1256,41 @@ class BaselineV1Live:
                             f"(>{STALE_SYMBOL_HARD_THRESHOLD}s) -- cancelling {option_type} order"
                         )
                         self.order_manager.manage_limit_order_for_type(option_type, None, None)
-                        try:
-                            self.telegram.send_message(
-                                f"[STALE-SYMBOL] Cancelled {option_type} order for {symbol}\n"
-                                f"No bar data for {staleness:.0f}s. Possible OpenAlgo feed issue."
-                            )
-                        except Exception:
-                            pass
+                        # Add to stale-blocked set to prevent re-selection
+                        self._stale_blocked_symbols.add(symbol)
+                        # Throttle Telegram: send first alert, then suppress for 5 min
+                        last_alert = self._last_stale_telegram.get(symbol, 0)
+                        now_ts = time.time()
+                        if now_ts - last_alert > 300:  # 5-minute cooldown
+                            suppressed = self._stale_suppress_count.get(symbol, 0)
+                            suffix = f" ({suppressed} alerts suppressed)" if suppressed > 0 else ""
+                            try:
+                                self.telegram.send_message(
+                                    f"[STALE-SYMBOL] Cancelled {option_type} order for {symbol}\n"
+                                    f"No bar data for {staleness:.0f}s. Symbol blocked until bars resume.{suffix}"
+                                )
+                            except Exception:
+                                pass
+                            self._last_stale_telegram[symbol] = now_ts
+                            self._stale_suppress_count[symbol] = 0
+                        else:
+                            self._stale_suppress_count[symbol] = self._stale_suppress_count.get(symbol, 0) + 1
                     elif staleness > STALE_SYMBOL_THRESHOLD:
                         logger.warning(
                             f"[STALE-SYMBOL] {symbol} no bars for {staleness:.0f}s "
                             f"(>{STALE_SYMBOL_THRESHOLD}s) -- re-subscribing"
                         )
                         self.data_pipeline.resubscribe_symbol(symbol)
+
+            # Unblock stale symbols whose bars have resumed
+            for symbol in list(self._stale_blocked_symbols):
+                last_bar_time = self.data_pipeline.last_bar_timestamp.get(symbol)
+                if last_bar_time:
+                    staleness = (now - last_bar_time).total_seconds()
+                    if staleness < STALE_SYMBOL_THRESHOLD:
+                        self._stale_blocked_symbols.discard(symbol)
+                        self.order_manager.churn_detector.unblock_symbol(symbol)
+                        logger.info(f"[STALE-UNBLOCK] {symbol} bars resumed (staleness {staleness:.0f}s) -- unblocked")
 
         # 6. Check for order fills
         fills = self.order_manager.check_fills_by_type()
@@ -1511,10 +1692,37 @@ class BaselineV1Live:
             # Force exit if stuck
             sys.exit(1)
     
+    def _emergency_kill_shutdown(self):
+        """
+        Kill switch emergency shutdown: cancel all pending orders and stop the loop.
+
+        Unlike handle_emergency_shutdown(), this does NOT close open positions --
+        existing positions have SL orders at the broker and will be managed there.
+        This simply stops the strategy from placing new orders.
+        """
+        logger.critical("[KILL-SWITCH] Emergency kill shutdown starting...")
+        try:
+            # Cancel all pending entry orders (CE and PE)
+            self.order_manager.manage_limit_order_for_type('CE', None, None)
+            self.order_manager.manage_limit_order_for_type('PE', None, None)
+            logger.info("[KILL-SWITCH] All pending entry orders cancelled")
+
+            self.telegram.send_message(
+                "[CRITICAL] [KILL-SWITCH] Strategy stopped.\n"
+                "All pending entry orders cancelled.\n"
+                "Existing positions retained (SL orders active at broker).\n"
+                "Delete KILL_SWITCH file and restart to resume."
+            )
+        except Exception as e:
+            logger.error(f"[KILL-SWITCH] Error during kill shutdown: {e}")
+
+        self.save_state()
+        self.shutdown_requested = True
+
     def handle_emergency_shutdown(self):
         """
         EMERGENCY SHUTDOWN: Cancel all orders, exit all positions, save state
-        
+
         Called when critical failures occur (e.g., repeated SL placement failures)
         """
         logger.critical("[EMERGENCY] INITIATING EMERGENCY SHUTDOWN")

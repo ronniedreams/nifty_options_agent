@@ -506,16 +506,50 @@ with tabs[7]:
                 st.dataframe(swing_summary, use_container_width=True)
 
 # ─────────────────────────────────────────────
-# TAB 9: CONTROLS (SAFE)
+# TAB 9: CONTROLS
 # ─────────────────────────────────────────────
 with tabs[8]:
-    st.warning("Controls are SAFE MODE (no orders)")
+    from db import write_control_flag, get_control_flags, KILL_SWITCH_FILE, PAUSE_SWITCH_FILE
+    import os as _os
 
-    if st.button("⏸ Pause New Entries"):
-        st.info("Pause flag written (implement DB flag read in strategy)")
+    # Show current status
+    flags = get_control_flags()
+    pause_active = flags['pause_requested'] == 1 or _os.path.exists(PAUSE_SWITCH_FILE)
+    kill_active = flags['kill_requested'] == 1 or _os.path.exists(KILL_SWITCH_FILE)
 
-    if st.button("🛑 Kill Switch"):
-        st.error("Kill switch triggered (implement DB flag read in strategy)")
+    if kill_active:
+        st.error("Status: KILLED -- Strategy is stopped. Delete KILL_SWITCH file and restart.")
+    elif pause_active:
+        st.warning("Status: PAUSED -- Order placement is paused. Data pipeline continues.")
+    else:
+        st.success("Status: ACTIVE -- Strategy is running normally.")
+
+    st.divider()
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        if not pause_active:
+            if st.button("Pause Strategy"):
+                write_control_flag('pause_requested', 1)
+                st.warning("Pause signal sent. Strategy will pause within 5 seconds.")
+                st.rerun()
+        else:
+            if st.button("Resume Strategy"):
+                write_control_flag('pause_requested', 0)
+                st.success("Resume signal sent. Strategy will resume within 5 seconds.")
+                st.rerun()
+
+    with col2:
+        if not kill_active:
+            kill_confirm = st.checkbox("I confirm emergency shutdown", key="kill_confirm")
+            if st.button("KILL SWITCH", type="primary", disabled=not kill_confirm):
+                write_control_flag('kill_requested', 1)
+                st.error("Kill switch activated. Strategy is shutting down.")
+                st.rerun()
+
+    with col3:
+        st.caption("Pause: stops new orders, keeps monitoring.\nKill: cancels all orders and stops strategy.")
 
 # ─────────────────────────────────────────────
 # AUTO REFRESH
