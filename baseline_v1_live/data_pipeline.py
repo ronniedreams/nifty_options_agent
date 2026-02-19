@@ -67,7 +67,6 @@ class BarData:
         self.close = None
         self.volume = 0
         self.vwap = None
-        self.atp = None   # Exchange-provided session ATP (average_price from WebSocket tick)
         self.tick_count = 0
     
     def update_tick(self, ltp, volume=1):
@@ -98,7 +97,6 @@ class BarData:
             'close': self.close,
             'volume': self.volume,
             'vwap': self.vwap,
-            'atp': self.atp,
             'tick_count': self.tick_count,
         }
 
@@ -158,12 +156,6 @@ class DataPipeline:
         self.last_zerodha_tick_time = {}     # Zerodha ticks tracked even when on Angel One
         self.zerodha_continuous_tick_start = None  # When Zerodha ticks resumed (for switchback)
         self.subscription_started_at = None       # When subscribe_options() was last called
-
-        # VWAP fallback: if history API lag prevents complete VWAP from 9:15 AM,
-        # fall back to exchange-provided average_price (ATP) from WebSocket ticks.
-        # ATP = session VWAP computed by exchange from 9:15 AM.
-        self.vwap_from_websocket = False      # True = use ATP instead of cumulative calc
-        self.vwap_websocket_applied = set()   # Symbols already patched from ATP on first tick
 
         # Optional Telegram notifier for failover/failback alerts (set by caller after init)
         self.telegram = None
@@ -353,7 +345,6 @@ class DataPipeline:
         logger.info(f"[HIST] Historical data loaded: {successful} success, {failed} failed")
 
         # Verify completeness; retry up to 3x if Zerodha API lag is detected.
-        # Falls back to WebSocket ATP if all retries fail.
         self._ensure_complete_history(now)
 
         # Log bar counts and gap detection
@@ -391,9 +382,8 @@ class DataPipeline:
         Zerodha's intraday history API can have a ~15-minute lag when polled
         shortly after market open, returning far fewer bars than expected.
         This method retries up to 3 times (60s apart) using the history API.
-        If all 3 retries still show insufficient bars, it activates WebSocket
-        ATP fallback (vwap_from_websocket=True) so that VWAP values are sourced
-        from the exchange-provided average_price field in each tick instead.
+        If all 3 retries still show insufficient bars, logs a CRITICAL warning
+        and continues with partial history VWAP.
 
         Expected bar count = floor(minutes since 9:15 AM) - 1
         Trigger threshold  = actual_max_bars < expected * 0.8
@@ -421,7 +411,7 @@ class DataPipeline:
         logger.warning(
             f"[HIST] Incomplete history: {max_bars}/{expected_bars} bars loaded "
             f"(< 80% of expected). Likely Zerodha API lag. "
-            f"Retrying up to 3 times (60s apart) before WebSocket ATP fallback."
+            f"Retrying up to 3 times (60s apart) to get complete history."
         )
 
         for attempt in range(1, 4):
@@ -448,13 +438,12 @@ class DataPipeline:
                 )
                 return
 
-        # All 3 retries exhausted — activate WebSocket ATP fallback
-        with self.lock:
-            self.vwap_from_websocket = True
-        logger.warning(
-            f"[HIST-RETRY] All 3 retries failed. Activating WebSocket ATP fallback. "
-            f"VWAP will be sourced from exchange average_price as ticks arrive. "
-            f"All bar VWAPs will be patched on first tick per symbol."
+        # All 3 retries exhausted — log critical warning, proceed with partial history.
+        # Proceed with partial history VWAP — safer than any fallback.
+        logger.critical(
+            f"[HIST-RETRY] All 3 retries failed. Proceeding with partial history VWAP. "
+            f"VWAP values may be less accurate (missing early session bars). "
+            f"Check Zerodha history API availability."
         )
 
     def _reload_historical_vwap(self):
@@ -1117,8 +1106,6 @@ class DataPipeline:
 
             ltp = quote_data.get('ltp')
             volume = quote_data.get('volume', 1)
-            # Exchange-provided session VWAP (ATP). Present in quote/full mode ticks.
-            average_price = quote_data.get('average_price', 0)
 
             if not symbol or ltp is None:
                 return
@@ -1137,47 +1124,26 @@ class DataPipeline:
             bar_timestamp = now.replace(second=0, microsecond=0)
             
             with self.lock:
-                # WebSocket ATP fallback: on first tick for this symbol, patch all
-                # historical bar VWAPs with exchange ATP (accurate from 9:15 AM).
-                if (self.vwap_from_websocket
-                        and average_price > 0
-                        and symbol not in self.vwap_websocket_applied):
-                    for bar in self.bars.get(symbol, []):
-                        bar.vwap = average_price
-                    self.vwap_websocket_applied.add(symbol)
-                    logger.info(
-                        f"[VWAP-ATP] {symbol}: patched {len(self.bars.get(symbol, []))} "
-                        f"historical bars with exchange ATP={average_price:.2f}"
-                    )
-
                 # Check if we need to start a new bar
                 current_bar = self.current_bars.get(symbol)
 
                 if current_bar is None or current_bar.timestamp != bar_timestamp:
                     # Save completed bar
                     if current_bar is not None and current_bar.is_valid():
-                        if self.vwap_from_websocket and average_price > 0:
-                            # ATP fallback: use exchange-provided session VWAP directly
-                            current_bar.vwap = average_price
+                        # Cumulative session VWAP using (H+L+C)/3 formula
+                        vwap_data = self.session_vwap_data.get(symbol, {'cum_pv': 0.0, 'cum_vol': 0})
+                        typical_price = (current_bar.high + current_bar.low + current_bar.close) / 3
+                        vwap_data['cum_pv'] += typical_price * current_bar.volume
+                        vwap_data['cum_vol'] += current_bar.volume
+
+                        # Calculate and set session VWAP for this bar
+                        if vwap_data['cum_vol'] > 0:
+                            current_bar.vwap = vwap_data['cum_pv'] / vwap_data['cum_vol']
                         else:
-                            # Normal path: update cumulative VWAP accumulator
-                            vwap_data = self.session_vwap_data.get(symbol, {'cum_pv': 0.0, 'cum_vol': 0})
-                            typical_price = (current_bar.high + current_bar.low + current_bar.close) / 3
-                            vwap_data['cum_pv'] += typical_price * current_bar.volume
-                            vwap_data['cum_vol'] += current_bar.volume
+                            current_bar.vwap = typical_price
 
-                            # Calculate and set session VWAP for this bar
-                            if vwap_data['cum_vol'] > 0:
-                                current_bar.vwap = vwap_data['cum_pv'] / vwap_data['cum_vol']
-                            else:
-                                current_bar.vwap = typical_price
-
-                            # Store updated cumulative values
-                            self.session_vwap_data[symbol] = vwap_data
-
-                        # Capture exchange ATP at bar close
-                        if average_price > 0:
-                            current_bar.atp = average_price
+                        # Store updated cumulative values
+                        self.session_vwap_data[symbol] = vwap_data
 
                         self.bars[symbol].append(current_bar)
                         # Store when bar was RECEIVED, not bar's timestamp (for watchdog)
@@ -1199,11 +1165,6 @@ class DataPipeline:
 
                 # Update current bar with tick
                 current_bar.update_tick(ltp, volume)
-
-                # ATP fallback: keep current bar's VWAP up to date each tick
-                # so the filter sees the correct value even mid-bar.
-                if self.vwap_from_websocket and average_price > 0:
-                    current_bar.vwap = average_price
 
         except Exception as e:
             logger.error(f"[TICK] Error processing tick: {e}")

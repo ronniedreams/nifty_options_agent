@@ -343,15 +343,36 @@ with tabs[6]:
         # Fetch position data (if any)
         position_df = read_df(q.POSITION_FOR_SYMBOL, params=(symbol,))
 
-        # Calculate VWAP for metrics display
+        # Calculate VWAP for metrics display (recomputed from OHLCV — same as Swing Lows tab)
         current_vwap = None
         if not ohlc_df.empty:
+            # Save stored vwap from DB before overwriting (for debug comparison)
+            ohlc_df['stored_vwap'] = ohlc_df['vwap'].copy() if 'vwap' in ohlc_df.columns else None
+
+            # Recompute session VWAP from OHLCV (cumulative H+L+C/3 method)
             ohlc_df['typical_price'] = (ohlc_df['high'] + ohlc_df['low'] + ohlc_df['close']) / 3
             ohlc_df['tp_volume'] = ohlc_df['typical_price'] * ohlc_df['volume']
             ohlc_df['cumulative_tp_volume'] = ohlc_df['tp_volume'].cumsum()
             ohlc_df['cumulative_volume'] = ohlc_df['volume'].cumsum()
             ohlc_df['vwap'] = ohlc_df['cumulative_tp_volume'] / ohlc_df['cumulative_volume']
             current_vwap = ohlc_df['vwap'].iloc[-1]
+
+            # Debug info (inside empty check — uses stored_vwap set above)
+            with st.expander("Debug Info"):
+                st.write(f"OHLC shape: {ohlc_df.shape}")
+                st.write(f"Timestamp dtype: {ohlc_df['timestamp'].dtype}")
+                st.write(f"First timestamp: {ohlc_df['timestamp'].iloc[0]}")
+                st.write(f"Last timestamp: {ohlc_df['timestamp'].iloc[-1]}")
+                has_stored_vwap = 'stored_vwap' in ohlc_df.columns and ohlc_df['stored_vwap'].notna().any()
+                st.write(f"Stored VWAP in DB: {'YES' if has_stored_vwap else 'NO (NULL - bars_for_db fix not yet deployed?)'}")
+                if has_stored_vwap:
+                    last_stored = ohlc_df['stored_vwap'].dropna().iloc[-1]
+                    st.write(f"Stored VWAP (last bar): {last_stored:.2f} | Recomputed VWAP (last bar): {current_vwap:.2f}")
+                    diff = abs(last_stored - current_vwap)
+                    if diff > 1.0:
+                        st.warning(f"VWAP mismatch: {diff:.2f} Rs difference. Stored value may lag recomputed.")
+                st.write("Sample data (OHLCV + recomputed VWAP):")
+                st.dataframe(ohlc_df[['timestamp', 'open', 'high', 'low', 'close', 'vwap']].head())
 
         # Display chart info
         col_info1, col_info2, col_info3, col_info4 = st.columns(4)
@@ -361,20 +382,11 @@ with tabs[6]:
             st.metric("Swing Points", len(swings_df))
         with col_info3:
             if current_vwap is not None:
-                st.metric("Current VWAP", f"₹{current_vwap:.2f}")
+                st.metric("Current VWAP", f"Rs.{current_vwap:.2f}")
             else:
                 st.metric("Current VWAP", "N/A")
         with col_info4:
             st.metric("Has Position", "Yes" if not position_df.empty else "No")
-
-        # Debug info (can be removed later)
-        with st.expander("🔍 Debug Info"):
-            st.write(f"OHLC shape: {ohlc_df.shape}")
-            st.write(f"Timestamp dtype: {ohlc_df['timestamp'].dtype}")
-            st.write(f"First timestamp: {ohlc_df['timestamp'].iloc[0]}")
-            st.write(f"Last timestamp: {ohlc_df['timestamp'].iloc[-1]}")
-            st.write("Sample data:")
-            st.dataframe(ohlc_df[['timestamp', 'open', 'high', 'low', 'close']].head())
 
         # Display chart
         candlestick_chart(ohlc_df, swings_df, position_df, symbol)
@@ -495,7 +507,7 @@ with tabs[7]:
             table_display = display_df.copy()
             table_display['timestamp'] = table_display['timestamp'].apply(format_timestamp)
             # Reorder columns to show swing_label after timestamp
-            cols = ['timestamp', 'swing_label', 'open', 'high', 'low', 'close', 'vwap', 'atp', 'volume']
+            cols = ['timestamp', 'swing_label', 'open', 'high', 'low', 'close', 'vwap', 'volume']
             st.dataframe(table_display[cols], use_container_width=True, height=600)
 
             # Display swing summary if any

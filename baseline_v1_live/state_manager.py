@@ -274,7 +274,6 @@ class StateManager:
                 low REAL,
                 close REAL,
                 vwap REAL,
-                atp REAL,
                 volume REAL,
                 PRIMARY KEY (symbol, timestamp)
             )
@@ -425,15 +424,6 @@ class StateManager:
             cursor.execute("ALTER TABLE bars ADD COLUMN vwap REAL")
             self.conn.commit()
             logger.info("Migration complete: Added vwap column to bars")
-
-        # Migration 6: Add atp column to bars table
-        cursor.execute("PRAGMA table_info(bars)")
-        bars_columns = {col[1] for col in cursor.fetchall()}
-        if 'atp' not in bars_columns:
-            logger.info("Migrating bars table to add atp column...")
-            cursor.execute("ALTER TABLE bars ADD COLUMN atp REAL")
-            self.conn.commit()
-            logger.info("Migration complete: Added atp column to bars")
 
         # Migration 7: Add pause_requested and kill_requested columns to operational_state
         cursor.execute("PRAGMA table_info(operational_state)")
@@ -952,8 +942,8 @@ class StateManager:
         for symbol, bar in bars_dict.items():
             cursor.execute('''
                 INSERT OR REPLACE INTO bars
-                (symbol, timestamp, open, high, low, close, vwap, atp, volume)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (symbol, timestamp, open, high, low, close, vwap, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 symbol,
                 bar['timestamp'],
@@ -962,7 +952,6 @@ class StateManager:
                 bar['low'],
                 bar['close'],
                 bar.get('vwap'),
-                bar.get('atp'),
                 bar['volume']
             ))
 

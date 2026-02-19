@@ -549,6 +549,7 @@ class BaselineV1Live:
                                 'high': bar.high,
                                 'low': bar.low,
                                 'close': bar.close,
+                                'vwap': bar.vwap,
                                 'volume': bar.volume
                             }
                         }
@@ -1094,6 +1095,7 @@ class BaselineV1Live:
                     'high': bar.high,
                     'low': bar.low,
                     'close': bar.close,
+                    'vwap': bar.vwap,
                     'volume': bar.volume
                 }
             if bars_for_db:
