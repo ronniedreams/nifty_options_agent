@@ -232,6 +232,15 @@ docker-compose down && docker-compose up -d
 cp -r ~/nifty_options_agent/data ~/data_backup_$(date +%Y%m%d_%H%M%S)
 ```
 
+**Auto-start on EC2 boot (systemd service):**
+A systemd service `nifty-agent.service` is installed on EC2 (`/etc/systemd/system/nifty-agent.service`).
+It runs `docker compose up -d` automatically after Docker starts on every EC2 boot — including after `docker-compose down`.
+- This is an EC2 server config, not in the repo. If EC2 is ever terminated/replaced, re-run setup:
+```bash
+sudo nano /etc/systemd/system/nifty-agent.service   # paste service file
+sudo systemctl daemon-reload && sudo systemctl enable nifty-agent.service
+```
+
 **Three-Way Sync (Laptop → GitHub → EC2):**
 ```bash
 # Laptop: git add . && git commit -m "msg" && git push origin <branch>

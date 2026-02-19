@@ -1817,32 +1817,43 @@ class DataPipeline:
         """
         Connect to Angel One OpenAlgo instance (always-on backup).
         Called once during startup, runs silently in background.
+        Retries up to 5 times with 5s delay (handles transient startup issues
+        like missing /app/logs directory in the Angel One container).
         """
         if not ANGELONE_OPENALGO_API_KEY:
             logger.warning("[BACKUP] ANGELONE_OPENALGO_API_KEY not set - backup feed disabled")
             return
 
-        try:
-            self.angelone_client = api(
-                api_key=ANGELONE_OPENALGO_API_KEY,
-                host=ANGELONE_HOST,
-                ws_url=ANGELONE_WS_URL
-            )
-            connected = self.angelone_client.connect()
-            if not connected:
-                logger.error(f"[BACKUP] Angel One WebSocket authentication failed (return value: {connected})")
+        max_attempts = 5
+        retry_delay = 5
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self.angelone_client = api(
+                    api_key=ANGELONE_OPENALGO_API_KEY,
+                    host=ANGELONE_HOST,
+                    ws_url=ANGELONE_WS_URL
+                )
+                connected = self.angelone_client.connect()
+                if not connected:
+                    logger.warning(f"[BACKUP] Angel One WebSocket auth failed (attempt {attempt}/{max_attempts})")
+                    if attempt < max_attempts:
+                        time_module.sleep(retry_delay)
+                    continue
+
                 with self.lock:
-                    self.angelone_is_connected = False
+                    self.angelone_is_connected = True
+                logger.info(f"[BACKUP] Angel One connected: {ANGELONE_WS_URL}")
                 return
 
-            with self.lock:
-                self.angelone_is_connected = True
-            logger.info(f"[BACKUP] Angel One connected: {ANGELONE_WS_URL}")
+            except Exception as e:
+                logger.warning(f"[BACKUP] Angel One connect error (attempt {attempt}/{max_attempts}): {e}")
+                if attempt < max_attempts:
+                    time_module.sleep(retry_delay)
 
-        except Exception as e:
-            logger.error(f"[BACKUP] Failed to connect Angel One: {e}", exc_info=True)
-            with self.lock:
-                self.angelone_is_connected = False
+        logger.error(f"[BACKUP] Angel One failed to connect after {max_attempts} attempts - backup feed disabled")
+        with self.lock:
+            self.angelone_is_connected = False
 
     def subscribe_angelone_backup(self, symbols, spot_symbol=None):
         """
