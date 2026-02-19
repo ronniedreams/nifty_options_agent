@@ -1,13 +1,13 @@
 # Baseline V1 Live Trading Requirements
 
 # Core dependencies
-pandas>=2.0.0,<2.2.0
-numpy>=1.24.0,<2.0.0
+pandas>=2.2.0
+numpy>=2.0.0
 pytz>=2023.3
 python-dotenv>=1.0.0
 
 # OpenAlgo Python SDK
-openalgo>=1.0.0
+openalgo>=1.0.45
 
 # Telegram notifications
 requests>=2.31.0
@@ -22,3 +22,6 @@ pytest-asyncio>=0.21.0
 
 # Utilities
 python-dateutil>=2.8.2
+
+# TOTP authentication (for automated login)
+pyotp>=2.9.0

@@ -1,0 +1,54 @@
+* [33m3257206[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mfix/crash-loop-notifications[m[33m, [m[1;31morigin/fix/crash-loop-notifications[m[33m)[m Fix VWAP bug: Use deepcopy for swing_info to prevent reference corruption
+* [33me3ed244[m Fix OpenAlgo API request body - add apikey field
+* [33m7697bfd[m Fix health check and Telegram notification issues
+[31m|[m * [33m67fb46d[m[33m ([m[1;35mrefs/stash[m[33m)[m On fix/crash-loop-notifications: Save settings.local.json before revert
+[31m|[m[31m/[m[33m|[m 
+[31m|[m * [33mfa3adca[m index on fix/crash-loop-notifications: a151f53 Make STATE_DB_PATH configurable via environment variable
+[31m|[m[31m/[m  
+* [33ma151f53[m Make STATE_DB_PATH configurable via environment variable
+* [33mb3e6a48[m Fix Docker volume mount to not overwrite code directory
+* [33mf325c47[m Use --auto flag for baseline strategy to auto-detect ATM and expiry
+* [33ma02468f[m Add OpenAlgo v2 migration plan and tracking checklist
+* [33m016c629[m Fix test paths after moving to tests/ folder
+* [33m30e4cff[m Move test files to tests/ folder
+* [33m5754b16[m Organize documentation: move to docs/ folder
+* [33m4ed858a[m Add implementation summary document
+* [33m36bfafb[m Add comprehensive testing and deployment guide
+* [33m9edef35[m Implement failure handling and notification management
+*   [33m25081a0[m[33m ([m[1;31morigin/feature/order-flow-update[m[33m, [m[1;32mfeature/order-flow-update[m[33m)[m Merge branch 'main' into feature/order-flow-update
+[34m|[m[35m\[m  
+[34m|[m *   [33m595c80a[m[33m ([m[1;31morigin/main[m[33m, [m[1;32mmain[m[33m)[m Merge branch 'main' of https://github.com/ronniedreams/nifty_options_agent
+[34m|[m [36m|[m[1;31m\[m  
+[34m|[m [36m|[m * [33m2e822bb[m Add Telegram notification environment variables to docker-compose
+* [36m|[m [1;31m|[m [33mb25d633[m Implement market order profit booking at daily exits
+* [36m|[m [1;31m|[m [33m2245da1[m Fix order_manager code structure and enable all order management cases
+[36m|[m[36m/[m [1;31m/[m  
+* [1;31m/[m [33m65824fd[m Restructure skills from single files to directories with SKILL.md
+[1;31m|[m[1;31m/[m  
+* [33m6acff2f[m Add auto-detection for ATM and expiry with nearest-expiry selection
+* [33m29f7814[m Sync dashboard expiry with running strategy
+* [33m8b62109[m Fix strategy name inconsistency in order placement
+* [33m5fdb892[m Add custom subagents and skills with frontmatter registration
+* [33mabe0a72[m Fix swing updates to require 2-watch confirmation
+* [33m3ee05f7[m Fix GitHub Actions workflow for correct Docker builds
+* [33m9a52135[m[33m ([m[1;31morigin/feature/docker-ec2-fixes[m[33m, [m[1;32mfeature/docker-ec2-fixes[m[33m)[m Comprehensive documentation update: configurable values, SL orders, EC2 context
+* [33mb2ce704[m Add three-way sync workflow documentation for Claude Code
+* [33m2e6e141[m Add EC2 deployment documentation to CLAUDE.md
+* [33m8e74f26[m Fix volume paths for monitor dashboard DB access
+* [33m11fbdf2[m Add deploy.sh script for easy EC2 deployments
+[1;31m|[m * [33mebe2f12[m[33m ([m[1;31morigin/feature/railway-deployment[m[33m)[m Update Railway configs for multi-service deployment
+[1;31m|[m * [33mcb52a21[m Add Railway deployment configuration
+[1;31m|[m[1;31m/[m  
+* [33m96a2e1b[m Fix monitor dashboard DB path to use environment variable
+* [33mb87b13b[m Simplify OpenAlgo healthcheck to use socket-based check
+* [33m3cf0908[m Fix OpenAlgo path in docker-compose to match actual directory structure
+* [33m9d4c9bf[m Fix OpenAlgo healthcheck to use Python instead of wget
+* [33m2d59a90[m Mount OpenAlgo .env file as volume to fix empty .env issue
+* [33m825b5fc[m Fix OpenAlgo to build from local source instead of Docker Hub
+* [33md296dbe[m Fix Docker configuration for EC2 deployment
+* [33mf2381e4[m Add Dockerfile for monitor dashboard
+* [33m121abf7[m Add Docker deployment for EC2 Ubuntu
+* [33ma8c6355[m Update docs: Entry orders use SL (stop-limit) instead of LIMIT
+* [33m784f725[m Fix false WebSocket disconnection detection after market close
+* [33m6acbc1c[m Fix import paths, package name, and update gitignore
+* [33m071c281[m Initial commit: NIFTY options trading system (baseline_v1)

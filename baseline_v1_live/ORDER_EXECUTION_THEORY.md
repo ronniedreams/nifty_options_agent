@@ -167,6 +167,40 @@ Triggers:
 - Parameters: symbol, quantity, action, reason
 - Returns: order_id or None (if failed)
 
+## Code-Level Implementation Details
+
+Beyond the high-level theory, several critical technical safeguards are implemented in the source code to ensure robustness:
+
+### 1. Order Churn Management (`MODIFICATION_THRESHOLD`)
+To prevent excessive order modifications (which can trigger "RMS flags" or rate limits at the broker), `order_manager.py` uses a `MODIFICATION_THRESHOLD` of **₹0.50**. 
+- The system only modifies an existing SL order if the new calculated trigger price differs from the current one by more than 50 paise.
+- Changes smaller than this are ignored, keeping the order stable at the exchange.
+
+### 2. Intelligent Cancel Verification
+The system handles the asynchronous nature of broker APIs using a two-step verification process:
+- **Terminal State Detection:** In `_cancel_broker_order`, the system recognizes "Terminal Messages" (e.g., `"order not found"`, `"completed status"`, `"already cancelled"`). If the broker returns one of these, the system considers the order gone immediately without further polling.
+- **Synchronous Propagation Check:** If a cancel request is "successful" but not yet terminal, the system executes `_verify_order_cancelled`. This method polls the orderbook for up to 3 attempts with a 500ms delay to confirm the order is truly gone before placing a replacement. This prevents "orphaned" double-orders.
+
+### 3. Real-Time "Highest High" Tracking
+In `continuous_filter.py`, the `sl_percent` calculation is sensitized to real-time volatility:
+- The system doesn't just look at completed 1-minute bars.
+- The `_get_highest_high_since_swing` function explicitly checks the `current_bar` (the incomplete real-time bar) for a new high.
+- If a sudden spike occurs mid-minute, the SL% is updated immediately, potentially disqualifying a candidate or adjusting its position size before the minute ends.
+
+### 4. OpenAlgo Specific Field Mapping
+The order manager includes a critical mapping fix:
+- While many systems use a generic `status` field, OpenAlgo explicitly uses `order_status`.
+- The system correctly maps `broker_order.get('order_status')` to ensure fill detection works reliably across different brokers connected via OpenAlgo.
+
+### 5. Atomic State Persistence
+The `state_manager.py` utilizes a custom `@atomic_transaction` decorator:
+- It uses `BEGIN IMMEDIATE` to acquire a write lock on the SQLite database immediately.
+- It includes a built-in retry mechanism for `OperationalError` (database locked), ensuring that position updates and order logs are never lost due to concurrent dashboard reads.
+
+### 6. WebSocket Transition Deduping
+To prevent errors when transitioning from historical data loading ("gap-fill") to live WebSocket streaming, `baseline_v1_live.py` maintains `self._last_sent_bar_ts`. 
+- This ensures that if the historical data and live stream overlap (common during mid-day starts), the swing detector never receives a duplicate or out-of-order bar, which would otherwise corrupt the swing logic.
+
 ## Order Lifecycle
 
 ### Stage 1: Qualification

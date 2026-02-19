@@ -78,7 +78,7 @@ ORDER BY sc.option_type, sc.timestamp DESC
 # Filter Summary Metrics
 FILTER_SUMMARY_METRICS = """
 SELECT
-    (SELECT COUNT(*) FROM all_swings_log WHERE swing_type = 'Low' AND DATE(swing_time) = DATE('now', 'localtime')) as total_swings_detected,
+    (SELECT COUNT(*) FROM all_swings_log WHERE swing_type IN ('Low', 'Low Update') AND DATE(swing_time) = DATE('now', 'localtime')) as total_swings_detected,
     (SELECT COUNT(*) FROM swing_candidates WHERE active = 1) as static_filter_pass,
     (SELECT COUNT(*) FROM (
         SELECT sc.symbol
@@ -139,7 +139,7 @@ LIMIT 50
 
 # Chart queries
 OHLC_DATA = """
-SELECT timestamp, open, high, low, close, volume
+SELECT timestamp, open, high, low, close, vwap, volume
 FROM bars
 WHERE symbol = ?
 ORDER BY timestamp ASC
@@ -166,9 +166,63 @@ WHERE symbol LIKE ?
 ORDER BY symbol
 """
 
+# Swing Lows Tab — today's swing lows (price 100-300 only), with status derived from filter pipeline
+# VWAP is recomputed from bars OHLCV (cumulative H+L+C/3 method) to be consistent with Chart tab.
+# Falls back to stored all_swings_log.vwap only if no matching bar exists.
+SWING_LOWS_TAB = """
+WITH bar_vwap AS (
+    SELECT
+        symbol,
+        timestamp,
+        SUM((high + low + close) / 3.0 * volume) OVER (
+            PARTITION BY symbol ORDER BY timestamp
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) / NULLIF(SUM(volume) OVER (
+            PARTITION BY symbol ORDER BY timestamp
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ), 0) AS computed_vwap
+    FROM bars
+    WHERE DATE(timestamp) = DATE('now', 'localtime')
+)
+SELECT
+    asl.swing_time,
+    asl.symbol,
+    ROUND(asl.swing_price, 2)  AS swing_price,
+    ROUND(COALESCE(bv.computed_vwap, asl.vwap), 2) AS vwap,
+    ROUND(((asl.swing_price - COALESCE(bv.computed_vwap, asl.vwap)) / NULLIF(COALESCE(bv.computed_vwap, asl.vwap), 0)) * 100, 2) AS vwap_pct,
+    CASE
+        WHEN fr.symbol IS NOT NULL THEN 'Rejected'
+        WHEN sc.symbol IS NOT NULL
+             AND ((COALESCE(b.highest_high, asl.swing_price) + 1 - asl.swing_price) / asl.swing_price) >= 0.02
+             AND ((COALESCE(b.highest_high, asl.swing_price) + 1 - asl.swing_price) / asl.swing_price) <= 0.10
+             THEN 'Qualified'
+        WHEN sc.symbol IS NOT NULL THEN 'Pending'
+        ELSE 'Expired'
+    END AS status,
+    COALESCE(fr.rejection_reason, '') AS rejection_reason
+FROM all_swings_log asl
+LEFT JOIN bar_vwap bv ON bv.symbol = asl.symbol AND substr(bv.timestamp, 1, 16) = substr(asl.swing_time, 1, 16)
+LEFT JOIN swing_candidates sc
+    ON asl.symbol = sc.symbol AND sc.active = 1
+LEFT JOIN (
+    SELECT symbol, rejection_reason
+    FROM filter_rejections
+    WHERE (symbol, timestamp) IN (
+        SELECT symbol, MAX(timestamp) FROM filter_rejections GROUP BY symbol
+    )
+) fr ON asl.symbol = fr.symbol
+LEFT JOIN (
+    SELECT symbol, MAX(high) AS highest_high FROM bars GROUP BY symbol
+) b ON asl.symbol = b.symbol
+WHERE asl.swing_type IN ('Low', 'Low Update')
+AND asl.swing_price BETWEEN 100 AND 300
+AND DATE(asl.swing_time) = DATE('now', 'localtime')
+ORDER BY asl.swing_time DESC
+"""
+
 # Bar Viewer - All bars from 9:15 AM onwards (today's session)
 LAST_20_BARS = """
-SELECT timestamp, open, high, low, close, volume
+SELECT timestamp, open, high, low, close, vwap, volume
 FROM bars
 WHERE symbol = ?
 AND DATE(timestamp) = DATE('now', 'localtime')

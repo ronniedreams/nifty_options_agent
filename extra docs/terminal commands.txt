@@ -172,7 +172,7 @@
 
   # Credentials
   Username: admin
-  Password: your-dashboard-password
+  Password: <your-dashboard-password>
 
   ---
   Useful One-Liners

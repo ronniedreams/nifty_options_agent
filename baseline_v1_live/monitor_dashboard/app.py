@@ -78,6 +78,7 @@ tabs = st.tabs([
     "📌 Live Positions",
     "📦 Orders",
     "🔬 Filter Pipeline (3 Stages)",
+    "📉 Swing Lows",
     "🚨 Events",
     "📊 Performance",
     "📈 Chart",
@@ -199,26 +200,77 @@ with tabs[2]:
     df_table(rej, height=300)
 
 # ─────────────────────────────────────────────
-# TAB 4: EVENTS
+# TAB 4: SWING LOWS
 # ─────────────────────────────────────────────
 with tabs[3]:
+    st.subheader("Swing Lows — Today's Session (Price 100–300)")
+
+    swings_tab_df = read_df(q.SWING_LOWS_TAB)
+
+    if swings_tab_df.empty:
+        st.info("No swing lows detected yet for today in the 100–300 price range.")
+    else:
+        # Summary counts
+        total = len(swings_tab_df)
+        qualified = (swings_tab_df['status'] == 'Qualified').sum()
+        pending   = (swings_tab_df['status'] == 'Pending').sum()
+        rejected  = (swings_tab_df['status'] == 'Rejected').sum()
+        expired   = (swings_tab_df['status'] == 'Expired').sum()
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Total", total)
+        c2.metric("Qualified", qualified)
+        c3.metric("Pending", pending)
+        c4.metric("Rejected", rejected)
+        c5.metric("Expired", expired)
+
+        st.divider()
+
+        # Live filter bar
+        filter_text = st.text_input("Filter by strike (e.g. 25700)", key="swing_lows_filter")
+
+        display_df = swings_tab_df.copy()
+        if filter_text.strip():
+            display_df = display_df[display_df['symbol'].str.contains(filter_text.strip(), case=False, na=False)]
+
+        # Format timestamp
+        display_df['swing_time'] = display_df['swing_time'].apply(format_timestamp)
+
+        # Row highlighting by status
+        def highlight_status(row):
+            color_map = {
+                'Qualified': 'background-color: #1a4a1a; color: white',
+                'Rejected':  'background-color: #4a1a1a; color: white',
+                'Pending':   'background-color: #4a3a00; color: white',
+                'Expired':   '',
+            }
+            style = color_map.get(row['status'], '')
+            return [style] * len(row)
+
+        styled = display_df.style.apply(highlight_status, axis=1)
+        st.dataframe(styled, use_container_width=True, height=500)
+
+# ─────────────────────────────────────────────
+# TAB 5: EVENTS
+# ─────────────────────────────────────────────
+with tabs[4]:
     st.subheader("Recent Trade Events")
     trades = read_df(q.TRADE_LOG)
     df_table(trades)
 
 # ─────────────────────────────────────────────
-# TAB 5: PERFORMANCE
+# TAB 6: PERFORMANCE
 # ─────────────────────────────────────────────
-with tabs[4]:
+with tabs[5]:
     if not trades.empty:
         st.subheader("R Distribution")
         fig = px.histogram(trades, x="realized_R", nbins=20)
         st.plotly_chart(fig, use_container_width=True)
 
 # ─────────────────────────────────────────────
-# TAB 6: CHART
+# TAB 7: CHART
 # ─────────────────────────────────────────────
-with tabs[5]:
+with tabs[6]:
     st.subheader("Option Price Chart")
 
     # Get current expiry from daily_state (set by baseline strategy)
@@ -291,15 +343,36 @@ with tabs[5]:
         # Fetch position data (if any)
         position_df = read_df(q.POSITION_FOR_SYMBOL, params=(symbol,))
 
-        # Calculate VWAP for metrics display
+        # Calculate VWAP for metrics display (recomputed from OHLCV — same as Swing Lows tab)
         current_vwap = None
         if not ohlc_df.empty:
+            # Save stored vwap from DB before overwriting (for debug comparison)
+            ohlc_df['stored_vwap'] = ohlc_df['vwap'].copy() if 'vwap' in ohlc_df.columns else None
+
+            # Recompute session VWAP from OHLCV (cumulative H+L+C/3 method)
             ohlc_df['typical_price'] = (ohlc_df['high'] + ohlc_df['low'] + ohlc_df['close']) / 3
             ohlc_df['tp_volume'] = ohlc_df['typical_price'] * ohlc_df['volume']
             ohlc_df['cumulative_tp_volume'] = ohlc_df['tp_volume'].cumsum()
             ohlc_df['cumulative_volume'] = ohlc_df['volume'].cumsum()
             ohlc_df['vwap'] = ohlc_df['cumulative_tp_volume'] / ohlc_df['cumulative_volume']
             current_vwap = ohlc_df['vwap'].iloc[-1]
+
+            # Debug info (inside empty check — uses stored_vwap set above)
+            with st.expander("Debug Info"):
+                st.write(f"OHLC shape: {ohlc_df.shape}")
+                st.write(f"Timestamp dtype: {ohlc_df['timestamp'].dtype}")
+                st.write(f"First timestamp: {ohlc_df['timestamp'].iloc[0]}")
+                st.write(f"Last timestamp: {ohlc_df['timestamp'].iloc[-1]}")
+                has_stored_vwap = 'stored_vwap' in ohlc_df.columns and ohlc_df['stored_vwap'].notna().any()
+                st.write(f"Stored VWAP in DB: {'YES' if has_stored_vwap else 'NO (NULL - bars_for_db fix not yet deployed?)'}")
+                if has_stored_vwap:
+                    last_stored = ohlc_df['stored_vwap'].dropna().iloc[-1]
+                    st.write(f"Stored VWAP (last bar): {last_stored:.2f} | Recomputed VWAP (last bar): {current_vwap:.2f}")
+                    diff = abs(last_stored - current_vwap)
+                    if diff > 1.0:
+                        st.warning(f"VWAP mismatch: {diff:.2f} Rs difference. Stored value may lag recomputed.")
+                st.write("Sample data (OHLCV + recomputed VWAP):")
+                st.dataframe(ohlc_df[['timestamp', 'open', 'high', 'low', 'close', 'vwap']].head())
 
         # Display chart info
         col_info1, col_info2, col_info3, col_info4 = st.columns(4)
@@ -309,20 +382,11 @@ with tabs[5]:
             st.metric("Swing Points", len(swings_df))
         with col_info3:
             if current_vwap is not None:
-                st.metric("Current VWAP", f"₹{current_vwap:.2f}")
+                st.metric("Current VWAP", f"Rs.{current_vwap:.2f}")
             else:
                 st.metric("Current VWAP", "N/A")
         with col_info4:
             st.metric("Has Position", "Yes" if not position_df.empty else "No")
-
-        # Debug info (can be removed later)
-        with st.expander("🔍 Debug Info"):
-            st.write(f"OHLC shape: {ohlc_df.shape}")
-            st.write(f"Timestamp dtype: {ohlc_df['timestamp'].dtype}")
-            st.write(f"First timestamp: {ohlc_df['timestamp'].iloc[0]}")
-            st.write(f"Last timestamp: {ohlc_df['timestamp'].iloc[-1]}")
-            st.write("Sample data:")
-            st.dataframe(ohlc_df[['timestamp', 'open', 'high', 'low', 'close']].head())
 
         # Display chart
         candlestick_chart(ohlc_df, swings_df, position_df, symbol)
@@ -333,9 +397,9 @@ with tabs[5]:
             st.success(f"**Active Position** | Entry: ₹{pos['entry_price']:.2f} | SL: ₹{pos['sl_price']:.2f}")
 
 # ─────────────────────────────────────────────
-# TAB 7: BAR VIEWER (Full Session from 9:15 AM)
+# TAB 8: BAR VIEWER (Full Session from 9:15 AM)
 # ─────────────────────────────────────────────
-with tabs[6]:
+with tabs[7]:
     st.subheader("🔍 Bar Viewer - Full Session (9:15 AM onwards) with Swing Labels")
 
     # Get current expiry from daily_state (set by baseline strategy)
@@ -443,7 +507,7 @@ with tabs[6]:
             table_display = display_df.copy()
             table_display['timestamp'] = table_display['timestamp'].apply(format_timestamp)
             # Reorder columns to show swing_label after timestamp
-            cols = ['timestamp', 'swing_label', 'open', 'high', 'low', 'close', 'volume']
+            cols = ['timestamp', 'swing_label', 'open', 'high', 'low', 'close', 'vwap', 'volume']
             st.dataframe(table_display[cols], use_container_width=True, height=600)
 
             # Display swing summary if any
@@ -454,16 +518,50 @@ with tabs[6]:
                 st.dataframe(swing_summary, use_container_width=True)
 
 # ─────────────────────────────────────────────
-# TAB 8: CONTROLS (SAFE)
+# TAB 9: CONTROLS
 # ─────────────────────────────────────────────
-with tabs[7]:
-    st.warning("Controls are SAFE MODE (no orders)")
+with tabs[8]:
+    from db import write_control_flag, get_control_flags, KILL_SWITCH_FILE, PAUSE_SWITCH_FILE
+    import os as _os
 
-    if st.button("⏸ Pause New Entries"):
-        st.info("Pause flag written (implement DB flag read in strategy)")
+    # Show current status
+    flags = get_control_flags()
+    pause_active = flags['pause_requested'] == 1 or _os.path.exists(PAUSE_SWITCH_FILE)
+    kill_active = flags['kill_requested'] == 1 or _os.path.exists(KILL_SWITCH_FILE)
 
-    if st.button("🛑 Kill Switch"):
-        st.error("Kill switch triggered (implement DB flag read in strategy)")
+    if kill_active:
+        st.error("Status: KILLED -- Strategy is stopped. Delete KILL_SWITCH file and restart.")
+    elif pause_active:
+        st.warning("Status: PAUSED -- Order placement is paused. Data pipeline continues.")
+    else:
+        st.success("Status: ACTIVE -- Strategy is running normally.")
+
+    st.divider()
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        if not pause_active:
+            if st.button("Pause Strategy"):
+                write_control_flag('pause_requested', 1)
+                st.warning("Pause signal sent. Strategy will pause within 5 seconds.")
+                st.rerun()
+        else:
+            if st.button("Resume Strategy"):
+                write_control_flag('pause_requested', 0)
+                st.success("Resume signal sent. Strategy will resume within 5 seconds.")
+                st.rerun()
+
+    with col2:
+        if not kill_active:
+            kill_confirm = st.checkbox("I confirm emergency shutdown", key="kill_confirm")
+            if st.button("KILL SWITCH", type="primary", disabled=not kill_confirm):
+                write_control_flag('kill_requested', 1)
+                st.error("Kill switch activated. Strategy is shutting down.")
+                st.rerun()
+
+    with col3:
+        st.caption("Pause: stops new orders, keeps monitoring.\nKill: cancels all orders and stops strategy.")
 
 # ─────────────────────────────────────────────
 # AUTO REFRESH

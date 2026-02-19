@@ -273,6 +273,7 @@ class StateManager:
                 high REAL,
                 low REAL,
                 close REAL,
+                vwap REAL,
                 volume REAL,
                 PRIMARY KEY (symbol, timestamp)
             )
@@ -414,6 +415,47 @@ class StateManager:
             logger.info("Migration complete: Created operational_state table")
         else:
             logger.debug("operational_state table already exists")
+
+        # Migration 5: Add vwap column to bars table
+        cursor.execute("PRAGMA table_info(bars)")
+        bars_columns = {col[1] for col in cursor.fetchall()}
+        if 'vwap' not in bars_columns:
+            logger.info("Migrating bars table to add vwap column...")
+            cursor.execute("ALTER TABLE bars ADD COLUMN vwap REAL")
+            self.conn.commit()
+            logger.info("Migration complete: Added vwap column to bars")
+
+        # Migration 7: Add pause_requested and kill_requested columns to operational_state
+        cursor.execute("PRAGMA table_info(operational_state)")
+        op_columns = {col[1] for col in cursor.fetchall()}
+        if 'pause_requested' not in op_columns:
+            logger.info("Migrating operational_state to add pause_requested/kill_requested columns...")
+            cursor.execute("ALTER TABLE operational_state ADD COLUMN pause_requested INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE operational_state ADD COLUMN kill_requested INTEGER DEFAULT 0")
+            self.conn.commit()
+            logger.info("Migration complete: Added pause/kill columns to operational_state")
+
+    def set_control_flag(self, flag_name: str, value: int):
+        """Set a control flag (pause_requested or kill_requested) in operational_state."""
+        if flag_name not in ('pause_requested', 'kill_requested'):
+            logger.error(f"Invalid control flag: {flag_name}")
+            return
+        cursor = self.conn.cursor()
+        cursor.execute(
+            f"UPDATE operational_state SET {flag_name} = ?, updated_at = ? WHERE id = 1",
+            (value, datetime.now(IST).isoformat())
+        )
+        self.conn.commit()
+        logger.info(f"[CONTROL] Set {flag_name} = {value}")
+
+    def get_control_flags(self) -> dict:
+        """Get current control flags from operational_state."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT pause_requested, kill_requested FROM operational_state WHERE id = 1")
+        row = cursor.fetchone()
+        if row:
+            return {'pause_requested': row[0] or 0, 'kill_requested': row[1] or 0}
+        return {'pause_requested': 0, 'kill_requested': 0}
 
     @atomic_transaction
     def save_positions(self, positions: List[Dict]):
@@ -746,7 +788,7 @@ class StateManager:
         cursor.execute('DELETE FROM swing_candidates')
         
         # Save current candidates
-        for symbol, candidate in candidates.items():
+        for symbol, candidate in list(candidates.items()):
             # Convert timestamp to ISO string if it's a pandas Timestamp
             timestamp = candidate['timestamp']
             if hasattr(timestamp, 'isoformat'):
@@ -778,7 +820,7 @@ class StateManager:
         cursor = self.conn.cursor()
         
         cursor.execute('''
-            INSERT INTO all_swings_log 
+            INSERT OR IGNORE INTO all_swings_log
             (symbol, swing_type, swing_price, swing_time, vwap, bar_index, detected_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (
@@ -899,7 +941,9 @@ class StateManager:
 
         for symbol, bar in bars_dict.items():
             cursor.execute('''
-                INSERT OR REPLACE INTO bars VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO bars
+                (symbol, timestamp, open, high, low, close, vwap, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 symbol,
                 bar['timestamp'],
@@ -907,6 +951,7 @@ class StateManager:
                 bar['high'],
                 bar['low'],
                 bar['close'],
+                bar.get('vwap'),
                 bar['volume']
             ))
 
@@ -947,19 +992,26 @@ class StateManager:
     
     def reset_daily_dashboard_data(self):
         """
-        Reset dashboard-specific tables at start of new trading day
-        
+        Reset dashboard-specific tables on every startup.
+
+        Called unconditionally at startup (not just on new-day) to prevent
+        UNIQUE constraint errors when swing re-detection re-inserts the same
+        (symbol, swing_time, swing_type) rows into all_swings_log.
+
         Clears:
-        - swing_candidates (active swings from previous day)
-        - best_strikes (yesterday's best strikes - the bug fix!)
+        - swing_candidates (active swings from previous session)
+        - best_strikes (best strikes from previous session)
         - swing_history (swing break events)
         - filter_rejections (filter rejections log)
         - order_triggers (order trigger events)
-        
+        - all_swings_log (swing detection log — rebuilt from historical bars)
+        - bars (OHLCV bars — repopulated from historical API on every startup)
+
         Does NOT clear:
-        - positions (persist across days for audit)
+        - positions (persist for crash recovery)
         - trade_log (historical trades)
         - daily_state (historical daily summaries)
+        - pending_orders / active_sl_orders (persist for crash recovery)
         """
         cursor = self.conn.cursor()
         today = datetime.now(IST).date().isoformat()
@@ -971,7 +1023,7 @@ class StateManager:
         swing_count = cursor.rowcount
         logger.info(f"[DAILY-RESET] Cleared {swing_count} swing candidates")
         
-        # Clear best strikes (THIS IS THE FIX!)
+        # Clear best strikes
         cursor.execute('DELETE FROM best_strikes')
         best_count = cursor.rowcount
         logger.info(f"[DAILY-RESET] Cleared {best_count} best strikes from previous session")
@@ -995,7 +1047,13 @@ class StateManager:
         cursor.execute('DELETE FROM all_swings_log')
         swings_log_count = cursor.rowcount
         logger.info(f"[DAILY-RESET] Cleared {swings_log_count} swing detection logs")
-        
+
+        # Clear bars table (repopulated from historical API on every startup)
+        # Prevents stale bars from a previous run's symbol set lingering in the dashboard
+        cursor.execute('DELETE FROM bars')
+        bars_count = cursor.rowcount
+        logger.info(f"[DAILY-RESET] Cleared {bars_count} bars (will be repopulated from historical data)")
+
         self.conn.commit()
         logger.info("[DAILY-RESET] Daily dashboard data reset complete")
     

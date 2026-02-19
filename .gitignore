@@ -120,11 +120,15 @@ temp/
 # EXTERNAL DEPENDENCIES (Installed separately)
 # =============================================================================
 openalgo-zerodha/
+openalgo-angelone/
 
 # =============================================================================
 # LOCAL ONLY (Not tracked in git)
 # =============================================================================
 OPENALGO_BUG_REPORT.md
 baseline_v1_live/KILL_SWITCH
-openalgo-angelone/
+
+# =============================================================================
+# TEMPORARY SNIPS (Local reference images only)
+# =============================================================================
 snips/

@@ -70,6 +70,10 @@ class SwingDetector:
         # Track logged swings to prevent duplicates
         self._logged_swings = set()  # {(swing_time, swing_type, swing_price)}
 
+        # Capture ALL swing events (creations + updates) for historical backfill.
+        # Unlike self.swings (which updates in-place), this is append-only.
+        self.swing_event_log = []
+
         logger.debug(f"SwingDetector initialized for {symbol}")
 
     def reset_for_new_day(self, date):
@@ -82,6 +86,7 @@ class SwingDetector:
         self.low_watch_count = {}
         self.high_watch_count = {}
         self._logged_swings = set()
+        self.swing_event_log = []
         self.current_date = date
         logger.info(f"{self.symbol}: Reset for new day {date}")
 
@@ -176,7 +181,7 @@ class SwingDetector:
             if current['high'] > prev['high'] and current['close'] > prev['close']:
                 self.low_watch_count[j] = self.low_watch_count.get(j, 0) + 1
 
-                if self.low_watch_count[j] == 2:
+                if self.low_watch_count[j] >= 2:
                     # Find lowest low in window from 0 to i (inclusive)
                     window = self.bars[:i + 1]
                     lowest_idx = min(range(len(window)), key=lambda x: window[x]['low'])
@@ -188,7 +193,7 @@ class SwingDetector:
             if current['low'] < prev['low'] and current['close'] < prev['close']:
                 self.high_watch_count[j] = self.high_watch_count.get(j, 0) + 1
 
-                if self.high_watch_count[j] == 2:
+                if self.high_watch_count[j] >= 2:
                     # Find highest high in window from 0 to i (inclusive)
                     window = self.bars[:i + 1]
                     highest_idx = max(range(len(window)), key=lambda x: window[x]['high'])
@@ -226,7 +231,7 @@ class SwingDetector:
                 if current['low'] < prev['low'] and current['close'] < prev['close']:
                     self.high_watch_count[j] = self.high_watch_count.get(j, 0) + 1
 
-                    if self.high_watch_count[j] == 2:
+                    if self.high_watch_count[j] >= 2:
                         # Find highest high in window AFTER last swing
                         window = self.bars[last_idx + 1:i + 1]
                         highest_local_idx = max(range(len(window)), key=lambda x: window[x]['high'])
@@ -239,7 +244,7 @@ class SwingDetector:
                 if current['high'] > prev['high'] and current['close'] > prev['close']:
                     self.low_watch_count[j] = self.low_watch_count.get(j, 0) + 1
 
-                    if self.low_watch_count[j] == 2:
+                    if self.low_watch_count[j] >= 2:
                         # Find lowest low in window AFTER last swing
                         window = self.bars[last_idx + 1:i + 1]
                         lowest_local_idx = min(range(len(window)), key=lambda x: window[x]['low'])
@@ -259,7 +264,7 @@ class SwingDetector:
                 if current['high'] > prev['high'] and current['close'] > prev['close']:
                     self.low_watch_count[j] = self.low_watch_count.get(j, 0) + 1
 
-                    if self.low_watch_count[j] == 2:
+                    if self.low_watch_count[j] >= 2:
                         # Find lowest low in window AFTER last swing
                         window = self.bars[last_idx + 1:i + 1]
                         lowest_local_idx = min(range(len(window)), key=lambda x: window[x]['low'])
@@ -272,7 +277,7 @@ class SwingDetector:
                 if current['low'] < prev['low'] and current['close'] < prev['close']:
                     self.high_watch_count[j] = self.high_watch_count.get(j, 0) + 1
 
-                    if self.high_watch_count[j] == 2:
+                    if self.high_watch_count[j] >= 2:
                         # Find highest high in window AFTER last swing
                         window = self.bars[last_idx + 1:i + 1]
                         highest_local_idx = max(range(len(window)), key=lambda x: window[x]['high'])
@@ -326,6 +331,15 @@ class SwingDetector:
 
         # Update last_swing_idx to point to new bar
         self.last_swing_idx = idx
+
+        # Capture event for historical backfill (append-only, never modified)
+        self.swing_event_log.append({
+            'type': f"{swing_type} Update",
+            'price': new_price,
+            'timestamp': bar['timestamp'],
+            'vwap': self.last_swing['vwap'],  # Frozen VWAP from original swing
+            'index': idx
+        })
 
         # Log to database if in live mode
         if (not self.is_historical_processing and
@@ -388,6 +402,15 @@ class SwingDetector:
         self.last_swing = swing
         self.last_swing_type = swing_type.lower()  # 'low' or 'high'
         self.last_swing_idx = idx
+
+        # Capture event for historical backfill (append-only, never modified)
+        self.swing_event_log.append({
+            'type': swing_type,
+            'price': swing['price'],
+            'timestamp': bar['timestamp'],
+            'vwap': swing['vwap'],
+            'index': idx
+        })
 
         # Reset watch counts after swing is found (start fresh for next swing)
         self.low_watch_count = {}
@@ -456,12 +479,17 @@ class SwingDetector:
             # Mark as broken
             self.last_swing['broken'] = True
 
-            # Calculate highest high between swing and break
+            # Calculate highest high AFTER swing (excludes swing bar itself)
+            # Consistent with continuous_filter._get_highest_high_since_swing()
             swing_idx = self.last_swing['index']
             current_idx = current_bar['index']
 
-            bars_between = self.bars[swing_idx:current_idx + 1]
-            highest_high = max(bar['high'] for bar in bars_between)
+            bars_after_swing = self.bars[swing_idx + 1:current_idx + 1]
+            if bars_after_swing:
+                highest_high = max(bar['high'] for bar in bars_after_swing)
+            else:
+                # No bars between swing and break (immediate break on next bar)
+                highest_high = current_bar['high']
 
             # Parse strike and option type from symbol
             strike, option_type = self._parse_symbol(self.symbol)
@@ -596,9 +624,12 @@ class MultiSwingDetector:
         breaks = []
 
         for symbol, bar_dict in bars_dict.items():
-            break_info = self.update(symbol, bar_dict)
-            if break_info:
-                breaks.append(break_info)
+            try:
+                break_info = self.update(symbol, bar_dict)
+                if break_info:
+                    breaks.append(break_info)
+            except Exception as e:
+                logger.error(f"[SWING-ERROR] Exception updating {symbol}: {e}", exc_info=True)
 
         return breaks
 

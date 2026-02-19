@@ -3,3 +3,4 @@ pandas
 numpy
 pytz
 plotly
+jinja2

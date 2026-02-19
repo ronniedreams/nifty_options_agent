@@ -152,28 +152,16 @@ class ContinuousFilterEngine:
         option_type = swing_info.get('option_type')
 
         if vwap_premium < MIN_VWAP_PREMIUM:
-            # New swing FAILED VWAP - reject it AND remove old swing (new swing pattern formed)
+            # New swing FAILED VWAP - reject new swing but KEEP old swing if it exists
+            # Per STRIKE_FILTRATION_THEORY.md: "Old swing STAYS in pool (unaffected)"
             if symbol in self.swing_candidates:
                 old_swing = self.swing_candidates[symbol]
                 logger.warning(
                     f"[VWAP-REJECT] {symbol}: New swing @ Rs.{swing_price:.2f} "
                     f"VWAP premium {vwap_premium:.1%} < {MIN_VWAP_PREMIUM:.1%} "
                     f"(VWAP @ swing: Rs.{vwap_at_swing:.2f}) - REJECTED. "
-                    f"Removing old swing @ Rs.{old_swing['price']:.2f} (stale)"
+                    f"Old swing @ Rs.{old_swing['price']:.2f} kept in pool"
                 )
-
-                # Remove old swing from candidates
-                del self.swing_candidates[symbol]
-
-                # Clear evaluation state
-                if symbol in self.last_evaluation_state:
-                    del self.last_evaluation_state[symbol]
-
-                # Remove from stage1 pool
-                self.stage1_swings_by_type[option_type] = [
-                    s for s in self.stage1_swings_by_type[option_type]
-                    if s.get('symbol') != symbol
-                ]
             else:
                 logger.warning(
                     f"[VWAP-REJECT] {symbol}: New swing @ Rs.{swing_price:.2f} "
@@ -196,11 +184,14 @@ class ContinuousFilterEngine:
                     }])
                 except Exception as e:
                     logger.debug(f"Failed to save VWAP rejection to DB: {e}")
-            return  # New swing rejected, old swing removed
+            return  # New swing rejected; old swing preserved in pool if it exists
 
         # New swing PASSED both static filters - replace old swing
+        # Preserve broke_in_history flag from old swing (startup protection must survive updates)
+        old_broke_in_history = False
         if symbol in self.swing_candidates:
             old_swing = self.swing_candidates[symbol]
+            old_broke_in_history = old_swing.get('broke_in_history', False)
             logger.info(
                 f"[SWING-REPLACED] {symbol}: Old swing @ Rs.{old_swing['price']:.2f} "
                 f"replaced by new swing @ Rs.{swing_price:.2f}"
@@ -209,6 +200,11 @@ class ContinuousFilterEngine:
         # Add new swing to candidates (make a copy to avoid reference issues)
         # CRITICAL: Use deepcopy() to prevent modifications to swing_info from affecting stored value
         self.swing_candidates[symbol] = copy.deepcopy(swing_info)
+        if old_broke_in_history:
+            self.swing_candidates[symbol]['broke_in_history'] = True
+            logger.info(
+                f"[SWING-REPLACED] {symbol}: Preserved broke_in_history=True from old swing"
+            )
 
         # Clear any previous evaluation state for this symbol (new swing detected)
         if symbol in self.last_evaluation_state:
@@ -233,15 +229,28 @@ class ContinuousFilterEngine:
         )
     
     def remove_swing_candidate(self, symbol: str):
-        """Remove swing candidate (if swing gets invalidated)"""
+        """Remove swing candidate from ALL pools (after fill, invalidation, etc.)"""
+        option_type = None
         if symbol in self.swing_candidates:
+            option_type = self.swing_candidates[symbol].get('option_type')
             del self.swing_candidates[symbol]
 
-            # Clear evaluation state for removed candidate
-            if symbol in self.last_evaluation_state:
-                del self.last_evaluation_state[symbol]
+        if symbol in self.last_evaluation_state:
+            del self.last_evaluation_state[symbol]
 
-            logger.info(f"[SWING-REMOVED] {symbol}")
+        # Clean stage1 pool (the pool used by evaluate_all_candidates)
+        for ot in (['CE', 'PE'] if option_type is None else [option_type]):
+            self.stage1_swings_by_type[ot] = [
+                s for s in self.stage1_swings_by_type[ot]
+                if s.get('symbol') != symbol
+            ]
+
+        # Clear from current_best if this was the selected strike
+        for ot in ['CE', 'PE']:
+            if self.current_best.get(ot) and self.current_best[ot].get('symbol') == symbol:
+                self.current_best[ot] = None
+
+        logger.info(f"[SWING-REMOVED] {symbol} purged from all filter pools")
 
     def mark_historical_breaks(self, swing_detector) -> int:
         """
@@ -294,7 +303,8 @@ class ContinuousFilterEngine:
         logger.info(f"[STARTUP-PROTECTION] Marked {marked_count} swings as already broken in history")
         return marked_count
 
-    def evaluate_all_candidates(self, latest_bars: Dict, swing_detector, current_bars: Dict = None) -> Dict:
+    def evaluate_all_candidates(self, latest_bars: Dict, swing_detector, current_bars: Dict = None,
+                                open_position_symbols: set = None) -> Dict:
         """
         Evaluate all swing candidates with latest bar data
 
@@ -360,6 +370,11 @@ class ContinuousFilterEngine:
                 symbol = swing_info.get('symbol')
                 if not symbol:
                     continue
+
+                # Defense-in-depth: skip symbols with open positions
+                if open_position_symbols and symbol in open_position_symbols:
+                    continue
+
                 # Skip if no bar data available
                 if symbol not in latest_bars:
                     self.rejection_stats['no_data'] += 1
@@ -424,6 +439,12 @@ class ContinuousFilterEngine:
                 quantity = int(lots) * LOT_SIZE
                 actual_R = sl_points * int(lots) * LOT_SIZE
                 
+                # Extract strike from symbol (format: NIFTY{DDMMMYY}{STRIKE}{CE/PE})
+                try:
+                    is_round_strike = int(symbol[12:-2]) % 100 == 0
+                except (ValueError, IndexError):
+                    is_round_strike = False
+
                 # Enrich candidate with calculated fields
                 enriched = {
                     'symbol': symbol,
@@ -442,7 +463,9 @@ class ContinuousFilterEngine:
                     'quantity': quantity,
                     'actual_R': actual_R,
                     'score': abs(sl_points - TARGET_SL_POINTS),
-                    'entry_price': swing_low
+                    'entry_price': swing_low,
+                    'is_round_strike': is_round_strike,
+                    'broke_in_history': swing_info.get('broke_in_history', False),
                 }
                 
                 qualified[option_type].append(enriched)
@@ -452,8 +475,8 @@ class ContinuousFilterEngine:
         
         for option_type in ['CE', 'PE']:
             if qualified[option_type]:
-                # Sort by score (SL points closest to 10), then by highest entry price
-                best = min(qualified[option_type], key=lambda x: (x['score'], -x['entry_price']))
+                # Sort by: (1) SL points closest to 10, (2) round strike preferred, (3) highest entry price
+                best = min(qualified[option_type], key=lambda x: (x['score'], not x['is_round_strike'], -x['entry_price']))
                 best_strikes[option_type] = best
                 
                 # Log if best strike changed
@@ -588,6 +611,18 @@ class ContinuousFilterEngine:
             symbol = candidate['symbol']
             swing_low = candidate['swing_low']
 
+            # CRITICAL: Skip candidates that broke in historical data (all paths)
+            if candidate.get('broke_in_history', False):
+                logger.info(
+                    f"[STARTUP-SKIP] {symbol}: Swing @ {swing_low:.2f} already broke in history - skipping"
+                )
+                triggers[option_type] = {
+                    'action': 'cancel',
+                    'candidate': candidate,
+                    'reason': f'swing already broke in historical data before startup'
+                }
+                continue
+
             # [CRITICAL] CRITICAL: Use CURRENT bar for real-time price, not completed bar
             # In live trading, we need to react to ticks as they come in, not wait for bar completion
             price_source = current_bars.get(symbol) or latest_bars.get(symbol)
@@ -620,7 +655,7 @@ class ContinuousFilterEngine:
                 triggers[option_type] = {
                     'action': 'place',  # OrderManager will handle cancel + place
                     'candidate': candidate,
-                    'limit_price': swing_low - 0.05,
+                    'limit_price': swing_low - 0.05 - 3,
                     'current_price': current_price,
                     'reason': f'better strike qualified: {symbol}'
                 }
@@ -649,18 +684,6 @@ class ContinuousFilterEngine:
                 }
             
             else:
-                # STARTUP PROTECTION: Skip swings that already broke in historical data
-                if candidate.get('broke_in_history', False):
-                    logger.info(
-                        f"[STARTUP-SKIP] {symbol}: Swing @ {swing_low:.2f} already broke in history - skipping order"
-                    )
-                    triggers[option_type] = {
-                        'action': 'wait',
-                        'candidate': candidate,
-                        'reason': f'swing already broke in historical data before startup'
-                    }
-                    continue
-
                 # No existing order - place order immediately (qualified candidate)
                 # Per ORDER_EXECUTION_THEORY.md: Place order as soon as strike qualifies
                 price_type = "REALTIME" if is_realtime else "COMPLETED_BAR"
@@ -671,7 +694,7 @@ class ContinuousFilterEngine:
                 triggers[option_type] = {
                     'action': 'place',
                     'candidate': candidate,
-                    'limit_price': swing_low - 0.05,
+                    'limit_price': swing_low - 0.05 - 3,
                     'current_price': current_price,
                     'reason': f'strike qualified, no existing order'
                 }
@@ -698,7 +721,7 @@ class ContinuousFilterEngine:
         
         # Log selected strike
         logger.info(
-            f"✅ SELECTED: {selected_symbol}\n"
+            f"[SELECTED] {selected_symbol}\n"
             f"   Entry Price:    Rs.{selected_candidate['swing_low']:.2f}\n"
             f"   Current Price:  Rs.{selected_candidate['current_price']:.2f}\n"
             f"   SL Price:       Rs.{selected_candidate['sl_price']:.2f}\n"
@@ -754,7 +777,7 @@ class ContinuousFilterEngine:
         
         # Log rejected candidates
         if rejected_candidates:
-            logger.info(f"\n❌ REJECTED CANDIDATES ({len(rejected_candidates)}):")
+            logger.info(f"\n[REJECTED CANDIDATES] ({len(rejected_candidates)}):")
             for rej in rejected_candidates:
                 reasons_str = ", ".join(rej['reasons'])
                 logger.info(
@@ -763,7 +786,7 @@ class ContinuousFilterEngine:
         
         # Log qualified but not selected
         if qualified_not_selected:
-            logger.info(f"\n[WARNING]️  QUALIFIED BUT NOT SELECTED ({len(qualified_not_selected)}):")
+            logger.info(f"\n[QUALIFIED NOT SELECTED] ({len(qualified_not_selected)}):")
             for qual in qualified_not_selected:
                 logger.info(
                     f"   {qual['symbol']}: Entry Rs.{qual['swing_low']:.2f}, "

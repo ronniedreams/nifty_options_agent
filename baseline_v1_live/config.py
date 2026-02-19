@@ -67,7 +67,7 @@ MAX_SL_PERCENT = 0.10    # 10% maximum SL
 # ============================================================================
 
 # Number of strikes to scan around ATM
-STRIKE_SCAN_RANGE = 5  # ±5 strikes from ATM (250 point range) - reduced for broker limits
+STRIKE_SCAN_RANGE = 20  # ±20 strikes from ATM (1000 point range)
 
 # Strike selection tie-breaker priority:
 # 1. SL points closest to TARGET_SL_POINTS (10)
@@ -151,6 +151,8 @@ DATA_FRESHNESS_CHECK_INTERVAL = 30  # Check data freshness every 30 seconds
 MIN_DATA_COVERAGE_THRESHOLD = 0.5   # Shutdown if <50% symbols have fresh data
 STALE_DATA_TIMEOUT = 30  # Shutdown if no fresh data for 30 seconds
 MAX_BAR_AGE_SECONDS = 120  # Shutdown if last bar >2 minutes old
+STALE_SYMBOL_THRESHOLD = 120  # Seconds before soft re-subscribe for stale symbol
+STALE_SYMBOL_HARD_THRESHOLD = 240  # Seconds before hard cancel for stale symbol
 
 # ============================================================================
 # OPENALGO INTEGRATION
@@ -160,6 +162,15 @@ MAX_BAR_AGE_SECONDS = 120  # Shutdown if last bar >2 minutes old
 OPENALGO_API_KEY = os.getenv('OPENALGO_API_KEY', '')
 OPENALGO_HOST = os.getenv('OPENALGO_HOST', 'http://127.0.0.1:5000')
 OPENALGO_WS_URL = os.getenv('OPENALGO_WS_URL', 'ws://127.0.0.1:8765')
+
+# Angel One Backup Data Feed
+ANGELONE_OPENALGO_API_KEY = os.getenv('ANGELONE_OPENALGO_API_KEY', '')
+ANGELONE_HOST = os.getenv('ANGELONE_HOST', 'http://127.0.0.1:5001')
+ANGELONE_WS_URL = os.getenv('ANGELONE_WS_URL', 'ws://127.0.0.1:8766')
+
+# Failover thresholds
+FAILOVER_NO_TICK_THRESHOLD = 15    # Seconds of no Zerodha ticks before failover to Angel One
+FAILOVER_SWITCHBACK_THRESHOLD = 10  # Seconds of Zerodha ticks flowing before switching back
 
 # Exchange
 EXCHANGE = 'NFO'  # Options exchange
@@ -175,6 +186,15 @@ PRODUCT_TYPE = 'MIS'  # Intraday (positions auto-squared at 3:20 PM)
 MAX_CE_POSITIONS = 3
 MAX_PE_POSITIONS = 3
 
+# Validation: warn if sub-limits exceed total (not a bug, but worth noting)
+if MAX_CE_POSITIONS + MAX_PE_POSITIONS > MAX_POSITIONS:
+    import logging as _cfg_logging
+    _cfg_logging.getLogger(__name__).warning(
+        f"[CONFIG] MAX_CE_POSITIONS({MAX_CE_POSITIONS}) + MAX_PE_POSITIONS({MAX_PE_POSITIONS}) "
+        f"= {MAX_CE_POSITIONS + MAX_PE_POSITIONS} > MAX_POSITIONS({MAX_POSITIONS}). "
+        f"Total limit ({MAX_POSITIONS}) is the binding constraint."
+    )
+
 # Circuit Breakers
 MAX_CONSECUTIVE_LOSSES = 3  # Pause trading after 3 losses in a row
 PAUSE_DURATION_MINUTES = 30  # Resume after 30 minutes
@@ -189,6 +209,11 @@ ORDER_RETRY_DELAY = 2  # Seconds between retries
 
 STATE_DB_PATH = os.getenv('STATE_DB_PATH', os.path.join(os.path.dirname(__file__), 'live_state.db'))
 STATE_SAVE_INTERVAL = 30  # Save state every 30 seconds
+
+# Kill/Pause switch files (file-based, works even if DB locked)
+_STATE_DIR = os.getenv('STATE_DIR', os.path.dirname(__file__))
+KILL_SWITCH_FILE = os.path.join(_STATE_DIR, 'KILL_SWITCH')
+PAUSE_SWITCH_FILE = os.path.join(_STATE_DIR, 'PAUSE_SWITCH')
 
 # ============================================================================
 # LOGGING
@@ -218,12 +243,31 @@ NOTIFY_ON_ERROR = True
 NOTIFY_ON_BEST_STRIKE_CHANGE = True  # Notify when best strike changes (not every tick)
 
 # ============================================================================
+# AUTOMATED LOGIN (Paper Trading Only - Disable for Live Trading)
+# ============================================================================
+
+# IMPORTANT: Only use for paper trading (testing phase)
+# For live trading with real money, disable this and use manual login (more secure)
+AUTOMATED_LOGIN = os.getenv('AUTOMATED_LOGIN', 'false').lower() == 'true'
+
+# OpenAlgo Credentials (for accessing OpenAlgo API)
+# Get from OpenAlgo dashboard → User Management
+OPENALGO_USERNAME = os.getenv('OPENALGO_USERNAME', '')
+OPENALGO_PASSWORD = os.getenv('OPENALGO_PASSWORD', '')
+
+# TOTP Secrets for automated 2FA login
+# Get these from Zerodha/Angel One Security Settings → 2FA → Base32 secret key
+# DO NOT share or commit these to git
+ZERODHA_TOTP_SECRET = os.getenv('ZERODHA_TOTP_SECRET', '')
+ANGELONE_TOTP_SECRET = os.getenv('ANGELONE_TOTP_SECRET', '')
+
+# ============================================================================
 # STARTUP & FAILURE HANDLING
 # ============================================================================
 
 # Startup Health Checks
-MAX_STARTUP_RETRIES = 3
-STARTUP_RETRY_DELAY_BASE = 30  # seconds (30s, 60s, 90s with exponential backoff)
+MAX_STARTUP_RETRIES = 5
+STARTUP_RETRY_DELAY_BASE = 20  # seconds (20s, 40s, 60s, 80s backoff)
 
 # Notification Throttling (seconds)
 NOTIFICATION_THROTTLE_STARTUP = 3600      # 1 hour

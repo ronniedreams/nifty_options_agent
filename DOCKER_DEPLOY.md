@@ -185,8 +185,8 @@ docker compose logs trading_agent
 # Check environment
 docker compose exec trading_agent env
 
-# Rebuild from scratch
-docker compose down -v
+# Rebuild from scratch (safe — data is in bind mounts under ./data/)
+docker compose down
 docker compose build --no-cache
 docker compose up -d
 ```
@@ -237,20 +237,20 @@ docker compose up -d --build
 
 ### Data Persistence
 
-State and logs are stored in Docker volumes:
-- `trading_state`: SQLite database (positions, orders, swings)
-- `logs/`: Application logs (mounted from host)
+State and logs are stored in bind-mounted host directories under `./data/`:
+- `./data/trading_state/`: SQLite database (positions, orders, swings)
+- `./data/openalgo_db/`: Historify DuckDB + OpenAlgo databases
+- `./data/openalgo_angelone_db/`: Angel One OpenAlgo databases
+- `./baseline_v1_live/logs/`: Application logs (mounted from host)
 
 ### Backup State
 
 ```bash
-# Manual backup
-docker run --rm -v nifty_options_agent_trading_state:/state -v $(pwd):/backup \
-  ubuntu tar czf /backup/state_backup_$(date +%Y%m%d_%H%M%S).tar.gz /state
+# Manual backup (simple — data is on host filesystem)
+cp -r data/ ~/data_backup_$(date +%Y%m%d_%H%M%S)/
 
 # Restore backup
-docker run --rm -v nifty_options_agent_trading_state:/state -v $(pwd):/backup \
-  ubuntu tar xzf /backup/state_backup_YYYYMMDD_HHMMSS.tar.gz -C /
+cp -r ~/data_backup_YYYYMMDD_HHMMSS/* data/
 ```
 
 ## Maintenance

@@ -12,8 +12,30 @@ services:
       - "8765:8765"  # WebSocket proxy
     volumes:
       - ./openalgo-zerodha/openalgo/.env:/app/.env:ro  # Mount .env file (not copied during build)
-      - openalgo_data:/app/db
-      - openalgo_logs:/app/log
+      - ./data/openalgo_db:/app/db          # Bind mount — survives rebuilds and docker-compose down -v
+      - ./data/openalgo_logs:/app/log
+    environment:
+      - FLASK_ENV=production
+    restart: unless-stopped
+    healthcheck:
+      test: python -c "import socket; s=socket.socket(); s.connect(('localhost', 5000)); s.close()"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # OpenAlgo Angel One (Backup Data Feed)
+  openalgo_angelone:
+    build:
+      context: ./openalgo-angelone/openalgo
+    container_name: openalgo_angelone
+    ports:
+      - "5001:5000"
+      - "8766:8766"  # WebSocket proxy (backup feed)
+    volumes:
+      - ./openalgo-angelone/openalgo/.env:/app/.env:ro
+      - ./data/openalgo_angelone_db:/app/db  # Bind mount — survives rebuilds and docker-compose down -v
+      - ./data/openalgo_angelone_logs:/app/log
     environment:
       - FLASK_ENV=production
     restart: unless-stopped
@@ -33,15 +55,19 @@ services:
     depends_on:
       openalgo:
         condition: service_healthy
+      openalgo_angelone:
+        condition: service_healthy
     volumes:
       - ./.env:/app/.env:ro  # Read-only secrets (root-level .env)
-      - ./logs:/app/logs  # Persist logs on host
-      - trading_state:/app/state  # Persist SQLite state
+      - ./baseline_v1_live/logs:/app/baseline_v1_live/logs  # Persist logs on host
+      - ./data/trading_state:/app/state  # Bind mount — survives rebuilds and docker-compose down -v
     environment:
       - PYTHONUNBUFFERED=1
       - STATE_DB_PATH=/app/state/live_state.db
       - OPENALGO_HOST=http://openalgo:5000
       - OPENALGO_WS_URL=ws://openalgo:8765
+      - ANGELONE_HOST=http://openalgo_angelone:5000
+      - ANGELONE_WS_URL=ws://openalgo_angelone:8766
       - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-true}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
@@ -66,15 +92,14 @@ services:
     ports:
       - "8050:8050"
     volumes:
-      - trading_state:/app/state:ro  # Read-only access to state
+      - ./data/trading_state:/app/state:ro  # Read-only access to state
     environment:
       - DB_PATH=/app/state/live_state.db
     restart: unless-stopped
 
-volumes:
-  openalgo_data:
-  openalgo_logs:
-  trading_state:
+# All persistent data uses bind mounts under ./data/ (survives docker-compose down -v)
+# Old named volumes (openalgo_data, trading_state, etc.) are no longer used.
+# Migration: see migrate_volumes.sh to copy data from named volumes to bind mounts.
 
 networks:
   default:

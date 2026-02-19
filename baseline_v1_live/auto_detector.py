@@ -5,6 +5,11 @@ Uses OpenAlgo APIs to:
 - Fetch NIFTY spot price at 9:16 AM IST
 - Calculate ATM strike (rounded to nearest 100)
 - Find nearest expiry (weekly or monthly, handles holidays)
+
+Graceful Degradation:
+- If broker not connected, enters waiting mode instead of crashing
+- Retries every 30 seconds with exponential backoff (30s -> 60s -> 120s -> 300s cap)
+- Sends Telegram alert when broker reconnects
 """
 
 import logging
@@ -12,6 +17,7 @@ import time as time_module
 from datetime import datetime, time, timedelta
 import pytz
 import requests
+import os
 
 logger = logging.getLogger(__name__)
 IST = pytz.timezone('Asia/Kolkata')
@@ -20,7 +26,7 @@ IST = pytz.timezone('Asia/Kolkata')
 class AutoDetector:
     """Automatically detect ATM strike and expiry for NIFTY options"""
 
-    def __init__(self, api_key: str, host: str, data_pipeline=None, spot_symbol="Nifty 50"):
+    def __init__(self, api_key: str, host: str, data_pipeline=None, spot_symbol="Nifty 50", telegram_notifier=None):
         """
         Initialize with OpenAlgo credentials
 
@@ -29,11 +35,17 @@ class AutoDetector:
             host: OpenAlgo host URL
             data_pipeline: Optional DataPipeline instance for WebSocket-based spot price
             spot_symbol: NIFTY spot symbol (default: "Nifty 50")
+            telegram_notifier: Optional TelegramNotifier instance for alerts
         """
         self.api_key = api_key
         self.host = host.rstrip('/')
         self.data_pipeline = data_pipeline
         self.spot_symbol = spot_symbol
+        self.telegram_notifier = telegram_notifier
+
+        # Wait mode configuration
+        self.max_wait_retries = 60  # ~30 minutes of retrying (every 30 seconds avg)
+        self.periodic_update_interval = 300  # Send Telegram update every 5 minutes
 
     def wait_for_market_open(self, wait_minutes=1):
         """
@@ -200,49 +212,147 @@ class AutoDetector:
                     logger.error(f"[AUTO] All {max_retries} attempts failed")
                     raise
 
+    def _wait_for_broker_connection(self):
+        """
+        Graceful degradation: Wait for broker connection instead of crashing
+
+        Features:
+        - Retries with exponential backoff (30s -> 60s -> 120s -> 240s -> 300s cap)
+        - Max 60 retries (~30 minutes of waiting)
+        - Telegram alert on wait mode entry
+        - Periodic Telegram updates every 5 minutes
+        - Final alert with error if max retries exceeded
+
+        Returns: tuple (atm_strike: int, expiry_date: str) when broker connects
+        Raises: Exception if max retries exceeded
+        """
+        logger.warning("[AUTO] Broker not connected. Entering wait mode...")
+        logger.warning("[AUTO] Please log in to Zerodha at https://openalgo.ronniedreams.in")
+
+        # Send initial Telegram alert
+        if self.telegram_notifier:
+            msg = f"[AUTO] Entering wait mode. Retrying every 30s (max 60 attempts = ~30 min). Please log in to Zerodha."
+            self.telegram_notifier.send_message(msg)
+
+        wait_interval = 30  # Start with 30 seconds
+        max_wait_interval = 300  # Cap at 5 minutes
+        retry_count = 0
+        start_time = time_module.time()  # Track actual wall-clock start time
+        last_telegram_update = 0  # Track actual elapsed seconds at last Telegram update
+        last_error = None
+
+        while True:
+            retry_count += 1
+
+            # Check if max retries exceeded
+            if retry_count > self.max_wait_retries:
+                error_msg = f"[AUTO] Max retries ({self.max_wait_retries}) exceeded after ~30 minutes. Last error: {last_error}"
+                logger.error(error_msg)
+
+                # Send final alert via Telegram
+                if self.telegram_notifier:
+                    telegram_msg = f"[CRITICAL] Auto-detect failed after 30 minutes. Giving up. Error: {str(last_error)[:100]}"
+                    self.telegram_notifier.send_message(telegram_msg)
+
+                raise Exception(error_msg)
+
+            logger.info(f"[AUTO] Retry {retry_count}/{self.max_wait_retries}: Retrying in {wait_interval} seconds ({datetime.now(IST).strftime('%H:%M:%S')} IST)...")
+            time_module.sleep(wait_interval)
+
+            # Send periodic Telegram update every 5 minutes (using wall-clock time)
+            elapsed_seconds = time_module.time() - start_time
+            if elapsed_seconds - last_telegram_update >= self.periodic_update_interval:
+                elapsed_minutes = int(elapsed_seconds // 60)
+                if self.telegram_notifier:
+                    msg = f"[AUTO] Still retrying... Attempt {retry_count}/{self.max_wait_retries} ({elapsed_minutes} min elapsed)"
+                    self.telegram_notifier.send_message(msg)
+                last_telegram_update = elapsed_seconds
+
+            try:
+                # Attempt full auto-detection
+                spot_price = None
+                if self.data_pipeline:
+                    spot_price = self.fetch_spot_price_from_websocket()
+
+                if spot_price is None:
+                    spot_price = self.fetch_spot_price()
+
+                atm_strike = self.calculate_atm_strike(spot_price)
+                expiries = self.fetch_expiries()
+                nearest_expiry = self.find_nearest_expiry(expiries)
+                expiry_date = self.convert_expiry_format(nearest_expiry)
+                self._validate(atm_strike, expiry_date)
+
+                # Success! Broker is connected
+                logger.info(f"[AUTO] Broker reconnected on retry {retry_count}! Proceeding with strategy start...")
+                logger.info(f"[AUTO] ATM={atm_strike}, Expiry={expiry_date}")
+
+                # Send Telegram alert
+                if self.telegram_notifier:
+                    msg = f"[AUTO] Broker connected after {retry_count} retries at {datetime.now(IST).strftime('%H:%M:%S')} IST. Strategy starting now!"
+                    self.telegram_notifier.send_message(msg)
+
+                return atm_strike, expiry_date
+
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[AUTO] Retry {retry_count} failed: {e}")
+                # Exponential backoff: 30 -> 60 -> 120 -> 240 -> 300 -> 300...
+                wait_interval = min(wait_interval * 2, max_wait_interval)
+                logger.info(f"[AUTO] Next retry interval: {wait_interval} seconds")
+
     def auto_detect(self):
         """
-        Main auto-detection method
+        Main auto-detection method with graceful degradation
 
-        Uses WebSocket for spot price (preferred), with API fallback if unavailable.
+        Phase 1: Quick retries (3 attempts with 5s delay)
+        Phase 2: Graceful wait mode (exponential backoff) if broker not connected
 
         Returns: tuple (atm_strike: int, expiry_date: str)
         """
-        try:
-            # Step 1: Fetch spot price
-            # Try WebSocket first (if data_pipeline available)
-            spot_price = None
-            if self.data_pipeline:
-                logger.info("[AUTO] Attempting WebSocket-based spot price detection...")
-                spot_price = self.fetch_spot_price_from_websocket()
+        # Phase 1: Quick retries
+        logger.info("[AUTO] Starting auto-detection...")
+        for attempt in range(1, 4):
+            try:
+                # Step 1: Fetch spot price
+                spot_price = None
+                if self.data_pipeline:
+                    logger.info("[AUTO] Attempting WebSocket-based spot price detection...")
+                    spot_price = self.fetch_spot_price_from_websocket()
 
-            # Fallback to API if WebSocket failed
-            if spot_price is None:
-                logger.info("[AUTO] Using API fallback for spot price...")
-                spot_price = self._api_call_with_retry(self.fetch_spot_price)
+                # Fallback to API if WebSocket failed
+                if spot_price is None:
+                    logger.info("[AUTO] Using API fallback for spot price...")
+                    spot_price = self.fetch_spot_price()
 
-            # Step 2: Calculate ATM strike
-            atm_strike = self.calculate_atm_strike(spot_price)
+                # Step 2: Calculate ATM strike
+                atm_strike = self.calculate_atm_strike(spot_price)
 
-            # Step 3: Fetch expiries (with retry)
-            expiries = self._api_call_with_retry(self.fetch_expiries)
+                # Step 3: Fetch expiries
+                expiries = self.fetch_expiries()
 
-            # Step 4: Find nearest expiry
-            nearest_expiry = self.find_nearest_expiry(expiries)
+                # Step 4: Find nearest expiry
+                nearest_expiry = self.find_nearest_expiry(expiries)
 
-            # Step 5: Convert to system format
-            expiry_date = self.convert_expiry_format(nearest_expiry)
+                # Step 5: Convert to system format
+                expiry_date = self.convert_expiry_format(nearest_expiry)
 
-            # Step 6: Validate
-            self._validate(atm_strike, expiry_date)
+                # Step 6: Validate
+                self._validate(atm_strike, expiry_date)
 
-            logger.info(f"[AUTO] Auto-detection complete: ATM={atm_strike}, Expiry={expiry_date}")
-            return atm_strike, expiry_date
+                logger.info(f"[AUTO] Auto-detection complete: ATM={atm_strike}, Expiry={expiry_date}")
+                return atm_strike, expiry_date
 
-        except Exception as e:
-            logger.error(f"[AUTO] Auto-detection failed: {e}")
-            logger.error("[AUTO] Please restart with manual --expiry and --atm flags")
-            raise
+            except Exception as e:
+                logger.warning(f"[AUTO] Attempt {attempt}/3 failed: {e}")
+                if attempt < 3:
+                    logger.info(f"[AUTO] Retrying in 5 seconds...")
+                    time_module.sleep(5)
+                else:
+                    logger.error(f"[AUTO] Quick retries exhausted (3/3)")
+
+        # Phase 2: Graceful wait mode (exponential backoff with 30s initial interval)
+        return self._wait_for_broker_connection()
 
     def _validate(self, atm_strike, expiry_date):
         """Validate auto-detected values"""

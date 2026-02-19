@@ -5,7 +5,7 @@ Main script for running the baseline_v1 swing-break options shorting strategy
 in live markets via OpenAlgo.
 
 Trading Logic:
-1. Monitor 42 options (±10 strikes from ATM, CE + PE) for swing low breaks
+1. Monitor 82 options (±20 strikes from ATM, CE + PE) for swing low breaks
 2. Apply entry filters (100-300 price, >4% VWAP premium, 2-10% SL)
 3. Select best strike (SL closest to 10 points, then highest price)
 4. Place proactive limit orders BEFORE break (swing_low - 1 tick)
@@ -33,7 +33,7 @@ import sys
 import time
 import asyncio
 import signal
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 from typing import Dict, Optional
 import pytz
 import os
@@ -50,6 +50,10 @@ from .config import (
     SHUTDOWN_TIMEOUT,
     WAITING_MODE_CHECK_INTERVAL,
     WAITING_MODE_SEND_HOURLY_STATUS,
+    STALE_SYMBOL_THRESHOLD,
+    STALE_SYMBOL_HARD_THRESHOLD,
+    KILL_SWITCH_FILE,
+    PAUSE_SWITCH_FILE,
 )
 from .data_pipeline import DataPipeline
 from .swing_detector import MultiSwingDetector
@@ -58,19 +62,30 @@ from .continuous_filter import ContinuousFilterEngine
 from .order_manager import OrderManager
 from .position_tracker import PositionTracker
 from .state_manager import StateManager
-from .telegram_notifier import get_notifier
+from .telegram_notifier import get_notifier, TelegramCommandListener
 from .notification_manager import NotificationManager
 from .startup_health_check import StartupHealthCheck
 
-# Setup logging
+# Setup logging with IST timestamps
 os.makedirs(LOG_DIR, exist_ok=True)
+
+import pytz as _pytz
+_IST = _pytz.timezone('Asia/Kolkata')
+
+class _ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        import datetime as _dt
+        return _dt.datetime.fromtimestamp(timestamp, _IST).timetuple()
+
+_formatter = _ISTFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+_file_handler = logging.FileHandler(os.path.join(LOG_DIR, f'baseline_v1_live_{datetime.now(_IST).strftime("%Y%m%d")}.log'))
+_file_handler.setFormatter(_formatter)
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_formatter)
+
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, f'baseline_v1_live_{datetime.now().strftime("%Y%m%d")}.log')),
-        logging.StreamHandler()
-    ]
+    handlers=[_file_handler, _stream_handler]
 )
 
 logger = logging.getLogger(__name__)
@@ -115,15 +130,12 @@ class BaselineV1Live:
         # State manager must be initialized first
         self.state_manager = StateManager()
         
-        # FIX: Only reset dashboard data if it's a new day
-        last_state = self.state_manager.load_daily_state()
+        # Always reset dashboard data on startup to prevent UNIQUE constraint errors
+        # on same-day restart (swing re-detection inserts same symbol/time/type).
+        # Positions/orders are in separate tables and are NOT cleared here.
         today = datetime.now(IST).date().isoformat()
-        
-        if last_state is None or last_state.get('trade_date') != today:
-            logger.info(f"[NEW-DAY] Resetting dashboard data for new trading day: {today}")
-            self.state_manager.reset_daily_dashboard_data()
-        else:
-            logger.info(f"[RESTART] Same day restart detected ({today}), keeping dashboard data")
+        logger.info(f"[STARTUP] Resetting dashboard data for: {today}")
+        self.state_manager.reset_daily_dashboard_data()
         
         # Swing detector with callback for new swings
         self.swing_detector = MultiSwingDetector(
@@ -140,11 +152,14 @@ class BaselineV1Live:
         self.order_manager = OrderManager()
         self.position_tracker = PositionTracker(order_manager=self.order_manager)
         self.telegram = get_notifier()
-        
+        self.data_pipeline.telegram = self.telegram  # Enable failover/failback Telegram alerts
+
         # Initialize failure handling components
         self.notification_manager = NotificationManager(self.telegram, self.state_manager)
         self.startup_checker = StartupHealthCheck(self.notification_manager)
         self.shutdown_requested = False
+        self._is_paused = False
+        self._pause_alerted = False  # Prevent repeated pause Telegram alerts
 
         # Track historical data loading state (to prevent notification spam)
         self.loading_historical_data = False
@@ -179,6 +194,23 @@ class BaselineV1Live:
         # Guard flags to ensure one-shot exit handlers (prevent Telegram spam)
         self._eod_exit_done = False  # Set True after handle_eod_exit() runs once
 
+        # Guard against duplicate fill processing (same fill from multiple paths)
+        self._processed_fill_ids = set()
+
+        # Track deferred strike switches (executed at bar close, not mid-bar)
+        # When the best strike changes mid-bar, we defer the cancel+replace to bar close
+        # to avoid brief naked-position windows and excessive API churn.
+        # Structure: {'CE': {'candidate': ..., 'limit_price': ...} or None, 'PE': ...}
+        self._pending_switch = {'CE': None, 'PE': None}
+
+        # Stale-blocked symbols: symbols cancelled due to stale data, not re-selectable
+        # until their bars resume (fresh last_bar_timestamp)
+        self._stale_blocked_symbols = set()
+
+        # Telegram throttling for stale-symbol alerts (prevent spam)
+        self._last_stale_telegram = {}    # {symbol: last_alert_timestamp}
+        self._stale_suppress_count = {}   # {symbol: count of suppressed alerts}
+
         # FIX: Load previous state from database (CRITICAL for crash recovery)
         self.load_state()
 
@@ -200,6 +232,48 @@ class BaselineV1Live:
 
             # 4. Load pending and active orders
             pending_limit, active_sl = self.state_manager.load_orders()
+
+            # 4b. Discard orders from a different expiry (stale cross-day orders)
+            current_expiry = self.expiry_date  # e.g. '24FEB26'
+            stale_limit = {}
+            for otype, order in list(pending_limit.items()):
+                sym = order.get('symbol', '')
+                if current_expiry and current_expiry not in sym:
+                    logger.warning(
+                        f"[RECOVERY] Discarding stale limit order for {sym} "
+                        f"(expiry mismatch, current: {current_expiry})"
+                    )
+                    stale_limit[otype] = order
+                    del pending_limit[otype]
+
+            stale_sl = {}
+            for sym, order in list(active_sl.items()):
+                if current_expiry and current_expiry not in sym:
+                    logger.warning(
+                        f"[RECOVERY] Discarding stale SL order for {sym} "
+                        f"(expiry mismatch, current: {current_expiry})"
+                    )
+                    stale_sl[sym] = order
+                    del active_sl[sym]
+
+            if stale_limit or stale_sl:
+                total_stale = len(stale_limit) + len(stale_sl)
+                logger.warning(
+                    f"[RECOVERY] Discarded {total_stale} stale orders from previous expiry"
+                )
+
+            # Also discard positions from a different expiry
+            stale_positions = [
+                p for p in open_positions_data
+                if current_expiry and current_expiry not in p.get('symbol', '')
+            ]
+            if stale_positions:
+                for p in stale_positions:
+                    logger.warning(
+                        f"[RECOVERY] Discarding stale position for {p.get('symbol')} "
+                        f"(expiry mismatch, current: {current_expiry})"
+                    )
+                    open_positions_data.remove(p)
 
             # 5. Restore to OrderManager
             self.order_manager.restore_state(pending_limit, active_sl)
@@ -256,15 +330,36 @@ class BaselineV1Live:
                     )
                     self.handle_order_fill(fill_info, current_prices)
 
-            # Alert on missing SL orders (positions without stop-loss)
+            # Auto re-place missing SL orders (positions without stop-loss)
             if reconcile_results['sl_orders_missing']:
-                critical_msg = (
-                    f"[CRITICAL] MISSING SL ORDERS after crash recovery. "
-                    f"Positions without SL: {', '.join(reconcile_results['sl_orders_missing'])}. "
-                    f"MANUAL BROKER CHECK REQUIRED."
-                )
-                logger.critical(critical_msg)
-                self.telegram.send_message(critical_msg)
+                for missing_symbol in reconcile_results['sl_orders_missing']:
+                    if missing_symbol in self.position_tracker.open_positions:
+                        pos = self.position_tracker.open_positions[missing_symbol]
+                        logger.warning(
+                            f"[RECOVERY] Attempting to re-place missing SL for {missing_symbol} "
+                            f"@ {pos.sl_price:.2f}"
+                        )
+                        sl_id = self.order_manager.place_sl_order(
+                            symbol=missing_symbol,
+                            trigger_price=pos.sl_price,
+                            quantity=pos.quantity
+                        )
+                        if sl_id:
+                            logger.warning(f"[RECOVERY] Re-placed SL for {missing_symbol}: {sl_id}")
+                            self.telegram.send_message(
+                                f"[RECOVERY] Re-placed missing SL\n"
+                                f"Symbol: {missing_symbol}\n"
+                                f"Trigger: {pos.sl_price:.2f}\n"
+                                f"Order: {sl_id}"
+                            )
+                        else:
+                            logger.critical(
+                                f"[RECOVERY] FAILED to re-place SL for {missing_symbol}"
+                            )
+                            self.telegram.send_message(
+                                f"[CRITICAL] FAILED to re-place SL for {missing_symbol}\n"
+                                f"MANUAL BROKER CHECK REQUIRED"
+                            )
 
         except Exception as e:
             logger.error(f"[RECOVERY] Order reconciliation failed: {e}", exc_info=True)
@@ -276,6 +371,14 @@ class BaselineV1Live:
         logger.info("Starting Baseline V1 Live Trading")
         logger.info("="*80)
         
+        # Send crash recovery status to Telegram
+        n_pos = len(self.position_tracker.open_positions)
+        n_orders = len(self.order_manager.pending_limit_orders) + len(self.order_manager.active_sl_orders)
+        if n_pos > 0 or n_orders > 0:
+            self.telegram.send_message(
+                f"[RECOVERY] Restored {n_pos} position(s) and {n_orders} order(s) from previous session."
+            )
+
         # 1. Run Startup Health Checks
         logger.info("Running pre-flight health checks...")
         success, error_type, error_msg = self.startup_checker.run_all_checks()
@@ -297,6 +400,11 @@ class BaselineV1Live:
                 logger.warning("Transient error detected. Entering waiting mode...")
                 self.enter_waiting_mode(error_type, error_msg)
         
+        # Health check passed
+        self.telegram.send_message(
+            f"[HEALTH] Pre-flight checks passed. Broker connected. Mode: {'PAPER' if PAPER_TRADING else 'LIVE'}"
+        )
+
         # 2. Update state to ACTIVE
         self.state_manager.update_operational_state('ACTIVE')
         self.notification_manager.send_error_notification(
@@ -305,12 +413,24 @@ class BaselineV1Live:
             is_critical=False
         )
         
-        # Connect to data pipeline
+        # Connect to data pipeline (Zerodha primary)
         self.data_pipeline.connect()
-        
-        # Subscribe to options
+
+        # Connect Angel One backup feed (always-on, silent standby)
+        self.data_pipeline.connect_angelone_backup()
+
+        # Subscribe to options (Zerodha primary)
         self.data_pipeline.subscribe_options(self.symbols)
-        
+
+        # Subscribe Angel One to same symbols (backup, ticks ignored until failover)
+        self.data_pipeline.subscribe_angelone_backup(self.symbols)
+
+        # Report Angel One backup status to Telegram
+        if self.data_pipeline.angelone_is_connected:
+            self.telegram.send_message("[BACKUP] Angel One connected — failover ready")
+        else:
+            self.telegram.send_message("[BACKUP] Angel One NOT connected — running on Zerodha only")
+
         # Load today's historical data BEFORE starting live loop
         # This ensures swings are detected correctly even when starting mid-day
         logger.info("="*80)
@@ -322,7 +442,7 @@ class BaselineV1Live:
 
         self.data_pipeline.load_historical_data(symbols=self.symbols)
         
-        # 🔧 FIX: Fill any gap between last historical bar and current time
+        # FIX: Fill any gap between last historical bar and current time
         # This handles mid-session starts where the current minute bar is incomplete
         logger.info("[GAP-FILL] Checking for missing bars...")
         self.data_pipeline.fill_initial_gap()
@@ -372,45 +492,31 @@ class BaselineV1Live:
         # Clear flag - now in real-time mode, send notifications normally
         self.loading_historical_data = False
 
-        # CRITICAL: Backfill all historical swings to database
-        # These were detected but not logged because is_historical_processing = True
-        logger.info("[HIST] Backfilling historical swings to database...")
+        # CRITICAL: Backfill all historical swing EVENTS to database
+        # Uses swing_event_log (append-only) instead of detector.swings (which updates in-place).
+        # This ensures morning swings that got updated to afternoon timestamps still appear.
+        logger.info("[HIST] Backfilling historical swing events to database...")
         historical_swings_logged = 0
-        duplicates_skipped = 0
 
         for symbol in self.symbols:
             detector = self.swing_detector.get_detector(symbol)
-            if detector and detector.swings:
-                for swing in detector.swings:
+            if detector and detector.swing_event_log:
+                for event in detector.swing_event_log:
                     try:
-                        # Check if already logged to prevent duplicates
-                        swing_time_iso = swing['timestamp'].isoformat() if hasattr(swing['timestamp'], 'isoformat') else str(swing['timestamp'])
-
-                        cursor = self.state_manager.conn.cursor()
-                        cursor.execute('''
-                            SELECT COUNT(*) FROM all_swings_log
-                            WHERE symbol = ? AND swing_time = ? AND swing_type = ?
-                        ''', (symbol, swing_time_iso, swing['type']))
-
-                        exists = cursor.fetchone()[0] > 0
-
-                        if not exists:
-                            self.state_manager.log_swing_detection(
-                                symbol=symbol,
-                                swing_type=swing['type'],
-                                swing_price=swing['price'],
-                                swing_time=swing['timestamp'],
-                                vwap=swing['vwap'],
-                                bar_index=swing['index']
-                            )
-                            historical_swings_logged += 1
-                        else:
-                            duplicates_skipped += 1
-
+                        # INSERT OR IGNORE in log_swing_detection handles duplicates
+                        self.state_manager.log_swing_detection(
+                            symbol=symbol,
+                            swing_type=event['type'],
+                            swing_price=event['price'],
+                            swing_time=event['timestamp'],
+                            vwap=event['vwap'],
+                            bar_index=event['index']
+                        )
+                        historical_swings_logged += 1
                     except Exception as e:
                         logger.error(f"Error logging historical swing for {symbol}: {e}")
 
-        logger.info(f"[HIST] Backfilled {historical_swings_logged} historical swings to database ({duplicates_skipped} duplicates skipped)")
+        logger.info(f"[HIST] Backfilled {historical_swings_logged} historical swing events to database")
 
         # Save all historical bars to database for dashboard visibility
         logger.info("[HIST] Saving historical bars to database...")
@@ -429,6 +535,7 @@ class BaselineV1Live:
                                 'high': bar.high,
                                 'low': bar.low,
                                 'close': bar.close,
+                                'vwap': bar.vwap,
                                 'volume': bar.volume
                             }
                         }
@@ -475,12 +582,50 @@ class BaselineV1Live:
                 logger.warning(f"Data coverage {health['data_coverage']:.1%} < 50%, consider waiting longer")
             else:
                 logger.info(f"Data coverage: {health['data_coverage']:.1%} - Good!")
+            self.telegram.send_message(
+                f"[DATA] Historical data loaded: {health['symbols_with_data']}/{health['subscribed_symbols']} symbols "
+                f"({health['data_coverage']:.0%} coverage)"
+            )
         except Exception as e:
             logger.error(f"Error getting health status: {e}", exc_info=True)
             raise
         
+        # Start Telegram command listener (/kill, /pause, /resume, /status)
+        from .config import TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+        if TELEGRAM_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            state_dir = os.getenv('STATE_DIR', os.path.dirname(__file__))
+
+            def _status_callback():
+                n_pos = len(self.position_tracker.open_positions)
+                summary = self.position_tracker.get_position_summary()
+                blocked = self._stale_blocked_symbols | self.order_manager.churn_detector.blocked_symbols
+                pending = self.order_manager.debug_pending_orders()
+                return (
+                    f"Positions: {n_pos}\n"
+                    f"Cumulative R: {summary.get('cumulative_R', 0):+.2f}\n"
+                    f"Pending orders: {pending}\n"
+                    f"Blocked symbols: {blocked or 'none'}"
+                )
+
+            self._telegram_cmd = TelegramCommandListener(
+                bot_token=TELEGRAM_BOT_TOKEN,
+                chat_id=TELEGRAM_CHAT_ID,
+                state_dir=state_dir,
+                notifier=self.telegram,
+                status_callback=_status_callback
+            )
+            self._telegram_cmd.start()
+            logger.info("[STARTUP] Telegram command listener started (/kill, /pause, /resume, /status)")
+        else:
+            self._telegram_cmd = None
+
         # Main trading loop (async)
         logger.info("Starting main trading loop (async)...")
+        n_restored = len(self.position_tracker.open_positions)
+        pos_str = f" | {n_restored} position(s) restored" if n_restored > 0 else ""
+        self.telegram.send_message(
+            f"[LIVE] Strategy running. Monitoring {len(self.symbols)} symbols.{pos_str}"
+        )
         asyncio.run(self.run_trading_loop())
 
     def enter_waiting_mode(self, error_type: str, error_msg: str):
@@ -552,7 +697,50 @@ class BaselineV1Live:
         while not self.shutdown_requested:
             try:
                 tick_count += 1
-                
+
+                # [CRITICAL] DB FLAGS -> FILE SYNC (dashboard writes DB, we sync to files)
+                try:
+                    db_flags = self.state_manager.get_control_flags()
+                    if db_flags.get('kill_requested') == 1 and not os.path.exists(KILL_SWITCH_FILE):
+                        with open(KILL_SWITCH_FILE, 'w') as f:
+                            f.write(f"triggered from DB flag at {datetime.now(IST).isoformat()}")
+                    if db_flags.get('pause_requested') == 1 and not os.path.exists(PAUSE_SWITCH_FILE):
+                        with open(PAUSE_SWITCH_FILE, 'w') as f:
+                            f.write(f"triggered from DB flag at {datetime.now(IST).isoformat()}")
+                    if db_flags.get('pause_requested') == 0 and os.path.exists(PAUSE_SWITCH_FILE):
+                        # Only remove if DB says unpause (dashboard resume button)
+                        # Don't remove if file was created by circuit breaker or Telegram
+                        pass  # Let file-based check handle removal
+                except Exception:
+                    pass  # DB read failure should not block kill switch check
+
+                # [CRITICAL] KILL SWITCH CHECK (file-based, most reliable)
+                if os.path.exists(KILL_SWITCH_FILE):
+                    logger.critical("[KILL-SWITCH] KILL_SWITCH file detected -- initiating emergency shutdown")
+                    self.telegram.send_message(
+                        "[CRITICAL] [KILL-SWITCH] Emergency shutdown triggered via kill switch file"
+                    )
+                    self._emergency_kill_shutdown()
+                    break
+
+                # [CRITICAL] PAUSE SWITCH CHECK (file-based)
+                if os.path.exists(PAUSE_SWITCH_FILE):
+                    if not self._is_paused:
+                        self._is_paused = True
+                        self._pause_alerted = True
+                        logger.warning("[PAUSE] PAUSE_SWITCH file detected -- pausing order placement")
+                        self.telegram.send_message(
+                            "[PAUSE] Strategy paused via pause switch file.\n"
+                            "Data pipeline and monitoring continue.\n"
+                            "Remove PAUSE_SWITCH file or send /resume to resume."
+                        )
+                else:
+                    if self._is_paused:
+                        self._is_paused = False
+                        self._pause_alerted = False
+                        logger.info("[RESUME] PAUSE_SWITCH file removed -- resuming order placement")
+                        self.telegram.send_message("[RESUME] Strategy resumed. Order placement re-enabled.")
+
                 # [CRITICAL] WATCHDOG: Check data freshness every 30 seconds
                 if time.time() - last_watchdog_check > 30:
 
@@ -568,12 +756,12 @@ class BaselineV1Live:
 
                         # Send Telegram alert about reconnection attempt
                         self.telegram.send_message(
-                            f"[WARNING]️ [WATCHDOG ALERT] STALE DATA\n\n"
+                            f"[WARNING] [WATCHDOG ALERT] STALE DATA\n\n"
                             f"Reason: {stale_reason}\n"
                             f"Data coverage: {health['data_coverage']:.1%}\n"
                             f"Fresh symbols: {health['symbols_with_data']}/{health['subscribed_symbols']}\n"
                             f"Stale symbols: {health['stale_symbols']}\n\n"
-                            f"🔄 Attempting automatic reconnection..."
+                            f"Attempting automatic reconnection..."
                         )
 
                         # Attempt automatic reconnection
@@ -592,7 +780,7 @@ class BaselineV1Live:
                         if reconnect_success:
                             logger.info("[WATCHDOG] Reconnection successful, reconciling orders...")
 
-                            # 🔧 CRITICAL: Reconcile orders with broker after reconnection
+                            # CRITICAL: Reconcile orders with broker after reconnection
                             # This ensures local state matches broker reality
                             try:
                                 # Get current open positions for reconciliation
@@ -645,7 +833,7 @@ class BaselineV1Live:
                                     )
 
                                     self.telegram.send_message(
-                                        f"❌ [EMERGENCY] Shutting down due to missing SL orders\n"
+                                        f"[FAILED] [EMERGENCY] Shutting down due to missing SL orders\n"
                                         f"Check broker manually for positions:\n"
                                         f"{', '.join(reconcile_results['sl_orders_missing'])}"
                                     )
@@ -662,14 +850,14 @@ class BaselineV1Live:
 
                                 # Send error notification but continue
                                 self.telegram.send_message(
-                                    f"[WARNING]️ [WARNING] Order reconciliation failed\n\n"
+                                    f"[WARNING] Order reconciliation failed\n\n"
                                     f"Error: {str(e)}\n\n"
                                     f"Check positions manually at broker!"
                                 )
 
                             # Send success notification
                             self.telegram.send_message(
-                                f"✅ [WATCHDOG] RECONNECTION SUCCESSFUL\n\n"
+                                f"[OK] [WATCHDOG] RECONNECTION SUCCESSFUL\n\n"
                                 f"WebSocket reconnected and operational.\n"
                                 f"Orders reconciled with broker.\n"
                                 f"Trading system continuing normally."
@@ -687,10 +875,10 @@ class BaselineV1Live:
 
                             # Send critical Telegram alert
                             self.telegram.send_message(
-                                f"❌ [WATCHDOG CRITICAL] RECONNECTION FAILED\n\n"
+                                f"[FAILED] [WATCHDOG CRITICAL] RECONNECTION FAILED\n\n"
                                 f"Reason: {stale_reason}\n"
                                 f"Reconnection attempts: All failed\n\n"
-                                f"🚨 Emergency shutdown initiated...\n"
+                                f"Emergency shutdown initiated...\n"
                                 f"All positions will be closed at market."
                             )
 
@@ -699,13 +887,9 @@ class BaselineV1Live:
 
                     last_watchdog_check = time.time()
                 
-                # Check if market is open
-                if not self.is_market_open():
-                    logger.debug("Market closed, waiting...")
-                    await asyncio.sleep(60)
-                    continue
-
-                # Check if force exit time reached (3:15 PM)
+                # Check force exit time BEFORE market open check — both share 15:15, and
+                # is_market_open() returns False at 15:15 (condition: now < 15:15), so this
+                # must come first or the EOD exit and daily summary never fire.
                 if self.is_force_exit_time():
                     if not self._eod_exit_done:
                         logger.warning("Force exit time (3:15 PM) reached - initiating EOD exit")
@@ -713,6 +897,12 @@ class BaselineV1Live:
                         self.handle_eod_exit()
                         logger.info("EOD exit complete - system will monitor until market close")
                     # Continue running (monitor mode) until market closes at 3:30 PM
+                    await asyncio.sleep(60)
+                    continue
+
+                # Check if market is open
+                if not self.is_market_open():
+                    logger.debug("Market closed, waiting...")
                     await asyncio.sleep(60)
                     continue
 
@@ -806,9 +996,21 @@ class BaselineV1Live:
         best_strikes = self.continuous_filter.evaluate_all_candidates(
             latest_bars,
             self.swing_detector,
-            current_bars  # Include current bars for accurate highest_high tracking
+            current_bars,  # Include current bars for accurate highest_high tracking
+            open_position_symbols=set(self.position_tracker.open_positions.keys())
         )
         
+        # Filter out stale-blocked and churn-blocked symbols from best strikes
+        blocked_set = self._stale_blocked_symbols | self.order_manager.churn_detector.blocked_symbols
+        for option_type in ['CE', 'PE']:
+            candidate = best_strikes.get(option_type)
+            if candidate and candidate['symbol'] in blocked_set:
+                logger.info(
+                    f"[BLOCKED-FILTER] {option_type}: {candidate['symbol']} blocked "
+                    f"(stale or churn) -- removing from best strikes"
+                )
+                best_strikes[option_type] = None
+
         # Log current best strikes and candidates (INFO level for visibility)
         summary = self.continuous_filter.get_summary()
         if summary['total_candidates'] > 0:
@@ -862,7 +1064,7 @@ class BaselineV1Live:
                 self.previous_best_strikes[option_type] = None
 
         # Persist best strikes to DB for dashboard
-        # 🔧 CRITICAL: Always call save_best_strikes(), even when both are None
+        # CRITICAL: Always call save_best_strikes(), even when both are None
         # This ensures stale records get cleared when swings are replaced by unqualified ones
         try:
             self.state_manager.save_best_strikes(best_ce, best_pe)
@@ -879,6 +1081,7 @@ class BaselineV1Live:
                     'high': bar.high,
                     'low': bar.low,
                     'close': bar.close,
+                    'vwap': bar.vwap,
                     'volume': bar.volume
                 }
             if bars_for_db:
@@ -886,6 +1089,31 @@ class BaselineV1Live:
         except Exception as e:
             logger.warning(f"Failed to save latest bars: {e}")
         
+        # 4. Skip order placement when paused (keep data pipeline + swing detection running)
+        if self._is_paused:
+            logger.debug("[PAUSED] Skipping order placement steps (paused)")
+            # Still process fills, positions, and state saving below
+            # Jump directly to step 6
+            fills = self.order_manager.check_fills_by_type()
+            current_prices = {symbol: bar.close for symbol, bar in latest_bars.items()}
+            for opt_type in ['CE', 'PE']:
+                if fills[opt_type]:
+                    self.handle_order_fill(fills[opt_type], current_prices)
+            self.position_tracker.update_prices(current_prices)
+            was_already_triggered = self.position_tracker.daily_exit_triggered
+            exit_reason = self.position_tracker.check_daily_exit()
+            if exit_reason and not was_already_triggered:
+                self.handle_daily_exit(exit_reason, current_prices)
+            if self.last_bar_update is None or \
+               (datetime.now(IST) - self.last_bar_update).total_seconds() > 60:
+                phantom_closed = self.position_tracker.reconcile_with_broker()
+                if phantom_closed:
+                    for sym in phantom_closed:
+                        self.continuous_filter.remove_swing_candidate(sym)
+                self.last_bar_update = datetime.now(IST)
+            self.save_state()
+            return
+
         # 4. Get order triggers based on price proximity and existing orders
         # Use CURRENT bars for real-time price checking, LATEST bars for metrics
         pending_orders = self.order_manager.get_pending_orders_by_type()
@@ -919,48 +1147,33 @@ class BaselineV1Live:
                 # Price within 1 Rs of swing - place/update order
                 limit_price = trigger['limit_price']
 
-                # Check available margin before attempting order (CRITICAL FIX #5)
-                try:
-                    # Query broker for account info
-                    account_info = self.data_pipeline.client.get_account_details()
+                # BAR-CLOSE DEFER: If an order for a DIFFERENT symbol is already placed,
+                # don't cancel+replace mid-bar — defer the switch to bar close.
+                # This avoids a brief naked-position window on every tick where the best
+                # strike changes. First-time placements (no existing order) are immediate.
+                existing_order = pending_orders.get(option_type)
+                is_switch = existing_order and existing_order.get('symbol') != candidate['symbol']
 
-                    if account_info and account_info.get('status') == 'success':
-                        available_margin = float(account_info.get('data', {}).get('availablecash', 0))
-
-                        # Rough margin estimate: entry_price × quantity (conservative - actual may be lower)
-                        estimated_margin_required = candidate['entry_price'] * candidate['quantity']
-
-                        if available_margin < estimated_margin_required:
-                            logger.warning(
-                                f"[MARGIN-CHECK-{option_type}] INSUFFICIENT MARGIN "
-                                f"Available: ₹{available_margin:,.0f} < Required: ₹{estimated_margin_required:,.0f} "
-                                f"(Symbol: {candidate['symbol']}, Qty: {candidate['quantity']})"
-                            )
-                            # Skip order placement - insufficient margin
-                            self.order_manager.manage_limit_order_for_type(option_type, None, None)
-                            continue
-                        else:
-                            logger.debug(
-                                f"[MARGIN-CHECK-{option_type}] OK "
-                                f"Available: ₹{available_margin:,.0f} >= Required: ₹{estimated_margin_required:,.0f}"
-                            )
-                    else:
-                        # If margin check fails, log warning but proceed (don't block on API failure)
-                        logger.warning(
-                            f"[MARGIN-CHECK-{option_type}] API call failed: {account_info}. "
-                            f"Proceeding with order (margin not verified)"
-                        )
-                except Exception as e:
-                    # If margin check throws exception, log but proceed
-                    logger.warning(
-                        f"[MARGIN-CHECK-{option_type}] Exception during margin check: {e}. "
-                        f"Proceeding with order (margin not verified)"
+                if is_switch:
+                    self._pending_switch[option_type] = {
+                        'candidate': candidate,
+                        'limit_price': limit_price
+                    }
+                    logger.info(
+                        f"[SWITCH-DEFER-{option_type}] Best changed {existing_order['symbol']} -> "
+                        f"{candidate['symbol']}, deferring to bar close"
                     )
+                    continue  # Skip order action this tick
 
-                # Check if we can open position for this type
+                # Check if we can open position for this type (include pending orders)
+                pending_ce = 1 if self.order_manager.pending_limit_orders.get('CE') else 0
+                pending_pe = 1 if self.order_manager.pending_limit_orders.get('PE') else 0
+
                 can_open, reason = self.position_tracker.can_open_position(
                     candidate['symbol'],
-                    option_type
+                    option_type,
+                    pending_ce_orders=pending_ce,
+                    pending_pe_orders=pending_pe
                 )
 
                 logger.info(
@@ -975,31 +1188,134 @@ class BaselineV1Live:
                         limit_price
                     )
                     logger.info(f"[ORDER-RESULT-{option_type}] {result}: {candidate['symbol']} @ {limit_price:.2f}")
+
+                    # Handle churn circuit breaker signals
+                    if result == 'symbol_blocked':
+                        self.telegram.send_message(
+                            f"[CIRCUIT-BREAKER] {candidate['symbol']} blocked due to order churn\n"
+                            f"Rapid cancel/place loop detected. Symbol blocked until bars resume."
+                        )
+                    elif result == 'strategy_pause':
+                        logger.critical("[CIRCUIT-BREAKER] Global churn limit exceeded -- auto-pausing strategy")
+                        self.telegram.send_message(
+                            f"[CRITICAL] [CIRCUIT-BREAKER] Strategy auto-paused\n"
+                            f"Too many cancel/place cycles across all symbols.\n"
+                            f"Blocked symbols: {self.order_manager.churn_detector.blocked_symbols}\n"
+                            f"Manual intervention required: remove PAUSE_SWITCH file or send /resume"
+                        )
+                        self._is_paused = True
+                        # Create PAUSE_SWITCH file for persistent pause
+                        try:
+                            from .config import PAUSE_SWITCH_FILE
+                            with open(PAUSE_SWITCH_FILE, 'w') as f:
+                                f.write(f"auto-paused by circuit breaker at {datetime.now(IST).isoformat()}")
+                        except Exception as e:
+                            logger.error(f"Failed to create PAUSE_SWITCH file: {e}")
+                        return  # Stop processing this tick
                 else:
                     # Can't open - cancel any existing order
                     self.order_manager.manage_limit_order_for_type(option_type, None, None)
                     logger.warning(f"[BLOCKED-{option_type}] {reason}")
             
             elif action == 'cancel':
-                # Price too far - cancel order
+                # No qualified candidate - cancel order immediately and wipe any pending switch
                 self.order_manager.manage_limit_order_for_type(option_type, None, None)
+                if self._pending_switch[option_type]:
+                    logger.info(
+                        f"[SWITCH-CANCEL-{option_type}] Clearing deferred switch to "
+                        f"{self._pending_switch[option_type]['candidate']['symbol']} "
+                        f"(no qualified candidate)"
+                    )
+                    self._pending_switch[option_type] = None
                 logger.debug(f"[ORDER-{option_type}] Cancelled: {trigger.get('reason')}")
             
             elif action == 'check_fill':
                 # Price broke - order should have filled
                 logger.debug(f"[ORDER-{option_type}] Price broke: {trigger.get('reason')}")
-            
-            # action == 'wait': do nothing
+
+            elif action == 'wait':
+                # Same symbol stays best — clear any stale pending switch.
+                # If the best reverted to the currently-placed symbol, switching
+                # at bar close to the previously-deferred symbol would be wrong.
+                if self._pending_switch[option_type]:
+                    deferred_symbol = self._pending_switch[option_type]['candidate']['symbol']
+                    current_symbol = pending_orders.get(option_type, {}).get('symbol', 'N/A')
+                    logger.info(
+                        f"[SWITCH-REVERT-{option_type}] Best reverted to {current_symbol}, "
+                        f"clearing deferred switch to {deferred_symbol}"
+                    )
+                    self._pending_switch[option_type] = None
         
+        # 5.5 Stale-symbol detection: if a pending order's symbol has stopped
+        # producing bars (e.g., OpenAlgo LTP downgrade killed the feed),
+        # attempt re-subscription and eventually cancel the order.
+        now = datetime.now(IST)
+        if now.time() >= MARKET_START_TIME and now.time() <= MARKET_END_TIME:
+            for option_type in ['CE', 'PE']:
+                pending = self.order_manager.pending_limit_orders.get(option_type)
+                if not pending:
+                    continue
+                symbol = pending.get('symbol')
+                if not symbol:
+                    continue
+                last_bar_time = self.data_pipeline.last_bar_timestamp.get(symbol)
+                if last_bar_time:
+                    staleness = (now - last_bar_time).total_seconds()
+                    if staleness > STALE_SYMBOL_HARD_THRESHOLD:
+                        logger.error(
+                            f"[STALE-SYMBOL] {symbol} no bars for {staleness:.0f}s "
+                            f"(>{STALE_SYMBOL_HARD_THRESHOLD}s) -- cancelling {option_type} order"
+                        )
+                        self.order_manager.manage_limit_order_for_type(option_type, None, None)
+                        # Add to stale-blocked set to prevent re-selection
+                        self._stale_blocked_symbols.add(symbol)
+                        # Throttle Telegram: send first alert, then suppress for 5 min
+                        last_alert = self._last_stale_telegram.get(symbol, 0)
+                        now_ts = time.time()
+                        if now_ts - last_alert > 300:  # 5-minute cooldown
+                            suppressed = self._stale_suppress_count.get(symbol, 0)
+                            suffix = f" ({suppressed} alerts suppressed)" if suppressed > 0 else ""
+                            try:
+                                self.telegram.send_message(
+                                    f"[STALE-SYMBOL] Cancelled {option_type} order for {symbol}\n"
+                                    f"No bar data for {staleness:.0f}s. Symbol blocked until bars resume.{suffix}"
+                                )
+                            except Exception:
+                                pass
+                            self._last_stale_telegram[symbol] = now_ts
+                            self._stale_suppress_count[symbol] = 0
+                        else:
+                            self._stale_suppress_count[symbol] = self._stale_suppress_count.get(symbol, 0) + 1
+                    elif staleness > STALE_SYMBOL_THRESHOLD:
+                        logger.warning(
+                            f"[STALE-SYMBOL] {symbol} no bars for {staleness:.0f}s "
+                            f"(>{STALE_SYMBOL_THRESHOLD}s)"
+                        )
+
+            # Unblock stale symbols whose bars have resumed
+            for symbol in list(self._stale_blocked_symbols):
+                last_bar_time = self.data_pipeline.last_bar_timestamp.get(symbol)
+                if last_bar_time:
+                    staleness = (now - last_bar_time).total_seconds()
+                    if staleness < STALE_SYMBOL_THRESHOLD:
+                        self._stale_blocked_symbols.discard(symbol)
+                        self.order_manager.churn_detector.unblock_symbol(symbol)
+                        logger.info(f"[STALE-UNBLOCK] {symbol} bars resumed (staleness {staleness:.0f}s) -- unblocked")
+
         # 6. Check for order fills
         fills = self.order_manager.check_fills_by_type()
-        
+
         current_prices = {symbol: bar.close for symbol, bar in latest_bars.items()}
-        
+
         for option_type in ['CE', 'PE']:
             if fills[option_type]:
                 self.handle_order_fill(fills[option_type], current_prices)
-        
+
+        # 6.5 At bar close: execute any deferred strike switches.
+        # Runs AFTER fill processing so position state is up-to-date before the guard check.
+        if new_bars_dict:
+            self._process_bar_close_switches()
+
         # 7. Update position prices
         self.position_tracker.update_prices(current_prices)
         
@@ -1017,12 +1333,124 @@ class BaselineV1Live:
         # 7. Reconcile positions with broker (every 60 seconds)
         if self.last_bar_update is None or \
            (datetime.now(IST) - self.last_bar_update).total_seconds() > 60:
-            self.position_tracker.reconcile_with_broker()
+            phantom_closed = self.position_tracker.reconcile_with_broker()
+            if phantom_closed:
+                for sym in phantom_closed:
+                    self.continuous_filter.remove_swing_candidate(sym)
+                    logger.info(f"[PHANTOM-CLEANUP] {sym} removed from filter after SL hit")
             self.last_bar_update = datetime.now(IST)
         
         # 8. Save state
         self.save_state()
     
+    def _compute_live_sl_price(self, symbol: str, candidate_info: Dict) -> float:
+        """Compute fresh SL price using live highest_high at fill time.
+
+        Falls back to candidate_info['sl_price'] if live data unavailable.
+        """
+        try:
+            detector = self.swing_detector.detectors.get(symbol)
+            if not detector or not detector.bars:
+                return candidate_info['sl_price']
+
+            swing_time = candidate_info.get('swing_time')
+            if not swing_time:
+                return candidate_info['sl_price']
+
+            # Find highest high from all bars at/after swing time
+            highest_high = 0.0
+            found_swing = False
+            for bar in detector.bars:
+                if bar['timestamp'] >= swing_time:
+                    found_swing = True
+                    highest_high = max(highest_high, bar.get('high', 0.0))
+
+            if not found_swing:
+                return candidate_info['sl_price']
+
+            # Include current incomplete bar
+            current_bars = self.data_pipeline.get_all_current_bars()
+            current_bar = current_bars.get(symbol)
+            if current_bar and current_bar.high is not None:
+                highest_high = max(highest_high, current_bar.high)
+
+            live_sl = highest_high + 1  # +1 Rs buffer (per architecture)
+
+            # Only use live SL if it's HIGHER than stale (safer for short positions)
+            stale_sl = candidate_info['sl_price']
+            if live_sl > stale_sl:
+                logger.info(
+                    f"[SL-RECOMPUTE] {symbol}: stale SL={stale_sl:.2f} -> "
+                    f"live SL={live_sl:.2f} (highest_high={highest_high:.2f})"
+                )
+                return live_sl
+            return stale_sl
+
+        except Exception as e:
+            logger.error(f"[SL-RECOMPUTE] Error for {symbol}: {e}, using stale SL")
+            return candidate_info['sl_price']
+
+    def _process_bar_close_switches(self):
+        """
+        Execute deferred strike switches at bar close.
+
+        Called once per bar (when new_bars_dict is non-empty). For each option type
+        that has a pending switch, check whether the old order was already filled
+        mid-bar (a position would exist). If so, suppress the switch. Otherwise,
+        cancel the old order and place the new one.
+        """
+        for option_type in ['CE', 'PE']:
+            pending = self._pending_switch[option_type]
+            if not pending:
+                continue
+
+            candidate = pending['candidate']
+            limit_price = pending['limit_price']
+
+            # Guard: was the old entry order filled during this bar?
+            # can_open_position() returns False if a position for this option type
+            # already exists — which means the mid-bar fill happened.
+            pending_ce = 1 if self.order_manager.pending_limit_orders.get('CE') else 0
+            pending_pe = 1 if self.order_manager.pending_limit_orders.get('PE') else 0
+
+            # For the switch check, treat the existing order as being replaced (not added).
+            # Pass 0 for the option type being switched so the position count check is fair.
+            if option_type == 'CE':
+                pending_ce = 0
+            else:
+                pending_pe = 0
+
+            can_open, reason = self.position_tracker.can_open_position(
+                candidate['symbol'],
+                option_type,
+                pending_ce_orders=pending_ce,
+                pending_pe_orders=pending_pe
+            )
+
+            if not can_open:
+                logger.info(
+                    f"[BAR-CLOSE-SWITCH] {option_type}: Suppressing deferred switch to "
+                    f"{candidate['symbol']} - {reason}"
+                )
+                self._pending_switch[option_type] = None
+                continue
+
+            logger.info(
+                f"[BAR-CLOSE-SWITCH] {option_type}: Executing deferred switch to "
+                f"{candidate['symbol']} trigger={candidate['swing_low'] - 0.05:.2f} "
+                f"limit={limit_price:.2f}"
+            )
+            result = self.order_manager.manage_limit_order_for_type(option_type, candidate, limit_price)
+            if result == 'kept':
+                logger.warning(
+                    f"[BAR-CLOSE-SWITCH] {option_type}: Switch to {candidate['symbol']} "
+                    f"could not complete - cancel of old order failed, old order kept"
+                )
+            else:
+                logger.info(f"[BAR-CLOSE-SWITCH] {option_type}: Switch result: {result}")
+
+            self._pending_switch[option_type] = None
+
     def handle_order_fill(self, fill: Dict, current_prices: Dict):
         """Handle filled limit order"""
         symbol = fill['symbol']
@@ -1030,42 +1458,56 @@ class BaselineV1Live:
         quantity = fill['quantity']
         candidate_info = fill['candidate_info']
         option_type = fill['option_type']
-        
+
+        # Dedup guard: prevent processing the same fill multiple times
+        fill_key = f"{symbol}_{fill.get('order_id', '')}_{fill_price}"
+        if fill_key in self._processed_fill_ids:
+            logger.warning(f"[FILL-DEDUP] {symbol} fill already processed (key={fill_key}), skipping")
+            return
+        self._processed_fill_ids.add(fill_key)
+
         logger.info(f"[FILL-{option_type}] {symbol} @ {fill_price:.2f}, Qty={quantity}")
-        
-        # Add position
+
+        # Recompute SL price using live highest_high (not stale candidate_info)
+        live_sl_price = self._compute_live_sl_price(symbol, candidate_info)
+
+        # Add position (use live SL for position record too)
         position = self.position_tracker.add_position(
             symbol=symbol,
             entry_price=fill_price,
-            sl_price=candidate_info['sl_price'],
+            sl_price=live_sl_price,
             quantity=quantity,
             actual_R=candidate_info['actual_R'],
             candidate_info=candidate_info
         )
-        
-        # Place SL order immediately
+
+        # CRITICAL: Remove filled symbol from filter pool to prevent re-ordering
+        self.continuous_filter.remove_swing_candidate(symbol)
+        logger.info(f"[FILL-CLEANUP] {symbol} removed from filter pool after fill")
+
+        # Place SL order immediately with live price
         sl_order_id = self.order_manager.place_sl_order(
             symbol=symbol,
-            trigger_price=candidate_info['sl_price'],
+            trigger_price=live_sl_price,
             quantity=quantity
         )
         
         if sl_order_id:
-            logger.info(f"[SL-ORDER] {symbol} @ {candidate_info['sl_price']:.2f} | Order: {sl_order_id}")
+            logger.info(f"[SL-ORDER] {symbol} @ {live_sl_price:.2f} | Order: {sl_order_id}")
         else:
-            # 🚨 CRITICAL: SL placement failed - position has unlimited risk
+            # CRITICAL: SL placement failed - position has unlimited risk
             logger.critical(
                 f"[CRITICAL] SL PLACEMENT FAILED for {symbol} - Initiating emergency market exit"
             )
             
             # Send immediate Telegram alert
             self.telegram.send_message(
-                f"🚨 CRITICAL: SL PLACEMENT FAILED\n\n"
+                f"[CRITICAL] SL PLACEMENT FAILED\n\n"
                 f"Symbol: {symbol}\n"
-                f"Entry: ₹{fill_price:.2f}\n"
+                f"Entry: Rs{fill_price:.2f}\n"
                 f"Qty: {quantity}\n"
-                f"Expected SL: ₹{candidate_info['sl_price']:.2f}\n\n"
-                f"[WARNING]️ Initiating emergency MARKET exit..."
+                f"Expected SL: Rs{live_sl_price:.2f}\n\n"
+                f"[WARNING] Initiating emergency MARKET exit..."
             )
             
             # Attempt emergency market exit
@@ -1083,7 +1525,7 @@ class BaselineV1Live:
                 
                 # Send success confirmation
                 self.telegram.send_message(
-                    f"✅ Emergency exit order placed\n\n"
+                    f"[OK] Emergency exit order placed\n\n"
                     f"Symbol: {symbol}\n"
                     f"Order ID: {emergency_order_id}\n"
                     f"Type: MARKET (force close)\n\n"
@@ -1103,10 +1545,10 @@ class BaselineV1Live:
                 
                 # Send critical failure alert
                 self.telegram.send_message(
-                    f"❌ EMERGENCY EXIT FAILED\n\n"
+                    f"[FAILED] EMERGENCY EXIT FAILED\n\n"
                     f"Symbol: {symbol}\n"
                     f"Qty: {quantity}\n\n"
-                    f"🚨 MANUAL BROKER INTERVENTION REQUIRED!\n"
+                    f"[CRITICAL] MANUAL BROKER INTERVENTION REQUIRED!\n"
                     f"Position has NO STOP LOSS - close immediately in broker!"
                 )
             
@@ -1116,7 +1558,7 @@ class BaselineV1Live:
                 
                 # Send halt notification
                 self.telegram.send_message(
-                    f"🛑 TRADING HALTED\n\n"
+                    f"[HALT] TRADING HALTED\n\n"
                     f"Reason: {self.order_manager.consecutive_sl_failures} consecutive SL failures\n"
                     f"Threshold: {self.order_manager.consecutive_sl_failures}/3\n\n"
                     f"System initiating emergency shutdown..."
@@ -1131,23 +1573,40 @@ class BaselineV1Live:
     def handle_daily_exit(self, exit_reason: str, current_prices: Dict):
         """Handle ±5R daily exit"""
         logger.warning(f"DAILY EXIT TRIGGERED: {exit_reason}")
-        
-        # Cancel all orders
-        self.order_manager.cancel_all_orders()
-        
-        # Close all positions
-        self.position_tracker.close_all_positions(exit_reason, current_prices)
-        
-        # Save final state
-        self.save_state()
-        
-        # Save daily summary and notify
-        summary = self.position_tracker.get_position_summary()
-        self.state_manager.save_daily_summary(summary)
-        self.telegram.notify_daily_target(summary)
-        
-        logger.info(f"Daily Summary: {summary}")
-        logger.info("Trading stopped for the day")
+
+        try:
+            # Cancel all orders FIRST (prevent new fills during exit)
+            self.order_manager.cancel_all_orders()
+
+            # Clear filter pools to prevent re-nomination after exit
+            self.continuous_filter.reset_daily_data()
+            logger.info("[DAILY-EXIT] Filter pools cleared to prevent re-nomination")
+
+            # Close all positions
+            self.position_tracker.close_all_positions(exit_reason, current_prices)
+
+            # Save final state
+            self.save_state()
+
+            # Save daily summary and notify
+            summary = self.position_tracker.get_position_summary()
+            self.state_manager.save_daily_summary(summary)
+            self.telegram.notify_daily_target(summary)
+
+            logger.info(f"Daily Summary: {summary}")
+            logger.info("Trading stopped for the day")
+
+        except Exception as e:
+            logger.critical(
+                f"[DAILY-EXIT-ERROR] Failed during daily exit: {e}. "
+                f"Some positions may still be open!",
+                exc_info=True
+            )
+            # Send critical alert
+            self.telegram.send_message(
+                f"[CRITICAL] Daily exit FAILED: {e}\n"
+                f"MANUAL BROKER CHECK REQUIRED"
+            )
     
     def handle_eod_exit(self):
         """Handle end-of-day forced exit at 3:15 PM"""
@@ -1159,6 +1618,10 @@ class BaselineV1Live:
 
         # Cancel all orders
         self.order_manager.cancel_all_orders()
+
+        # Clear filter pools to prevent re-nomination after exit
+        self.continuous_filter.reset_daily_data()
+        logger.info("[EOD-EXIT] Filter pools cleared to prevent re-nomination")
 
         # Close all positions
         self.position_tracker.close_all_positions('EOD_EXIT', current_prices)
@@ -1239,10 +1702,37 @@ class BaselineV1Live:
             # Force exit if stuck
             sys.exit(1)
     
+    def _emergency_kill_shutdown(self):
+        """
+        Kill switch emergency shutdown: cancel all pending orders and stop the loop.
+
+        Unlike handle_emergency_shutdown(), this does NOT close open positions --
+        existing positions have SL orders at the broker and will be managed there.
+        This simply stops the strategy from placing new orders.
+        """
+        logger.critical("[KILL-SWITCH] Emergency kill shutdown starting...")
+        try:
+            # Cancel all pending entry orders (CE and PE)
+            self.order_manager.manage_limit_order_for_type('CE', None, None)
+            self.order_manager.manage_limit_order_for_type('PE', None, None)
+            logger.info("[KILL-SWITCH] All pending entry orders cancelled")
+
+            self.telegram.send_message(
+                "[CRITICAL] [KILL-SWITCH] Strategy stopped.\n"
+                "All pending entry orders cancelled.\n"
+                "Existing positions retained (SL orders active at broker).\n"
+                "Delete KILL_SWITCH file and restart to resume."
+            )
+        except Exception as e:
+            logger.error(f"[KILL-SWITCH] Error during kill shutdown: {e}")
+
+        self.save_state()
+        self.shutdown_requested = True
+
     def handle_emergency_shutdown(self):
         """
         EMERGENCY SHUTDOWN: Cancel all orders, exit all positions, save state
-        
+
         Called when critical failures occur (e.g., repeated SL placement failures)
         """
         logger.critical("[EMERGENCY] INITIATING EMERGENCY SHUTDOWN")
@@ -1289,11 +1779,11 @@ class BaselineV1Live:
             # 4. Send Telegram alert
             summary = self.position_tracker.get_position_summary()
             self.telegram.send_message(
-                f"🚨 EMERGENCY SHUTDOWN\n\n"
+                f"[CRITICAL] EMERGENCY SHUTDOWN\n\n"
                 f"Reason: Repeated SL placement failures\n"
                 f"Cumulative R: {summary['cumulative_R']:.2f}R\n"
                 f"Closed positions: {summary['total_positions']}\n\n"
-                f"[WARNING]️ Check broker positions manually!"
+                f"[WARNING] Check broker positions manually!"
             )
             
             logger.critical("Emergency shutdown complete - check broker positions manually")
@@ -1358,8 +1848,52 @@ def main():
         logger.info("[AUTO] Auto-detection mode enabled (WebSocket + API fallback)")
 
         from .auto_detector import AutoDetector
-        from .config import OPENALGO_API_KEY, OPENALGO_HOST
+        from .config import (
+            OPENALGO_API_KEY, OPENALGO_HOST, ANGELONE_HOST,
+            AUTOMATED_LOGIN, ZERODHA_TOTP_SECRET, ANGELONE_TOTP_SECRET
+        )
         from .data_pipeline import DataPipeline
+        from .login_handler import LoginHandler
+
+        # Attempt automated login if enabled (paper trading only)
+        if AUTOMATED_LOGIN:
+            if not PAPER_TRADING:
+                logger.warning(
+                    "[AUTO] AUTOMATED_LOGIN=true but PAPER_TRADING=false. "
+                    "Automated login is only permitted in paper trading mode. Skipping."
+                )
+            else:
+                logger.info("[AUTO] Automated login enabled (paper trading mode)")
+                # Try to load all credentials from environment
+                openalgo_username = os.getenv('OPENALGO_USERNAME', '')
+                openalgo_password = os.getenv('OPENALGO_PASSWORD', '')
+                zerodha_user_id = os.getenv('ZERODHA_USER_ID', '')
+                zerodha_password = os.getenv('ZERODHA_PASSWORD', '')
+                angelone_user_id = os.getenv('ANGELONE_USER_ID', '')
+                angelone_password = os.getenv('ANGELONE_PASSWORD', '')
+
+                required_creds = [
+                    openalgo_username, openalgo_password,
+                    zerodha_user_id, zerodha_password, angelone_user_id, angelone_password,
+                    ZERODHA_TOTP_SECRET, ANGELONE_TOTP_SECRET
+                ]
+
+                if all(required_creds):
+                    login_handler = LoginHandler(OPENALGO_HOST, OPENALGO_API_KEY)
+                    login_ok = login_handler.auto_login_all(
+                        openalgo_username, openalgo_password,
+                        zerodha_user_id, zerodha_password, ZERODHA_TOTP_SECRET,
+                        angelone_user_id, angelone_password, ANGELONE_TOTP_SECRET,
+                        ANGELONE_HOST
+                    )
+                    if login_ok:
+                        logger.info("[AUTO] Automated login successful, proceeding with auto-detect")
+                    else:
+                        logger.warning("[AUTO] Automated login failed, proceeding with auto-detect (may retry in wait mode)")
+                else:
+                    logger.warning("[AUTO] Automated login enabled but not all credentials configured in .env")
+        else:
+            logger.info("[AUTO] Automated login disabled (use manual login)")
 
         # Try WebSocket for spot price, fall back to API if it fails
         temp_pipeline = None
@@ -1380,12 +1914,37 @@ def main():
             logger.info("[AUTO] Will use API fallback for spot price")
             temp_pipeline = None  # Signal AutoDetector to skip WebSocket
 
+        # Initialize Telegram notifier for broker reconnection alerts
+        telegram_notifier = get_notifier()
+
+        # Wait until 9:16 AM IST for first candle to close
+        # (Market opens at 9:15, first candle closes at 9:16)
+        now = datetime.now(pytz.timezone('Asia/Kolkata'))
+        market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        auto_detect_time = market_open + timedelta(minutes=1)  # 9:16 AM
+
+        if now < auto_detect_time:
+            wait_seconds = (auto_detect_time - now).total_seconds()
+            logger.info(f"[AUTO] Waiting for first candle to close (9:16 AM IST)...")
+            logger.info(f"[AUTO] Will start auto-detection in {wait_seconds:.0f} seconds")
+
+            if telegram_notifier:
+                msg = f"[AUTO] Containers started. Waiting for market to open (9:15 AM) and first candle to close (9:16 AM IST). Will start auto-detect then."
+                telegram_notifier.send_message(msg)
+
+            time.sleep(wait_seconds)
+            logger.info(f"[AUTO] 9:16 AM reached. Starting auto-detection now...")
+        else:
+            logger.info(f"[AUTO] Already past 9:16 AM, proceeding immediately with auto-detection")
+
         # Run auto-detection (WebSocket if connected, else API fallback)
+        # With graceful degradation: enters wait mode if broker not connected
         detector = AutoDetector(
             api_key=OPENALGO_API_KEY,
             host=OPENALGO_HOST,
             data_pipeline=temp_pipeline,
-            spot_symbol=spot_symbol
+            spot_symbol=spot_symbol,
+            telegram_notifier=telegram_notifier
         )
         atm_strike, expiry_date = detector.auto_detect()
 
@@ -1395,6 +1954,10 @@ def main():
             temp_pipeline.disconnect()
 
         logger.info(f"[AUTO] Detected ATM: {atm_strike}, Expiry: {expiry_date}")
+        if telegram_notifier:
+            telegram_notifier.send_message(
+                f"[AUTO] Auto-detect complete. Expiry: {expiry_date}, ATM: {atm_strike}. Strategy starting..."
+            )
     else:
         # Manual mode - require --expiry and --atm
         if not args.expiry or not args.atm:

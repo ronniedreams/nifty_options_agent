@@ -66,7 +66,7 @@ FORCE_EXIT_TIME = time(15, 15) # Force exit at 3:15 PM
 | OpenAlgo | https://openalgo.ronniedreams.in |
 | Monitor | https://monitor.ronniedreams.in |
 
-**Basic Auth**: `admin` / `your-dashboard-password`
+**Basic Auth**: `admin` / `<your-dashboard-password>`
 
 ### SSH Access
 ```bash

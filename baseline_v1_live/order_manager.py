@@ -16,6 +16,7 @@ Order Types:
 import logging
 from typing import Dict, List, Optional
 from datetime import datetime
+from collections import deque
 import time
 import pytz
 
@@ -46,10 +47,119 @@ logger = logging.getLogger(__name__)
 IST = pytz.timezone('Asia/Kolkata')
 
 
+class OrderChurnDetector:
+    """
+    Detects runaway cancel/place loops (churn) and blocks symbols or pauses strategy.
+
+    A churn cycle = cancel + re-place of the SAME symbol within 30 seconds.
+    - Normal switch (25700PE -> 25600PE) is NOT churn (different symbols).
+    - Normal price update at bar close is NOT churn (at most once per minute).
+    - Rapid same-symbol cancel -> place -> cancel -> place IS churn.
+
+    Thresholds:
+    - Per-symbol: 2+ churn cycles in 5 minutes -> block that symbol.
+    - Global:     5+ total churn cycles in 5 minutes -> auto-pause strategy.
+    """
+
+    def __init__(self, window: int = 300, per_symbol_limit: int = 2, global_limit: int = 5):
+        self.cancel_events = {}    # {symbol: deque of timestamps}
+        self.place_events = {}     # {symbol: deque of timestamps}
+        self.blocked_symbols = set()
+        self.window = window               # 5-minute sliding window
+        self.per_symbol_limit = per_symbol_limit
+        self.global_limit = global_limit
+        self._churn_cycle_log = deque(maxlen=100)  # recent churn cycles for global count
+
+    def _trim(self, dq: deque, now: float):
+        """Remove entries older than window."""
+        while dq and (now - dq[0]) > self.window:
+            dq.popleft()
+
+    def record_cancel(self, symbol: str):
+        """Record a cancel event for symbol."""
+        now = time.time()
+        if symbol not in self.cancel_events:
+            self.cancel_events[symbol] = deque()
+        self.cancel_events[symbol].append(now)
+        self._trim(self.cancel_events[symbol], now)
+
+    def record_place(self, symbol: str) -> str:
+        """
+        Record a place event for symbol. Check for churn.
+
+        Returns:
+            'ok'              - no churn detected
+            'symbol_blocked'  - this symbol is now blocked
+            'strategy_pause'  - global limit exceeded, strategy should pause
+        """
+        now = time.time()
+        if symbol not in self.place_events:
+            self.place_events[symbol] = deque()
+        self.place_events[symbol].append(now)
+        self._trim(self.place_events[symbol], now)
+
+        # Check if this place follows a cancel of same symbol within 30s = churn cycle
+        cancels = self.cancel_events.get(symbol, deque())
+        self._trim(cancels, now)
+        is_churn = False
+        for cancel_ts in reversed(cancels):
+            if (now - cancel_ts) <= 30:
+                is_churn = True
+                break
+            if (now - cancel_ts) > 30:
+                break
+
+        if not is_churn:
+            return 'ok'
+
+        # Record churn cycle
+        self._churn_cycle_log.append((now, symbol))
+        logger.warning(f"[CHURN] Churn cycle detected for {symbol}")
+
+        # Count per-symbol churn cycles in window
+        symbol_churn_count = sum(
+            1 for ts, sym in self._churn_cycle_log
+            if sym == symbol and (now - ts) <= self.window
+        )
+
+        # Count global churn cycles in window
+        global_churn_count = sum(
+            1 for ts, _ in self._churn_cycle_log
+            if (now - ts) <= self.window
+        )
+
+        # Check global limit first (more severe)
+        if global_churn_count >= self.global_limit:
+            logger.critical(
+                f"[CHURN] GLOBAL LIMIT: {global_churn_count} churn cycles in {self.window}s "
+                f"(limit: {self.global_limit}) -- requesting strategy pause"
+            )
+            return 'strategy_pause'
+
+        # Check per-symbol limit
+        if symbol_churn_count >= self.per_symbol_limit:
+            self.blocked_symbols.add(symbol)
+            logger.error(
+                f"[CHURN] SYMBOL BLOCKED: {symbol} had {symbol_churn_count} churn cycles "
+                f"in {self.window}s (limit: {self.per_symbol_limit})"
+            )
+            return 'symbol_blocked'
+
+        return 'ok'
+
+    def is_blocked(self, symbol: str) -> bool:
+        return symbol in self.blocked_symbols
+
+    def unblock_symbol(self, symbol: str):
+        if symbol in self.blocked_symbols:
+            self.blocked_symbols.discard(symbol)
+            logger.info(f"[CHURN] Unblocked symbol: {symbol}")
+
+
 class OrderManager:
     """
     Manages order placement, modification, and cancellation
-    
+
     NEW: Tracks orders by option_type (CE/PE) instead of symbol
     """
     
@@ -74,6 +184,9 @@ class OrderManager:
         self.consecutive_sl_failures = 0
         self.emergency_exit_triggered = False
         
+        # Churn detector: prevents runaway cancel/place loops
+        self.churn_detector = OrderChurnDetector()
+
         logger.info("OrderManager initialized (option-type based tracking)")
 
     def restore_state(self, pending_limit: Dict, active_sl: Dict):
@@ -255,7 +368,13 @@ class OrderManager:
         
         order_info = self.pending_limit_orders[symbol]
         order_id = order_info['order_id']
-        
+
+        # If order is in_flight (sentinel, no real order_id yet), just remove it
+        if order_id == 'PLACING' or order_info.get('status') == 'in_flight':
+            logger.info(f"[CANCEL] {symbol} was in_flight (no broker order placed), removing sentinel")
+            del self.pending_limit_orders[symbol]
+            return True
+
         if DRY_RUN:
             logger.info(f"[DRY RUN] Would cancel order {order_id}")
             del self.pending_limit_orders[symbol]
@@ -266,11 +385,15 @@ class OrderManager:
 
             if response.get('status') == 'success':
                 del self.pending_limit_orders[symbol]
-
                 logger.info(f"Cancelled order {order_id} for {symbol}")
-
                 return True
             else:
+                # Treat "already cancelled/rejected" as success — goal is order not active
+                msg = response.get('message', '').lower()
+                if any(x in msg for x in ['cancelled', 'canceled', 'rejected', 'completed']):
+                    del self.pending_limit_orders[symbol]
+                    logger.info(f"Order {order_id} already {msg} — removing from pending")
+                    return True
                 logger.error(f"Failed to cancel order {order_id}: {response}")
                 return False
 
@@ -306,9 +429,7 @@ class OrderManager:
             raise ValueError(
                 f"SL BUY trigger ({trigger_price:.2f}) must be < limit ({limit_price:.2f}) for Upstox"
             )
-        
-        limit_price = trigger_price + SL_LIMIT_PRICE_OFFSET
-        
+
         if DRY_RUN:
             logger.info(
                 f"[DRY RUN] Would place SL-L order: "
@@ -356,10 +477,10 @@ class OrderManager:
                     f"{symbol} BUY {quantity} @ trigger {trigger_price:.2f}, "
                     f"limit {limit_price:.2f}"
                 )
-                
+
                 # Reset failure counter on success
                 self.consecutive_sl_failures = 0
-                
+
                 return order_id
             else:
                 logger.error(f"Failed to place SL order: {response}")
@@ -395,6 +516,12 @@ class OrderManager:
                 logger.info(f"Cancelled SL order {order_id} for {symbol}")
                 return True
             else:
+                # Treat "already cancelled/rejected/completed" as success
+                msg = response.get('message', '').lower()
+                if any(x in msg for x in ['cancelled', 'canceled', 'rejected', 'completed']):
+                    del self.active_sl_orders[symbol]
+                    logger.info(f"SL order {order_id} already {msg} — removing from active")
+                    return True
                 logger.error(f"Failed to cancel SL order {order_id}: {response}")
                 return False
                 
@@ -536,6 +663,28 @@ class OrderManager:
             logger.info(f"[DRY RUN] Would place MARKET order for {symbol}")
             return f"DRY_MARKET_{symbol}_{int(time.time())}"
 
+        # Verify position exists at broker before placing close order
+        try:
+            positions_response = self.client.openposition()
+            if positions_response.get('status') == 'success':
+                positions = positions_response.get('data', [])
+                position_exists = False
+                for pos in positions:
+                    if pos.get('symbol') == symbol and pos.get('product') == PRODUCT_TYPE:
+                        actual_qty = abs(int(pos.get('quantity', 0)))
+                        if actual_qty > 0:
+                            position_exists = True
+                            quantity = actual_qty  # Use broker's actual quantity
+                            break
+                if not position_exists:
+                    logger.warning(
+                        f"[MARKET-EXIT] No position at broker for {symbol} - "
+                        f"skipping to prevent reverse position"
+                    )
+                    return None
+        except Exception as e:
+            logger.error(f"[MARKET-EXIT] Position check failed: {e}, proceeding with caution")
+
         # 3-retry logic (same as other order methods)
         for attempt in range(1, MAX_ORDER_RETRIES + 1):
             try:
@@ -600,7 +749,7 @@ class OrderManager:
         try:
             # Get orderbook
             response = self.client.orderbook()
-            
+
             if response.get('status') != 'success':
                 logger.error(f"Failed to fetch orderbook: {response}")
                 return []
@@ -760,6 +909,7 @@ class OrderManager:
             if existing:
                 cancel_result = self._cancel_broker_order(existing['order_id'])
                 if cancel_result in ('success', 'terminal'):
+                    self.churn_detector.record_cancel(existing['symbol'])
                     del self.pending_limit_orders[option_type]
                     logger.info(f"[CANCEL-{option_type}] Cancelled limit order for {existing['symbol']}")
                     return 'cancelled'
@@ -782,26 +932,40 @@ class OrderManager:
         
         # Case 2: No existing order - place new
         if not existing:
+            # Set sentinel BEFORE broker API call to prevent duplicate placement
+            # if process_tick() fires again while API call is in-flight or retrying
+            self.pending_limit_orders[option_type] = {
+                'order_id': 'PLACING',
+                'symbol': symbol,
+                'trigger_price': trigger_price,
+                'limit_price': limit_price_entry,
+                'quantity': quantity,
+                'status': 'in_flight',
+                'placed_at': datetime.now(IST),
+                'candidate_info': candidate
+            }
             order_id = self._place_broker_stop_limit_order(symbol, trigger_price, limit_price_entry, quantity)
             if order_id:
-                self.pending_limit_orders[option_type] = {
+                self.pending_limit_orders[option_type].update({
                     'order_id': order_id,
-                    'symbol': symbol,
-                    'trigger_price': trigger_price,
-                    'limit_price': limit_price_entry,
-                    'quantity': quantity,
                     'status': 'pending',
-                    'placed_at': datetime.now(IST),
-                    'candidate_info': candidate
-                }
+                })
+                # Record placement for churn detection
+                churn_result = self.churn_detector.record_place(symbol)
+                if churn_result != 'ok':
+                    logger.warning(f"[CHURN] Place triggered churn result: {churn_result} for {symbol}")
                 logger.info(f"[PLACE-{option_type}] {symbol} SL-L trigger {trigger_price:.2f} limit {limit_price_entry:.2f} QTY {quantity}")
-                return 'placed'
+                return 'placed' if churn_result == 'ok' else churn_result
+            # API failed - remove sentinel so next tick can retry
+            del self.pending_limit_orders[option_type]
             return 'failed'
 
         # Case 3: Different symbol - cancel old, place new
         # CRITICAL FIX: Check cancel result BEFORE placing new order to prevent duplicates
         if existing['symbol'] != symbol:
             cancel_result = self._cancel_broker_order(existing['order_id'])
+            if cancel_result in ('success', 'terminal'):
+                self.churn_detector.record_cancel(existing['symbol'])
 
             if cancel_result == 'failed':
                 # Cancel failed - old order may be triggered/filled at broker
@@ -836,12 +1000,15 @@ class OrderManager:
                     'placed_at': datetime.now(IST),
                     'candidate_info': candidate
                 }
+                churn_result = self.churn_detector.record_place(symbol)
+                if churn_result != 'ok':
+                    logger.warning(f"[CHURN] Switch triggered churn result: {churn_result} for {symbol}")
                 logger.info(f"[SWITCH-{option_type}] {existing['symbol']} -> {symbol} trigger {trigger_price:.2f} limit {limit_price_entry:.2f}")
-                return 'modified'
+                return 'modified' if churn_result == 'ok' else churn_result
             return 'failed'
         
         # Case 4: Same symbol, check if trigger or limit price changed significantly
-        # CRITICAL FIX: Use MODIFICATION_THRESHOLD (0.50 Rs) instead of 0.01 to reduce
+        # CRITICAL FIX: Use MODIFICATION_THRESHOLD (1.00 Rs) instead of 0.01 to reduce
         # unnecessary order modifications that can cause duplicate orders
         trigger_diff = abs(existing['trigger_price'] - trigger_price)
         limit_diff = abs(existing['limit_price'] - limit_price_entry)
@@ -850,6 +1017,8 @@ class OrderManager:
             # Price changed significantly - try to cancel old and place new SL order
             # CRITICAL FIX: Check cancel result BEFORE placing new order to prevent duplicates
             cancel_result = self._cancel_broker_order(existing['order_id'])
+            if cancel_result in ('success', 'terminal'):
+                self.churn_detector.record_cancel(symbol)
 
             if cancel_result == 'failed':
                 # Cancel failed - order may be triggered/filled at broker
@@ -877,11 +1046,14 @@ class OrderManager:
                 existing['trigger_price'] = trigger_price
                 existing['limit_price'] = limit_price_entry
                 existing['placed_at'] = datetime.now(IST)
+                churn_result = self.churn_detector.record_place(symbol)
+                if churn_result != 'ok':
+                    logger.warning(f"[CHURN] Modify triggered churn result: {churn_result} for {symbol}")
                 logger.info(
                     f"[MODIFY-{option_type}] {symbol} trigger {trigger_price:.2f} limit {limit_price_entry:.2f} "
                     f"(diff: trigger={trigger_diff:.2f}, limit={limit_diff:.2f})"
                 )
-                return 'modified'
+                return 'modified' if churn_result == 'ok' else churn_result
             return 'failed'
 
         # Case 5: Same symbol, price change within threshold - keep existing order
@@ -904,6 +1076,11 @@ class OrderManager:
         Returns:
             Order ID if successful, None otherwise
         """
+        # Churn check: block placement if symbol is churn-blocked
+        if self.churn_detector.is_blocked(symbol):
+            logger.warning(f"[CHURN-BLOCK] {symbol} is blocked by circuit breaker -- skipping order placement")
+            return None
+
         if DRY_RUN:
             order_id = f"DRY_SLL_{symbol}_{int(time.time())}"
             logger.info(f"[DRY-RUN] Would place SL-L {symbol} trigger {trigger_price:.2f} limit {limit_price:.2f} QTY {quantity}")
@@ -968,10 +1145,10 @@ class OrderManager:
                 else:
                     error_msg = response.get('message', 'Unknown error')
                     logger.error(f"Limit order failed (attempt {attempt + 1}/{MAX_ORDER_RETRIES}): {error_msg}")
-                    
+
                     if attempt < MAX_ORDER_RETRIES - 1:
                         time.sleep(ORDER_RETRY_DELAY)
-                    
+
             except Exception as e:
                 logger.error(f"Exception placing limit order (attempt {attempt + 1}/{MAX_ORDER_RETRIES}): {e}")
                 if attempt < MAX_ORDER_RETRIES - 1:
@@ -1059,8 +1236,26 @@ class OrderManager:
                     logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook returned string: {orders}")
                     continue
 
+                # Unwrap dict-wrapped orderbook (OpenAlgo v2 returns {'orders': [...]})
+                if isinstance(orders, dict):
+                    for key in ['orders', 'data', 'orderbook']:
+                        if key in orders and isinstance(orders[key], list):
+                            logger.debug(f"[CANCEL-VERIFY] Unwrapped orders list from nested key '{key}'")
+                            orders = orders[key]
+                            break
+                    else:
+                        # No nested list found
+                        if not orders:
+                            logger.info(f"[CANCEL-VERIFIED] Order {order_id} not in orderbook (empty dict, attempt {attempt}/{max_retries})")
+                            return True
+                        logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook data is dict with no list (keys={list(orders.keys())})")
+                        continue
+
                 if not isinstance(orders, list):
-                    logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook data is not a list")
+                    logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook data is not a list (type={type(orders).__name__}, value={str(orders)[:100]})")
+                    if not orders:
+                        logger.info(f"[CANCEL-VERIFIED] Order {order_id} not in orderbook (empty response, attempt {attempt}/{max_retries})")
+                        return True
                     continue
 
                 # Find the order in orderbook
@@ -1187,6 +1382,11 @@ class OrderManager:
                 order_id = pending.get('order_id')
                 if not order_id:
                     logger.error(f"[CHECK-FILLS] No order_id for {option_type}. Pending: {pending}")
+                    continue
+
+                # Skip in-flight sentinel (broker API call in progress, no real order yet)
+                if order_id == 'PLACING' or pending.get('status') == 'in_flight':
+                    logger.debug(f"[CHECK-FILLS] Skipping in-flight order for {option_type}")
                     continue
 
                 logger.debug(f"[CHECK-FILLS] Looking for {option_type} order {order_id}")
@@ -1347,6 +1547,11 @@ class OrderManager:
                 order_info = self.pending_limit_orders[option_type]
                 order_id = order_info['order_id']
                 symbol = order_info['symbol']
+
+                # Skip in_flight sentinel (API call in progress, no real order_id yet)
+                if order_id == 'PLACING' or order_info.get('status') == 'in_flight':
+                    logger.debug(f"[RECONCILE] Skipping in_flight order for {option_type} ({symbol})")
+                    continue
 
                 broker_order = broker_order_map.get(order_id)
 
