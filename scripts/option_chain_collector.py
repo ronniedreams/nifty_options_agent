@@ -272,7 +272,7 @@ class HistorifyClient:
                 status = job.get("status", "unknown")
                 if status in terminal:
                     return job
-                done = job.get("completed", 0)
+                done = job.get("completed_symbols", 0)
                 total = job.get("total_symbols", "?")
                 logger.info(f"  Job {job_id}: {status} ({done}/{total} symbols)")
             except Exception as e:
@@ -400,8 +400,8 @@ def run_collection(client: HistorifyClient, today_str: str) -> int:
 
     job_result = client.wait_for_job(job_id)
     final_status = job_result.get("status", "unknown")
-    completed_count = job_result.get("completed", 0)
-    failed_count = job_result.get("failed", 0)
+    completed_count = job_result.get("completed_symbols", 0)
+    failed_count = job_result.get("failed_symbols", 0)
 
     logger.info(
         f"  Job {job_id} done: {final_status} "
