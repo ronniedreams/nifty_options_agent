@@ -70,6 +70,10 @@ class SwingDetector:
         # Track logged swings to prevent duplicates
         self._logged_swings = set()  # {(swing_time, swing_type, swing_price)}
 
+        # Capture ALL swing events (creations + updates) for historical backfill.
+        # Unlike self.swings (which updates in-place), this is append-only.
+        self.swing_event_log = []
+
         logger.debug(f"SwingDetector initialized for {symbol}")
 
     def reset_for_new_day(self, date):
@@ -82,6 +86,7 @@ class SwingDetector:
         self.low_watch_count = {}
         self.high_watch_count = {}
         self._logged_swings = set()
+        self.swing_event_log = []
         self.current_date = date
         logger.info(f"{self.symbol}: Reset for new day {date}")
 
@@ -327,6 +332,15 @@ class SwingDetector:
         # Update last_swing_idx to point to new bar
         self.last_swing_idx = idx
 
+        # Capture event for historical backfill (append-only, never modified)
+        self.swing_event_log.append({
+            'type': f"{swing_type} Update",
+            'price': new_price,
+            'timestamp': bar['timestamp'],
+            'vwap': self.last_swing['vwap'],  # Frozen VWAP from original swing
+            'index': idx
+        })
+
         # Log to database if in live mode
         if (not self.is_historical_processing and
             hasattr(self, '_state_manager') and
@@ -388,6 +402,15 @@ class SwingDetector:
         self.last_swing = swing
         self.last_swing_type = swing_type.lower()  # 'low' or 'high'
         self.last_swing_idx = idx
+
+        # Capture event for historical backfill (append-only, never modified)
+        self.swing_event_log.append({
+            'type': swing_type,
+            'price': swing['price'],
+            'timestamp': bar['timestamp'],
+            'vwap': swing['vwap'],
+            'index': idx
+        })
 
         # Reset watch counts after swing is found (start fresh for next swing)
         self.low_watch_count = {}

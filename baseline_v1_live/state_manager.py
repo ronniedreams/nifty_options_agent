@@ -1005,6 +1005,7 @@ class StateManager:
         - filter_rejections (filter rejections log)
         - order_triggers (order trigger events)
         - all_swings_log (swing detection log — rebuilt from historical bars)
+        - bars (OHLCV bars — repopulated from historical API on every startup)
 
         Does NOT clear:
         - positions (persist for crash recovery)
@@ -1022,7 +1023,7 @@ class StateManager:
         swing_count = cursor.rowcount
         logger.info(f"[DAILY-RESET] Cleared {swing_count} swing candidates")
         
-        # Clear best strikes (THIS IS THE FIX!)
+        # Clear best strikes
         cursor.execute('DELETE FROM best_strikes')
         best_count = cursor.rowcount
         logger.info(f"[DAILY-RESET] Cleared {best_count} best strikes from previous session")
@@ -1046,7 +1047,13 @@ class StateManager:
         cursor.execute('DELETE FROM all_swings_log')
         swings_log_count = cursor.rowcount
         logger.info(f"[DAILY-RESET] Cleared {swings_log_count} swing detection logs")
-        
+
+        # Clear bars table (repopulated from historical API on every startup)
+        # Prevents stale bars from a previous run's symbol set lingering in the dashboard
+        cursor.execute('DELETE FROM bars')
+        bars_count = cursor.rowcount
+        logger.info(f"[DAILY-RESET] Cleared {bars_count} bars (will be repopulated from historical data)")
+
         self.conn.commit()
         logger.info("[DAILY-RESET] Daily dashboard data reset complete")
     

@@ -492,45 +492,31 @@ class BaselineV1Live:
         # Clear flag - now in real-time mode, send notifications normally
         self.loading_historical_data = False
 
-        # CRITICAL: Backfill all historical swings to database
-        # These were detected but not logged because is_historical_processing = True
-        logger.info("[HIST] Backfilling historical swings to database...")
+        # CRITICAL: Backfill all historical swing EVENTS to database
+        # Uses swing_event_log (append-only) instead of detector.swings (which updates in-place).
+        # This ensures morning swings that got updated to afternoon timestamps still appear.
+        logger.info("[HIST] Backfilling historical swing events to database...")
         historical_swings_logged = 0
-        duplicates_skipped = 0
 
         for symbol in self.symbols:
             detector = self.swing_detector.get_detector(symbol)
-            if detector and detector.swings:
-                for swing in detector.swings:
+            if detector and detector.swing_event_log:
+                for event in detector.swing_event_log:
                     try:
-                        # Check if already logged to prevent duplicates
-                        swing_time_iso = swing['timestamp'].isoformat() if hasattr(swing['timestamp'], 'isoformat') else str(swing['timestamp'])
-
-                        cursor = self.state_manager.conn.cursor()
-                        cursor.execute('''
-                            SELECT COUNT(*) FROM all_swings_log
-                            WHERE symbol = ? AND swing_time = ? AND swing_type = ?
-                        ''', (symbol, swing_time_iso, swing['type']))
-
-                        exists = cursor.fetchone()[0] > 0
-
-                        if not exists:
-                            self.state_manager.log_swing_detection(
-                                symbol=symbol,
-                                swing_type=swing['type'],
-                                swing_price=swing['price'],
-                                swing_time=swing['timestamp'],
-                                vwap=swing['vwap'],
-                                bar_index=swing['index']
-                            )
-                            historical_swings_logged += 1
-                        else:
-                            duplicates_skipped += 1
-
+                        # INSERT OR IGNORE in log_swing_detection handles duplicates
+                        self.state_manager.log_swing_detection(
+                            symbol=symbol,
+                            swing_type=event['type'],
+                            swing_price=event['price'],
+                            swing_time=event['timestamp'],
+                            vwap=event['vwap'],
+                            bar_index=event['index']
+                        )
+                        historical_swings_logged += 1
                     except Exception as e:
                         logger.error(f"Error logging historical swing for {symbol}: {e}")
 
-        logger.info(f"[HIST] Backfilled {historical_swings_logged} historical swings to database ({duplicates_skipped} duplicates skipped)")
+        logger.info(f"[HIST] Backfilled {historical_swings_logged} historical swing events to database")
 
         # Save all historical bars to database for dashboard visibility
         logger.info("[HIST] Saving historical bars to database...")
