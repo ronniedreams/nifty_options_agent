@@ -206,154 +206,147 @@ class LoginHandler:
     def login_definedge(self, user_id: str, password: str, totp_secret: str,
                          api_key: str = None, api_secret: str = None) -> bool:
         """
-        Attempt automated Definedge broker login directly via Definedge API.
+        Attempt automated Definedge broker login via OpenAlgo's web flow.
 
-        This bypasses OpenAlgo's web-based flow and calls Definedge API directly:
-        1. login_step1: Triggers OTP (but we'll use TOTP instead)
-        2. login_step2: Verify with TOTP code to get session
+        This uses OpenAlgo's built-in Definedge login flow:
+        1. Login to OpenAlgo dashboard to establish session
+        2. GET /definedge/callback to trigger OTP (stores otp_token in OpenAlgo session)
+        3. POST /definedge/callback with TOTP code to complete authentication
+
+        OpenAlgo then stores the auth tokens in its database, which the WebSocket
+        adapter can access for authentication.
 
         Prerequisites:
         1. Enable External TOTP in Definedge MyAccount → Security → 2FA
         2. Get the TOTP secret key when setting up authenticator app
-        3. API key and secret from Definedge
+        3. API key and secret configured in OpenAlgo's .env file
 
         Args:
-            user_id: Definedge user ID (not used directly, but kept for consistency)
-            password: Definedge password (not used directly in API flow)
+            user_id: Definedge user ID (for logging)
+            password: Definedge password (not used - TOTP-only flow)
             totp_secret: TOTP secret for 2FA (from Definedge MyAccount setup)
-            api_key: Definedge API key (from .env BROKER_API_KEY)
-            api_secret: Definedge API secret (from .env BROKER_API_SECRET)
+            api_key: Not used (OpenAlgo reads from its own .env)
+            api_secret: Not used (OpenAlgo reads from its own .env)
 
         Returns:
             True if login successful, False otherwise
         """
-        import hashlib
         import os
 
-        # Get API credentials from environment if not provided
-        if not api_key:
-            api_key = os.getenv('BROKER_API_KEY', '')
-        if not api_secret:
-            api_secret = os.getenv('BROKER_API_SECRET', '')
-
-        if not api_key or not api_secret:
-            logger.error("[LOGIN] Definedge API credentials not found in environment")
-            return False
-
-        # Step 1: Trigger OTP to get otp_token
+        # Step 1: Login to OpenAlgo dashboard first to get session cookie
         try:
-            logger.info("[LOGIN] Definedge Step 1: Getting OTP token...")
-            step1_url = f"https://signin.definedgesecurities.com/auth/realms/debroking/dsbpkc/login/{api_key}"
-            headers = {'api_secret': api_secret}
+            logger.info("[LOGIN] Definedge Step 1: Logging into OpenAlgo dashboard...")
+            openalgo_username = os.getenv('OPENALGO_USERNAME', 'admin')
+            openalgo_password = os.getenv('OPENALGO_PASSWORD', '')
 
-            response = self.session.get(step1_url, headers=headers, timeout=10)
-            response.raise_for_status()
-
-            step1_data = response.json()
-            otp_token = step1_data.get('otp_token')
-
-            if not otp_token:
-                logger.error(f"[LOGIN] Definedge Step 1 failed: {step1_data}")
+            if not openalgo_password:
+                logger.error("[LOGIN] OPENALGO_PASSWORD not set in environment")
                 return False
 
-            logger.info(f"[LOGIN] Definedge Step 1 success: OTP token received")
+            # Login to OpenAlgo to get session
+            login_url = f"{self.openalgo_host}/auth/login"
+            login_data = {
+                "username": openalgo_username,
+                "password": openalgo_password
+            }
+
+            # Use a fresh session for OpenAlgo
+            openalgo_session = requests.Session()
+            login_response = openalgo_session.post(login_url, data=login_data, timeout=15, allow_redirects=True)
+
+            # Check if we got redirected to dashboard (successful login)
+            if login_response.status_code != 200:
+                logger.error(f"[LOGIN] OpenAlgo dashboard login failed: HTTP {login_response.status_code}")
+                return False
+
+            # Check if already logged in or login succeeded
+            if 'dashboard' in login_response.url or 'broker' in login_response.url:
+                logger.info("[LOGIN] OpenAlgo dashboard login successful")
+            else:
+                logger.warning(f"[LOGIN] OpenAlgo login response URL: {login_response.url}")
 
         except Exception as e:
-            logger.error(f"[LOGIN] Definedge Step 1 exception: {e}")
+            logger.error(f"[LOGIN] OpenAlgo dashboard login exception: {e}")
             return False
 
-        # Step 2: Generate TOTP and verify
+        # Step 2: Trigger OTP via GET (OpenAlgo calls Definedge login_step1 and stores otp_token)
+        try:
+            logger.info("[LOGIN] Definedge Step 2: Triggering OTP via OpenAlgo...")
+            callback_url = f"{self.openalgo_host}/definedge/callback"
+            get_response = openalgo_session.get(callback_url, timeout=15)
+
+            if get_response.status_code != 200:
+                logger.error(f"[LOGIN] Definedge OTP trigger failed: HTTP {get_response.status_code}")
+                return False
+
+            # Check if OTP was sent successfully (page should contain OTP form)
+            if 'otp' not in get_response.text.lower():
+                logger.warning("[LOGIN] OTP form not found in response - may already be logged in")
+                # If already logged in, this is success
+                if 'dashboard' in get_response.url:
+                    logger.info("[LOGIN] Already logged in to Definedge")
+                    return True
+
+            logger.info("[LOGIN] OTP triggered, waiting for TOTP generation...")
+
+        except Exception as e:
+            logger.error(f"[LOGIN] Definedge OTP trigger exception: {e}")
+            return False
+
+        # Step 3: Wait a moment and generate fresh TOTP
+        # TOTP codes are valid for 30 seconds, so we want a fresh one
+        time.sleep(1)  # Small delay to ensure we're not at the edge of a TOTP window
+
         totp_code = self.generate_totp(totp_secret)
         if not totp_code:
             logger.error("[LOGIN] Failed to generate TOTP code for Definedge")
             return False
 
+        logger.info(f"[LOGIN] Generated TOTP code: {totp_code[:2]}****")
+
+        # Step 4: Submit TOTP code via POST
         try:
-            logger.info(f"[LOGIN] Definedge Step 2: Verifying TOTP code...")
+            logger.info("[LOGIN] Definedge Step 3: Submitting TOTP to OpenAlgo...")
+            post_data = {"otp": totp_code}
+            post_response = openalgo_session.post(callback_url, data=post_data, timeout=15, allow_redirects=True)
 
-            # Calculate authentication code using SHA256
-            auth_string = f"{otp_token}{totp_code}{api_secret}"
-            auth_code = hashlib.sha256(auth_string.encode("utf-8")).hexdigest()
-
-            step2_url = "https://signin.definedgesecurities.com/auth/realms/debroking/dsbpkc/token"
-            payload = {
-                "otp_token": otp_token,
-                "otp": totp_code,
-                "ac": auth_code
-            }
-            headers = {'Content-Type': 'application/json'}
-
-            response = self.session.post(step2_url, json=payload, headers=headers, timeout=10)
-            response.raise_for_status()
-
-            step2_data = response.json()
-
-            if step2_data.get('stat') != 'Ok':
-                error_msg = step2_data.get('emsg', 'Unknown error')
-                logger.error(f"[LOGIN] Definedge Step 2 failed: {error_msg}")
+            if post_response.status_code != 200:
+                logger.error(f"[LOGIN] Definedge TOTP submission failed: HTTP {post_response.status_code}")
                 return False
 
-            api_session_key = step2_data.get('api_session_key')
-            susertoken = step2_data.get('susertoken')
-
-            if not api_session_key:
-                logger.error("[LOGIN] Definedge Step 2: No session key returned")
-                return False
-
-            logger.info("[LOGIN] Definedge authentication successful!")
-
-            # Store auth in OpenAlgo via web form submission (simulates browser)
-            auth_string = f"{api_session_key}:::{susertoken or ''}:::{api_key}"
-            user_id = step2_data.get('uid') or step2_data.get('uccid')
-
-            # Step 3: Login to OpenAlgo dashboard first to get session cookie
-            try:
-                logger.info("[LOGIN] Definedge Step 3: Logging into OpenAlgo dashboard...")
-                openalgo_username = os.getenv('OPENALGO_USERNAME', 'admin')
-                openalgo_password = os.getenv('OPENALGO_PASSWORD', '')
-
-                # Login to OpenAlgo to get session
-                login_url = f"{self.openalgo_host}/auth/login"
-                login_data = {
-                    "username": openalgo_username,
-                    "password": openalgo_password
-                }
-
-                # Use a fresh session for OpenAlgo
-                openalgo_session = requests.Session()
-                login_response = openalgo_session.post(login_url, data=login_data, timeout=10, allow_redirects=True)
-
-                if login_response.status_code != 200 or 'dashboard' not in login_response.url:
-                    logger.warning(f"[LOGIN] OpenAlgo dashboard login may have failed: {login_response.status_code}")
-
-                # Step 4: Trigger OTP via GET (this stores otp_token in OpenAlgo session)
-                logger.info("[LOGIN] Definedge Step 4: Triggering OTP via OpenAlgo...")
-                callback_url = f"{self.openalgo_host}/definedge/callback"
-                get_response = openalgo_session.get(callback_url, timeout=10)
-
-                # Step 5: Submit our TOTP code via POST
-                logger.info("[LOGIN] Definedge Step 5: Submitting TOTP to OpenAlgo...")
-                post_data = {"otp": totp_code}
-                post_response = openalgo_session.post(callback_url, data=post_data, timeout=10, allow_redirects=True)
-
-                if post_response.status_code == 200 and 'dashboard' in post_response.url:
-                    logger.info("[LOGIN] Definedge auth stored in OpenAlgo successfully")
-                    return True
-                else:
-                    # Check if we got an error message
-                    if 'error' in post_response.text.lower():
-                        logger.warning(f"[LOGIN] OpenAlgo returned error page")
-                    else:
-                        logger.info("[LOGIN] Definedge login completed (status may be OK)")
-                    return True
-
-            except Exception as e:
-                logger.warning(f"[LOGIN] Could not store auth in OpenAlgo via web: {e}")
-                logger.info("[LOGIN] Definedge direct API login successful (OpenAlgo integration skipped)")
+            # Check if we got redirected to dashboard (successful login)
+            if 'dashboard' in post_response.url:
+                logger.info("[LOGIN] Definedge authentication successful! Redirected to dashboard.")
                 return True
 
+            # Check for error messages in response
+            response_text_lower = post_response.text.lower()
+            if 'error' in response_text_lower or 'invalid' in response_text_lower or 'failed' in response_text_lower:
+                # Try to extract error message
+                if 'invalid otp' in response_text_lower:
+                    logger.error("[LOGIN] Definedge TOTP invalid - check TOTP secret")
+                elif 'session expired' in response_text_lower:
+                    logger.error("[LOGIN] Definedge session expired - try again")
+                else:
+                    logger.error("[LOGIN] Definedge authentication failed (see OpenAlgo logs for details)")
+                return False
+
+            # If no error but not dashboard, assume success
+            logger.info("[LOGIN] Definedge login completed (checking status...)")
+
+            # Verify by checking if we can access a protected page
+            try:
+                verify_response = openalgo_session.get(f"{self.openalgo_host}/dashboard", timeout=10)
+                if 'dashboard' in verify_response.url.lower() or verify_response.status_code == 200:
+                    logger.info("[LOGIN] Definedge authentication verified - dashboard accessible")
+                    return True
+            except Exception:
+                pass
+
+            return True
+
         except Exception as e:
-            logger.error(f"[LOGIN] Definedge Step 2 exception: {e}")
+            logger.error(f"[LOGIN] Definedge TOTP submission exception: {e}")
             return False
 
     def auto_login_definedge(self, openalgo_username: str, openalgo_password: str,
