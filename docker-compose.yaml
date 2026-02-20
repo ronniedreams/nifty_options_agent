@@ -92,7 +92,7 @@ services:
     ports:
       - "8050:8050"
     volumes:
-      - ./data/trading_state:/app/state:ro  # Read-only access to state
+      - ./data/trading_state:/app/state  # Shared state (rw needed for SQLite WAL lock files + kill/pause switches)
     environment:
       - DB_PATH=/app/state/live_state.db
     restart: unless-stopped

@@ -17,9 +17,13 @@ def get_connection():
     )
 
 def read_df(query, params=None):
+    if not os.path.exists(STATE_DB_PATH):
+        return pd.DataFrame()
     conn = get_connection()
     try:
         return pd.read_sql(query, conn, params=params)
+    except Exception:
+        return pd.DataFrame()
     finally:
         conn.close()
 
