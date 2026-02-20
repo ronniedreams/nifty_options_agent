@@ -210,7 +210,19 @@ class DataPipeline:
             symbols: List of option symbols to fetch history for
         """
         logger.info(f"[HIST] Loading historical data for {len(symbols)} symbols...")
-        
+
+        # Post-market restart (after 4 PM): bars are already complete in SQLite DB.
+        # Skip broker API fetch — Zerodha intraday history is unreliable after market
+        # close and would replace complete data with a partial/lossy fetch.
+        # The dashboard reads directly from SQLite, so bars are already visible.
+        now_check = datetime.now(IST)
+        if now_check.time() >= time(16, 0):
+            logger.info(
+                "[HIST] Post-market restart detected (after 4 PM) — skipping broker API fetch. "
+                "Today's bars are preserved in SQLite from the live session."
+            )
+            return
+
         from datetime import date
         today = datetime.now(IST).date()
         start_date = today.strftime('%Y-%m-%d')

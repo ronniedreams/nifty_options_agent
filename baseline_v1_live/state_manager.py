@@ -22,7 +22,7 @@ This allows the strategy to resume from where it left off if it crashes.
 import logging
 import sqlite3
 import json
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, time as time_cls, timedelta
 from typing import Dict, List, Optional
 from functools import wraps
 import pytz
@@ -1048,11 +1048,22 @@ class StateManager:
         swings_log_count = cursor.rowcount
         logger.info(f"[DAILY-RESET] Cleared {swings_log_count} swing detection logs")
 
-        # Clear bars table (repopulated from historical API on every startup)
-        # Prevents stale bars from a previous run's symbol set lingering in the dashboard
-        cursor.execute('DELETE FROM bars')
-        bars_count = cursor.rowcount
-        logger.info(f"[DAILY-RESET] Cleared {bars_count} bars (will be repopulated from historical data)")
+        # Clear bars table only if market is open or it's a fresh morning start.
+        # After 4 PM (post-market), bars are already complete and correct in the DB —
+        # wiping them would cause the dashboard to show nothing until a lossy broker
+        # API refetch completes (Zerodha intraday history is unreliable after market close).
+        is_post_market = datetime.now(IST).time() >= time_cls(16, 0)
+        if is_post_market:
+            cursor.execute('SELECT COUNT(*) FROM bars')
+            bars_count = cursor.fetchone()[0]
+            logger.info(
+                f"[DAILY-RESET] Post-market restart detected — preserving {bars_count} bars "
+                f"(skipping DELETE to avoid data loss after market close)"
+            )
+        else:
+            cursor.execute('DELETE FROM bars')
+            bars_count = cursor.rowcount
+            logger.info(f"[DAILY-RESET] Cleared {bars_count} bars (will be repopulated from historical data)")
 
         self.conn.commit()
         logger.info("[DAILY-RESET] Daily dashboard data reset complete")
