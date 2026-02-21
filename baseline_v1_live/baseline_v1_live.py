@@ -1923,7 +1923,37 @@ def main():
         market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
         auto_detect_time = market_open + timedelta(minutes=1)  # 9:16 AM
 
-        if now < auto_detect_time:
+        market_close = dt_time(15, 30)  # 3:30 PM — actual market close
+        is_weekend = now.weekday() >= 5  # Saturday=5, Sunday=6
+
+        def next_trading_day_start(from_dt):
+            """Returns next weekday's 9:16 AM IST (skips Saturday/Sunday)."""
+            candidate = (from_dt + timedelta(days=1)).replace(
+                hour=9, minute=16, second=0, microsecond=0
+            )
+            while candidate.weekday() >= 5:
+                candidate += timedelta(days=1)
+            return candidate
+
+        if is_weekend or now.time() >= market_close:
+            # Market closed — weekend, or past 3:30 PM on a weekday
+            next_detect = next_trading_day_start(now)
+            wait_seconds = (next_detect - now).total_seconds()
+            reason = "weekend" if is_weekend else "market close"
+            logger.info(f"[AUTO] Market is closed ({reason}). Logged in successfully.")
+            logger.info(f"[AUTO] Sleeping until next trading day 9:16 AM IST ({next_detect.strftime('%Y-%m-%d %H:%M')} IST)...")
+
+            if telegram_notifier:
+                telegram_notifier.send_message(
+                    f"[AUTO] Market is closed ({reason}). "
+                    f"Strategy will start on the next trading day at 9:16 AM IST "
+                    f"({next_detect.strftime('%a %d %b, %H:%M')} IST). Container is idle until then."
+                )
+
+            time.sleep(wait_seconds)
+            logger.info(f"[AUTO] 9:16 AM reached. Starting auto-detection now...")
+        elif now < auto_detect_time:
+            # Weekday, but before 9:16 AM — wait for first candle
             wait_seconds = (auto_detect_time - now).total_seconds()
             logger.info(f"[AUTO] Waiting for first candle to close (9:16 AM IST)...")
             logger.info(f"[AUTO] Will start auto-detection in {wait_seconds:.0f} seconds")
