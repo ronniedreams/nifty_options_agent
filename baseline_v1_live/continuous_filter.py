@@ -477,6 +477,23 @@ class ContinuousFilterEngine:
             if qualified[option_type]:
                 # Sort by: (1) SL points closest to 10, (2) round strike preferred, (3) highest entry price
                 best = min(qualified[option_type], key=lambda x: (x['score'], not x['is_round_strike'], -x['entry_price']))
+
+                # Build human-readable selection reason from tie-breaker criteria
+                num_qualified = len(qualified[option_type])
+                if num_qualified == 1:
+                    reason = "Only qualified candidate"
+                else:
+                    parts = [f"SL {best['sl_points']:.1f}pts (closest to {TARGET_SL_POINTS})"]
+                    parts.append("round strike" if best['is_round_strike'] else "non-round")
+                    # If score tied with another, premium was the tiebreaker
+                    same_score = [c for c in qualified[option_type]
+                                  if c['score'] == best['score'] and c['symbol'] != best['symbol']]
+                    if same_score:
+                        parts.append(f"highest premium Rs.{best['entry_price']:.0f}")
+                    reason = ", ".join(parts)
+                best['selection_reason'] = reason
+                best['num_qualified'] = num_qualified
+
                 best_strikes[option_type] = best
                 
                 # Log if best strike changed

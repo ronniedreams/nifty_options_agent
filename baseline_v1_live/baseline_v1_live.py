@@ -1051,7 +1051,7 @@ class BaselineV1Live:
                     # Best strike changed to a different symbol
                     logger.info(f"[TELEGRAM] Best {option_type} changed: {previous_best} -> {current_symbol}")
                     try:
-                        self.telegram.notify_best_strike_change(option_type, current_best, is_new=False)
+                        self.telegram.notify_best_strike_change(option_type, current_best, is_new=False, previous_symbol=previous_best)
                     except Exception as e:
                         logger.error(f"Failed to send telegram notification: {e}")
                     self.previous_best_strikes[option_type] = current_symbol

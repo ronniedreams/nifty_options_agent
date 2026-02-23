@@ -338,7 +338,7 @@ Time: {datetime.now(IST).strftime('%H:%M:%S')}
 
         self.send_message(message.strip())
 
-    def notify_best_strike_change(self, option_type: str, candidate: Dict, is_new: bool = False):
+    def notify_best_strike_change(self, option_type: str, candidate: Dict, is_new: bool = False, previous_symbol: str = None):
         """
         Notify when a new best strike is selected or changes
 
@@ -346,6 +346,7 @@ Time: {datetime.now(IST).strftime('%H:%M:%S')}
             option_type: 'CE' or 'PE'
             candidate: Best strike candidate dict
             is_new: True if first selection, False if replacement
+            previous_symbol: Symbol that was replaced (only for replacements)
         """
         if not NOTIFY_ON_BEST_STRIKE_CHANGE:
             return
@@ -365,6 +366,18 @@ Time: {datetime.now(IST).strftime('%H:%M:%S')}
 
         sl_points = sl_price - entry_price
 
+        # Build selection context lines
+        context_lines = ""
+        if not is_new and previous_symbol:
+            context_lines += f"\nReplaces: <code>{previous_symbol}</code>"
+        selection_reason = candidate.get('selection_reason', '')
+        num_qualified = candidate.get('num_qualified', 0)
+        if selection_reason:
+            reason_text = selection_reason
+            if num_qualified > 1:
+                reason_text += f", {num_qualified} qualified"
+            context_lines += f"\nSelected: {reason_text}"
+
         message = f"""
 {emoji} <b>BEST {option_type} {action}</b>
 
@@ -376,6 +389,7 @@ SL: ₹{sl_price:.2f} ({sl_percent:.1%}) | {sl_points:.1f} pts
 VWAP Premium: {vwap_premium:.1%}
 Lots: {lots} ({lots * 65} qty)
 Risk: ₹{actual_R:,.0f} (1R)
+{context_lines}
 
 Time: {datetime.now(IST).strftime('%H:%M:%S')}
         """

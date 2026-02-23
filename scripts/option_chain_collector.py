@@ -258,8 +258,12 @@ class HistorifyClient:
         return resp.get("job_id", "")
 
     def get_job(self, job_id: str) -> dict:
-        """GET /historify/api/jobs/<job_id>."""
+        """GET /historify/api/jobs/<job_id> — job metadata only."""
         return self._get(f"/historify/api/jobs/{job_id}").get("job", {})
+
+    def get_job_items(self, job_id: str) -> list:
+        """GET /historify/api/jobs/<job_id> — return individual item statuses."""
+        return self._get(f"/historify/api/jobs/{job_id}").get("items", [])
 
     def wait_for_job(self, job_id: str) -> dict:
         """Poll job status until terminal state or timeout."""
@@ -400,12 +404,24 @@ def run_collection(client: HistorifyClient, today_str: str) -> int:
 
     job_result = client.wait_for_job(job_id)
     final_status = job_result.get("status", "unknown")
-    completed_count = job_result.get("completed_symbols", 0)
-    failed_count = job_result.get("failed_symbols", 0)
+
+    # Count actual item statuses (download_jobs.completed_symbols counter is
+    # unreliable — DuckDB write conflicts can leave it at 0 even when all
+    # items succeed).  Fall back to the job-level counter if items fetch fails.
+    try:
+        items = client.get_job_items(job_id)
+        completed_count = sum(1 for i in items if i.get("status") == "success")
+        failed_count = sum(1 for i in items if i.get("status") == "error")
+        skipped_count = sum(1 for i in items if i.get("status") == "skipped")
+    except Exception as e:
+        logger.warning(f"  Could not fetch job items, using job-level counters: {e}")
+        completed_count = job_result.get("completed_symbols", 0)
+        failed_count = job_result.get("failed_symbols", 0)
+        skipped_count = 0
 
     logger.info(
         f"  Job {job_id} done: {final_status} "
-        f"({completed_count} ok, {failed_count} failed)"
+        f"({completed_count} ok, {failed_count} failed, {skipped_count} skipped)"
     )
 
     # 5. Cleanup expired symbols from watchlist
@@ -452,12 +468,16 @@ def run_collection(client: HistorifyClient, today_str: str) -> int:
     status_plain = "OK" if final_status == "completed" else "WARN"
     cleanup_line = f"\nCleaned up: {removed_count} expired symbols" if removed_count > 0 else ""
 
+    download_line = f"Downloaded: {completed_count}/{len(download_symbols)}"
+    if skipped_count > 0:
+        download_line += f" | Skipped: {skipped_count}"
+
     summary = (
         f"{status_emoji} <b>Option Chain Collected</b>\n\n"
         f"Date: {today_str}\n"
         f"Expiries: {expiry_line}\n"
-        f"Downloaded: {completed_count}/{len(download_symbols)}"
-        + (f" ✅ | Failed: {failed_count} ❌" if failed_count > 0 else " ✅")
+        f"{download_line}"
+        + (f" | Failed: {failed_count} ❌" if failed_count > 0 else " ✅")
         + f"\nJob: {job_id} ({final_status})"
         + cleanup_line
         + f"\nStorage: DuckDB (Historify)"
@@ -468,7 +488,7 @@ def run_collection(client: HistorifyClient, today_str: str) -> int:
         f"[{status_plain}] Option Chain Collected\n"
         f"Date: {today_str}\n"
         f"Expiries: {expiry_line}\n"
-        f"Downloaded: {completed_count}/{len(download_symbols)}"
+        f"{download_line}"
         + (f" | Failed: {failed_count}" if failed_count > 0 else " | OK")
         + f"\nJob: {job_id} ({final_status})"
         + cleanup_line

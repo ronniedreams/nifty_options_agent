@@ -494,40 +494,52 @@ class OrderManager:
             self.sl_placement_failures += 1
             return None
     
-    def cancel_sl_order(self, symbol: str) -> bool:
-        """Cancel SL order"""
+    def cancel_sl_order(self, symbol: str) -> str:
+        """Cancel SL order
+
+        Returns:
+            'cancelled'          - successfully cancelled
+            'already_filled'     - SL was already filled (position closed by SL)
+            'already_terminal'   - already cancelled/rejected
+            'not_found'          - no SL order tracked for this symbol
+            'failed'             - cancel failed (order may still be live)
+        """
         if symbol not in self.active_sl_orders:
             logger.debug(f"No active SL order for {symbol} to cancel")
-            return True
-        
+            return 'not_found'
+
         order_info = self.active_sl_orders[symbol]
         order_id = order_info['order_id']
-        
+
         if DRY_RUN:
             logger.info(f"[DRY RUN] Would cancel SL order {order_id}")
             del self.active_sl_orders[symbol]
-            return True
-        
+            return 'cancelled'
+
         try:
             response = self.client.cancelorder(order_id=order_id)
 
             if response.get('status') == 'success':
                 del self.active_sl_orders[symbol]
                 logger.info(f"Cancelled SL order {order_id} for {symbol}")
-                return True
+                return 'cancelled'
             else:
-                # Treat "already cancelled/rejected/completed" as success
                 msg = response.get('message', '').lower()
-                if any(x in msg for x in ['cancelled', 'canceled', 'rejected', 'completed']):
+                if 'complete' in msg:
+                    # SL order was FILLED — position already closed by SL hit
+                    del self.active_sl_orders[symbol]
+                    logger.info(f"SL order {order_id} already FILLED for {symbol} — position closed by SL")
+                    return 'already_filled'
+                if any(x in msg for x in ['cancelled', 'canceled', 'rejected']):
                     del self.active_sl_orders[symbol]
                     logger.info(f"SL order {order_id} already {msg} — removing from active")
-                    return True
+                    return 'already_terminal'
                 logger.error(f"Failed to cancel SL order {order_id}: {response}")
-                return False
-                
+                return 'failed'
+
         except Exception as e:
             logger.error(f"Exception cancelling SL order {order_id}: {e}")
-            return False
+            return 'failed'
     
     def emergency_market_exit(
         self,
@@ -559,31 +571,32 @@ class OrderManager:
             logger.info(f"[DRY RUN] Would emergency exit {symbol} at MARKET")
             return f"DRY_EMERGENCY_{symbol}_{int(time.time())}"
         
-        # 🚨 CRITICAL: Verify position exists before placing order
+        # CRITICAL: Verify position exists before placing order
         try:
-            positions_response = self.client.openposition()
+            positions_response = self.client.positionbook()
             if positions_response.get('status') == 'success':
                 positions = positions_response.get('data', [])
-                position_exists = False
-                actual_qty = 0
-                
-                for pos in positions:
-                    if pos.get('symbol') == symbol and pos.get('product') == PRODUCT_TYPE:
-                        actual_qty = abs(int(pos.get('quantity', 0)))
-                        if actual_qty > 0:
-                            position_exists = True
-                            break
-                
-                if not position_exists:
-                    logger.warning(
-                        f"[WARNING] Emergency exit cancelled: No open position for {symbol}. "
-                        f"Prevents opening reverse long position."
-                    )
-                    return None
-                
-                # Use actual position quantity, not passed quantity
-                quantity = actual_qty
-                logger.info(f"Emergency exit using actual position qty: {quantity}")
+                if isinstance(positions, list):
+                    position_exists = False
+                    actual_qty = 0
+
+                    for pos in positions:
+                        if pos.get('symbol') == symbol:
+                            actual_qty = abs(int(pos.get('quantity', 0)))
+                            if actual_qty > 0:
+                                position_exists = True
+                                break
+
+                    if not position_exists:
+                        logger.warning(
+                            f"[WARNING] Emergency exit cancelled: No open position for {symbol}. "
+                            f"Prevents opening reverse long position."
+                        )
+                        return None
+
+                    # Use actual position quantity, not passed quantity
+                    quantity = actual_qty
+                    logger.info(f"Emergency exit using actual position qty: {quantity}")
         except Exception as e:
             logger.error(f"Failed to verify position before emergency exit: {e}")
             # Proceed with caution using passed quantity
@@ -665,23 +678,24 @@ class OrderManager:
 
         # Verify position exists at broker before placing close order
         try:
-            positions_response = self.client.openposition()
+            positions_response = self.client.positionbook()
             if positions_response.get('status') == 'success':
                 positions = positions_response.get('data', [])
-                position_exists = False
-                for pos in positions:
-                    if pos.get('symbol') == symbol and pos.get('product') == PRODUCT_TYPE:
-                        actual_qty = abs(int(pos.get('quantity', 0)))
-                        if actual_qty > 0:
-                            position_exists = True
-                            quantity = actual_qty  # Use broker's actual quantity
-                            break
-                if not position_exists:
-                    logger.warning(
-                        f"[MARKET-EXIT] No position at broker for {symbol} - "
-                        f"skipping to prevent reverse position"
-                    )
-                    return None
+                if isinstance(positions, list):
+                    position_exists = False
+                    for pos in positions:
+                        if pos.get('symbol') == symbol:
+                            actual_qty = abs(int(pos.get('quantity', 0)))
+                            if actual_qty > 0:
+                                position_exists = True
+                                quantity = actual_qty  # Use broker's actual quantity
+                                break
+                    if not position_exists:
+                        logger.warning(
+                            f"[MARKET-EXIT] No position at broker for {symbol} - "
+                            f"skipping to prevent reverse position"
+                        )
+                        return None
         except Exception as e:
             logger.error(f"[MARKET-EXIT] Position check failed: {e}, proceeding with caution")
 
@@ -1526,8 +1540,23 @@ class OrderManager:
                 return results
 
             if not isinstance(broker_orders, list):
-                logger.error(f"[RECONCILE] Orderbook data is not a list: {type(broker_orders)}")
-                return results
+                # Try to extract list from nested structure (OpenAlgo v2 returns {'orders': [...]})
+                if isinstance(broker_orders, dict):
+                    for key in ['orders', 'data', 'orderbook']:
+                        if key in broker_orders and isinstance(broker_orders[key], list):
+                            logger.info(f"[RECONCILE] Unwrapped orders list from nested key '{key}'")
+                            broker_orders = broker_orders[key]
+                            break
+                    else:
+                        if not broker_orders:
+                            logger.info("[RECONCILE] Orderbook is empty dict - no orders at broker")
+                            broker_orders = []
+                        else:
+                            logger.error(f"[RECONCILE] Orderbook data is dict with no list (keys={list(broker_orders.keys())})")
+                            return results
+                else:
+                    logger.error(f"[RECONCILE] Orderbook data is not a list or dict: {type(broker_orders)}")
+                    return results
 
             # Create lookup map: order_id -> order_data
             broker_order_map = {}

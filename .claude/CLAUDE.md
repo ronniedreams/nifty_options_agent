@@ -109,6 +109,7 @@ git tag pre-market-YYYYMMDD-my-feature && git push --tags
    Stage-1: Static (price 100-300 Rs, VWAP ≥4%) — run once at swing formation
    Stage-2: Dynamic (SL% 2-10%) — recalculated every tick
    Stage-3: Tie-breaker (SL pts closest to 10, round strike, highest premium)
+   Candidate dict includes: selection_reason (human-readable why), num_qualified (pool size)
    See STRIKE_FILTRATION_THEORY.md
 
 4. ORDER EXECUTION (order_manager.py)
@@ -199,6 +200,11 @@ python -m baseline_v1_live.baseline_v1_live --expiry 30JAN25 --atm 23500
 # Start trading (auto mode — auto-detect ATM + expiry, auto-login if AUTOMATED_LOGIN=true)
 python -m baseline_v1_live.baseline_v1_live --auto
 ```
+
+**Startup behavior (--auto mode):**
+- Skips strategy entirely if started outside market hours (after 3:30 PM or weekends)
+- Waits until 9:16 AM for first 1-min candle to close before running auto-detect
+- Telegram best-strike notifications include `selection_reason` (tie-breaker criteria) and `Replaces: <old_symbol>` on changes
 
 ---
 

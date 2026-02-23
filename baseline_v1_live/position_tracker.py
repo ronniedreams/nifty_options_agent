@@ -403,9 +403,21 @@ class PositionTracker:
                 if self.order_manager:
                     # 1. Cancel existing exit SL order
                     logger.info(f"[EXIT] Cancelling SL for {symbol}")
-                    self.order_manager.cancel_sl_order(symbol)
+                    cancel_result = self.order_manager.cancel_sl_order(symbol)
 
-                    # 2. Place MARKET order to close position
+                    # 2. If SL was already FILLED, position is already closed at broker
+                    #    Do NOT place another MARKET BUY — that would create a naked long
+                    if cancel_result == 'already_filled':
+                        logger.warning(
+                            f"[EXIT] SL already filled for {symbol} — "
+                            f"skipping market exit to avoid orphaned long position"
+                        )
+                        # Close internally with SL price as best estimate
+                        # (reconciliation will correct the exit price later)
+                        self.close_position(symbol, exit_price, f"SL_HIT_DURING_{exit_reason}")
+                        continue
+
+                    # 3. Place MARKET order to close position
                     logger.info(f"[EXIT] Placing MARKET order for {symbol}")
                     order_id = self.order_manager.place_market_order(
                         symbol=symbol,
