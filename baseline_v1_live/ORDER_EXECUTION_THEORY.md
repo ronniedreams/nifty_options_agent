@@ -201,6 +201,31 @@ The `state_manager.py` utilizes a custom `@atomic_transaction` decorator:
 To prevent errors when transitioning from historical data loading ("gap-fill") to live WebSocket streaming, `baseline_v1_live.py` maintains `self._last_sent_bar_ts`. 
 - This ensures that if the historical data and live stream overlap (common during mid-day starts), the swing detector never receives a duplicate or out-of-order bar, which would otherwise corrupt the swing logic.
 
+## Switch Deferral (Bar-Close Switch)
+
+When the best strike changes to a different symbol mid-bar, the cancel+replace is **deferred to bar close** instead of executing immediately. This prevents order churn from tick-to-tick flip-flopping between two strikes.
+
+**What is immediate:** First-time placements (no existing order), disqualification cancels.
+**What is deferred:** Switching from one pending order symbol to a different symbol.
+
+**Flow:**
+```
+Mid-bar: best changes A→B, existing order for A
+  → Store B in _pending_switch[option_type], skip placement
+  → Every subsequent tick: re-defer (overwrite _pending_switch with latest best)
+Bar close: _process_bar_close_switches() executes
+  → Fill guard: if old order filled mid-bar (position exists), suppress switch
+  → Position limit check, then cancel old + place new
+```
+
+**Clearing before bar close:**
+- `action='cancel'` (all candidates disqualified): cancels existing order AND wipes pending switch
+- `action='wait'` (best reverted to currently-placed symbol): clears pending switch (old order is correct)
+
+**Key log tags:** `[SWITCH-DEFER-PE/CE]`, `[BAR-CLOSE-SWITCH]`, `[SWITCH-REVERT-PE/CE]`, `[SWITCH-CANCEL-PE/CE]`
+
+**Code:** `baseline_v1_live.py` lines ~1150-1166 (deferral), ~1393-1452 (`_process_bar_close_switches`)
+
 ## Order Lifecycle
 
 ### Stage 1: Qualification

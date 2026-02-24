@@ -55,6 +55,9 @@ quantity = int(final_lots) × LOT_SIZE
 - `client.cancelorder(order_id=...)` — keyword is `order_id` (underscore)
 - Trust broker as source of truth; reconcile positions every 60 seconds
 
+## Switch Deferral
+When best strike changes to a different symbol mid-bar, cancel+replace is deferred to bar close (prevents churn from tick-to-tick flip-flopping). First-time placements and disqualification cancels are still immediate. Stored in `_pending_switch[option_type]`. Cleared early if: candidates disqualify (`action='cancel'`) or best reverts to placed symbol (`action='wait'`). Log tags: `[SWITCH-DEFER-*]`, `[BAR-CLOSE-SWITCH]`, `[SWITCH-REVERT-*]`, `[SWITCH-CANCEL-*]`.
+
 ## Order Cancellation Triggers
 Cancel pending entry orders when:
 - Strike disqualified (SL% exceeds MAX_SL_PERCENT)
