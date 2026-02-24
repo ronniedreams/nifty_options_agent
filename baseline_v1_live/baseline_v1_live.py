@@ -849,11 +849,14 @@ class BaselineV1Live:
             self.swing_detector.update_all(new_bars_dict)
         
         # 3. Evaluate ALL swing candidates with latest data (including current incomplete bars for real-time SL% calculation)
+        # CRITICAL: Pass pending_orders so swing-break detection doesn't remove swings with active orders
+        pending_orders = self.order_manager.get_pending_orders_by_type()
         best_strikes = self.continuous_filter.evaluate_all_candidates(
             latest_bars,
             self.swing_detector,
             current_bars,  # Include current bars for accurate highest_high tracking
-            open_position_symbols=set(self.position_tracker.open_positions.keys())
+            open_position_symbols=set(self.position_tracker.open_positions.keys()),
+            pending_orders=pending_orders
         )
         
         # Log current best strikes and candidates (INFO level for visibility)

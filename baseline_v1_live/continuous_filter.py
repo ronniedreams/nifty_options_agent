@@ -308,7 +308,7 @@ class ContinuousFilterEngine:
         return marked_count
 
     def evaluate_all_candidates(self, latest_bars: Dict, swing_detector, current_bars: Dict = None,
-                                open_position_symbols: set = None) -> Dict:
+                                open_position_symbols: set = None, pending_orders: Dict = None) -> Dict:
         """
         Evaluate all swing candidates with latest bar data
 
@@ -318,12 +318,14 @@ class ContinuousFilterEngine:
             latest_bars: {symbol: BarData} - Latest completed bars
             swing_detector: MultiSwingDetector instance for getting highest_high
             current_bars: {symbol: BarData} - Current incomplete bars with real-time highs (optional)
+            pending_orders: {option_type: order_info} - Currently pending orders (to avoid removing swings with orders)
 
         Returns:
             {'CE': best_ce_candidate, 'PE': best_pe_candidate}
             Each candidate has enriched fields: sl_price, sl_points, lots, etc.
         """
         current_bars = current_bars or {}
+        pending_orders = pending_orders or {}
         qualified = {'CE': [], 'PE': []}
 
         # Debug: Log Stage-1 pool status
@@ -335,10 +337,17 @@ class ContinuousFilterEngine:
                 f"CE symbols: {[s.get('symbol') for s in self.stage1_swings_by_type['CE']]}"
             )
 
-        # Check for broken swings in VWAP-qualified pool and remove them
+        # Check for broken swings in VWAP-qualified pool
+        # CRITICAL: Do NOT remove swings that have pending orders - let get_order_triggers() handle them
+        # This ensures orders have a chance to fill before we cancel them
         broken_count = 0  # Track how many swings broke this evaluation
         for option_type in ['CE', 'PE']:
             broken_swings = []
+            # Get pending order symbol for this option type (if any)
+            pending_order_symbol = None
+            if pending_orders.get(option_type):
+                pending_order_symbol = pending_orders[option_type].get('symbol')
+
             for swing_info in self.stage1_swings_by_type[option_type]:
                 symbol = swing_info.get('symbol')
                 if symbol and symbol in latest_bars:
@@ -347,13 +356,23 @@ class ContinuousFilterEngine:
 
                     # Check if swing broke (price went BELOW swing_low)
                     if current_bar.low < swing_low:
-                        logger.info(
-                            f"[SWING-BREAK] {symbol}: Swing @ Rs.{swing_low:.2f} broke "
-                            f"(Low: {current_bar.low:.2f}) - removing from VWAP pool"
-                        )
-                        broken_swings.append(swing_info)
+                        # CRITICAL FIX: If there's a pending order for this symbol, DO NOT remove
+                        # The order may have triggered and we need to check its status first
+                        if symbol == pending_order_symbol:
+                            logger.info(
+                                f"[SWING-BREAK-PENDING] {symbol}: Swing @ Rs.{swing_low:.2f} broke "
+                                f"(Low: {current_bar.low:.2f}) - KEEPING IN POOL (has pending order)"
+                            )
+                            # Mark as broken but don't remove - get_order_triggers will handle with check_fill
+                            swing_info['broke_with_pending_order'] = True
+                        else:
+                            logger.info(
+                                f"[SWING-BREAK] {symbol}: Swing @ Rs.{swing_low:.2f} broke "
+                                f"(Low: {current_bar.low:.2f}) - removing from VWAP pool"
+                            )
+                            broken_swings.append(swing_info)
 
-            # Remove broken swings
+            # Remove broken swings (only those without pending orders)
             for broken in broken_swings:
                 self.stage1_swings_by_type[option_type].remove(broken)
                 broken_count += 1
