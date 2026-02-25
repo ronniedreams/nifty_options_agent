@@ -1937,21 +1937,26 @@ def main():
 
         if is_weekend or now.time() >= market_close:
             # Market closed — weekend, or past 3:30 PM on a weekday
-            next_detect = next_trading_day_start(now)
-            wait_seconds = (next_detect - now).total_seconds()
-            reason = "weekend" if is_weekend else "market close"
-            logger.info(f"[AUTO] Market is closed ({reason}). Logged in successfully.")
-            logger.info(f"[AUTO] Sleeping until next trading day 9:16 AM IST ({next_detect.strftime('%Y-%m-%d %H:%M')} IST)...")
+            # Exit cleanly so containers stay up for debugging but strategy doesn't run
+            reason = "weekend" if is_weekend else "after market hours"
+            logger.info(f"[AUTO] Market is closed ({reason}). Strategy will not start.")
+            logger.info("[AUTO] Other containers (OpenAlgo, Angel One) remain available for debugging.")
 
             if telegram_notifier:
                 telegram_notifier.send_message(
-                    f"[AUTO] Market is closed ({reason}). "
-                    f"Strategy will start on the next trading day at 9:16 AM IST "
-                    f"({next_detect.strftime('%a %d %b, %H:%M')} IST). Container is idle until then."
+                    f"[AUTO] EC2 started {reason}. Strategy skipped — no market data available. "
+                    f"Other containers are running for debugging/maintenance."
                 )
 
-            time.sleep(wait_seconds)
-            logger.info(f"[AUTO] 9:16 AM reached. Starting auto-detection now...")
+            # Clean up temporary WebSocket if it was created
+            if temp_pipeline:
+                try:
+                    temp_pipeline.disconnect()
+                except Exception:
+                    pass
+
+            logger.info("[AUTO] Exiting trading agent. Use 'docker-compose up -d baseline_v1_live' to restart manually.")
+            sys.exit(0)
         elif now < auto_detect_time:
             # Weekday, but before 9:16 AM — wait for first candle
             wait_seconds = (auto_detect_time - now).total_seconds()

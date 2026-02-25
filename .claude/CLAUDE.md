@@ -50,24 +50,9 @@ docker-compose stop trading_agent && docker-compose rm -f trading_agent && docke
 
 ---
 
-## 📝 Pending Tasks
+## 📝 Backlog
 
-| # | Task | Notes |
-|---|------|-------|
-| 2 | ~~Upgrade Zerodha OpenAlgo to v2.0.0.0~~ | Done — EC2 running v2.0.0.0 (git pull in openalgo-zerodha/openalgo + docker rebuild; sync worker preserved) |
-| 3 | Verify Zerodha WebSocket ATP matches Kite VWAP | Critical — Stage-1 VWAP filter depends on this |
-| 5 | Debug live Positions and Orders tab in monitor dashboard | Tabs not showing live data correctly |
-| 7 | Debug mobile app — not connecting, returns HTTP 401 | Likely Basic Auth or session issue with the EC2 reverse proxy |
-| 8 | Add "Swing Lows" tab to monitor dashboard | Chronological table of all swing lows with VWAP, VWAP% gap, filter results, status (qualified/rejected/pending). Live text filter bar on strike (filters as user types). Row highlighting: green=qualified, red=rejected, yellow=pending. Summary count. Data from `swing_log` SQLite or `all_swings_log` in-memory. |
-| ~~9~~ | ~~Add additional info to bar viewer (VWAP etc.)~~ | ~~Enhance the bar viewer tab in monitor dashboard to show per-bar VWAP alongside OHLCV data.~~ |
-| 10 | Debug Toggle EC2 button (Samsung Android) | Find bugs/errors in the EC2 start/stop shortcut button created for Samsung Android phone |
-| 11 | Pull latest OpenAlgo Zerodha upstream + set SANDBOX_ENGINE_TYPE=polling | Off-hours only (after 4:30 PM / before 9:15 AM). SSH EC2 → `cd ~/nifty_options_agent/openalgo-zerodha/openalgo && git pull origin main` → add `SANDBOX_ENGINE_TYPE=polling` to `.env` → `docker-compose down && docker-compose up -d --build`. Fixes pulled: SL/SL-M immediate execution, realistic LIMIT fill pricing, Pillow CVE security fix. Polling mode also fixes bars-stopping-after-order bug. |
-
-**Completed:**
-- ~~Task 1~~: cancel-verify non-list orderbook — fixed (`order_manager.py`, type check + string check before iterating)
-- ~~Task 4~~: Check if Angel One WebSocket provides VWAP/ATP values — confirmed (Angel One provides VWAP data)
-- ~~Task 5~~: stale `all_swings_log` on restart — fixed (`baseline_v1_live.py` always resets dashboard data on startup; `state_manager.py` uses `INSERT OR IGNORE`)
-- ~~Task 6~~: Rebuild baseline_v1_live image on EC2 — completed
+All issues, ideas, and tasks tracked in `.claude/BACKLOG.md`.
 
 ---
 
