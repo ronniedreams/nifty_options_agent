@@ -113,19 +113,19 @@ git tag pre-market-YYYYMMDD-my-feature && git push --tags
 
 | File | Purpose |
 |------|---------|
-| `baseline_v1_live.py` | Main orchestrator (~530 lines) |
-| `config.py` | All configuration parameters (~180 lines) |
-| `data_pipeline.py` | WebSocket → 1-min OHLCV bars + VWAP (~500 lines) |
-| `swing_detector.py` | Multi-symbol swing detection (~350 lines) |
-| `continuous_filter.py` | Two-stage filtering engine (~300 lines) |
-| `order_manager.py` | Proactive SL orders entry + exit (~680 lines) |
-| `position_tracker.py` | R-multiple accounting (~350 lines) |
-| `state_manager.py` | SQLite persistence (~280 lines) |
-| `telegram_notifier.py` | Trade notifications (~150 lines) |
+| `baseline_v1_live.py` | Main orchestrator (~2025 lines) |
+| `config.py` | All configuration parameters (~300 lines) |
+| `data_pipeline.py` | WebSocket → 1-min OHLCV bars + VWAP (~1960 lines) |
+| `swing_detector.py` | Multi-symbol swing detection (~720 lines) |
+| `continuous_filter.py` | Two-stage filtering engine (~870 lines) |
+| `order_manager.py` | Proactive SL orders entry + exit (~1730 lines) |
+| `position_tracker.py` | R-multiple accounting (~760 lines) |
+| `state_manager.py` | SQLite persistence (~1170 lines) |
+| `telegram_notifier.py` | Trade notifications (~680 lines) |
 | `check_system.py` | Pre-flight validation |
 | `auto_detector.py` | ATM + expiry auto-detection with graceful degradation (~370 lines) |
-| `login_handler.py` | Automated TOTP login for Zerodha + Angel One (~240 lines) |
-| `container_monitor.py` | Docker container health monitor — run via cron on EC2 (~210 lines) |
+| `login_handler.py` | Automated TOTP login for Zerodha + Angel One (~600 lines) |
+| `container_monitor.py` | Docker container health monitor — run via cron on EC2 (~220 lines) |
 | `monitor_dashboard/` | Streamlit monitoring dashboard |
 
 ---
