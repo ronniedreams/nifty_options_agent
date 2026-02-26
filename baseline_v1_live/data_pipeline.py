@@ -1876,7 +1876,19 @@ class DataPipeline:
         self._send_telegram_alert("[RECOVERY] Switched back to primary data feed (Zerodha)")
 
     def _send_telegram_alert(self, message: str):
-        """Send Telegram notification for data pipeline alerts (throttled)"""
+        """Send Telegram notification for data pipeline alerts (throttled)
+
+        Skips alerts after 3:15 PM IST (market closed, alerts not useful)
+        """
+        # Skip alerts after market close (3:15 PM IST)
+        from datetime import time
+        current_time = datetime.now(IST).time()
+        market_close_time = time(15, 15)  # 3:15 PM IST
+
+        if current_time >= market_close_time:
+            logger.debug(f"[TELEGRAM] Skipping alert after market close: {message[:50]}...")
+            return
+
         try:
             from .telegram_notifier import get_notifier
             notifier = get_notifier()
