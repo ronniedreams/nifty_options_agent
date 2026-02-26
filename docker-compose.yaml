@@ -36,6 +36,7 @@ services:
       - ./openalgo-angelone/openalgo/.env:/app/.env:ro
       - ./data/openalgo_angelone_db:/app/db  # Bind mount — survives rebuilds and docker-compose down -v
       - ./data/openalgo_angelone_logs:/app/log
+      - ./data/openalgo_angelone_broker_logs:/app/logs  # Angel One SmartWebSocketV2 requires /app/logs with write access
     environment:
       - FLASK_ENV=production
     restart: unless-stopped
