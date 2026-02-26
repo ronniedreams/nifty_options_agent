@@ -574,23 +574,46 @@ class PositionTracker:
             
             # === CHECK 1: Phantom Positions (we track, broker doesn't have) ===
             phantom_symbols = tracked_symbols - broker_symbols
-            
+
+            # Fetch tradebook once for all phantom positions (to get actual fill prices)
+            tradebook_map = {}
+            if phantom_symbols:
+                try:
+                    tradebook_response = self.client.tradebook()
+                    if tradebook_response.get('status') == 'success':
+                        for trade in tradebook_response.get('data', []):
+                            trade_symbol = trade.get('symbol', '')
+                            trade_action = trade.get('action', '').upper()
+                            # For short positions, exit is BUY - get the latest BUY trade
+                            if trade_action == 'BUY' and trade_symbol in phantom_symbols:
+                                # Store the most recent BUY trade (tradebook is sorted desc)
+                                if trade_symbol not in tradebook_map:
+                                    tradebook_map[trade_symbol] = float(trade.get('average_price', 0))
+                except Exception as e:
+                    logger.warning(f"[RECONCILE] Failed to fetch tradebook for exit prices: {e}")
+
             for symbol in phantom_symbols:
                 position = self.open_positions[symbol]
-                
+
+                # Get actual exit price from tradebook, fallback to current_price
+                actual_exit_price = tradebook_map.get(symbol, position.current_price)
+                price_source = "tradebook" if symbol in tradebook_map else "last_ltp"
+
                 logger.critical(
                     f"[WARNING] PHANTOM POSITION DETECTED: {symbol} | "
-                    f"We track, broker doesn't have (likely SL hit)"
+                    f"We track, broker doesn't have (likely SL hit) | "
+                    f"Exit price: {actual_exit_price:.2f} (source: {price_source})"
                 )
-                
-                # Close locally with last known price
-                self.close_position(symbol, position.current_price, 'SL_HIT_RECONCILED')
-                
+
+                # Close locally with actual exit price from tradebook
+                self.close_position(symbol, actual_exit_price, 'SL_HIT_RECONCILED')
+
                 # Send Telegram alert
                 if self.telegram:
                     self.telegram.send_message(
                         f"[WARNING]️ Phantom position closed: {symbol}\n"
-                        f"Likely SL hit, broker confirmed exit."
+                        f"Likely SL hit, broker confirmed exit.\n"
+                        f"Exit price: {actual_exit_price:.2f} (from {price_source})"
                     )
             
             # === CHECK 2: Orphaned Positions (broker has, we don't track) ===
