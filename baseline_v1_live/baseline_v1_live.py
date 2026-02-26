@@ -989,11 +989,19 @@ class BaselineV1Live:
 
                 # Check available margin before attempting order (CRITICAL FIX #5)
                 try:
-                    # Query broker for account info
-                    account_info = self.data_pipeline.client.get_account_details()
+                    # Query broker for account info using OpenAlgo SDK funds() method
+                    account_info = self.data_pipeline.client.funds()
 
                     if account_info and account_info.get('status') == 'success':
-                        available_margin = float(account_info.get('data', {}).get('availablecash', 0))
+                        # Handle different broker response formats
+                        data = account_info.get('data', {})
+                        # Try common field names for available margin
+                        available_margin = float(
+                            data.get('availablecash') or
+                            data.get('available_margin') or
+                            data.get('available_cash') or
+                            data.get('net') or 0
+                        )
 
                         # Rough margin estimate: entry_price × quantity (conservative - actual may be lower)
                         estimated_margin_required = candidate['entry_price'] * candidate['quantity']
@@ -1217,9 +1225,16 @@ class BaselineV1Live:
 
             # Margin check before executing the switch (same guard as normal placement path)
             try:
-                account_info = self.data_pipeline.client.get_account_details()
+                account_info = self.data_pipeline.client.funds()
                 if account_info and account_info.get('status') == 'success':
-                    available_margin = float(account_info.get('data', {}).get('availablecash', 0))
+                    # Handle different broker response formats
+                    data = account_info.get('data', {})
+                    available_margin = float(
+                        data.get('availablecash') or
+                        data.get('available_margin') or
+                        data.get('available_cash') or
+                        data.get('net') or 0
+                    )
                     estimated_margin_required = candidate['entry_price'] * candidate['quantity']
                     if available_margin < estimated_margin_required:
                         logger.warning(

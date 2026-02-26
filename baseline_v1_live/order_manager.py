@@ -1104,12 +1104,24 @@ class OrderManager:
                     continue
 
                 if not isinstance(orders, list):
-                    logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook data is not a list (type={type(orders).__name__}, value={str(orders)[:100]})")
-                    # Empty/falsy response (e.g. {}) means no orders in book — treat as cancelled
-                    if not orders:
-                        logger.info(f"[CANCEL-VERIFIED] Order {order_id} not in orderbook (empty response, attempt {attempt}/{max_retries})")
-                        return True
-                    continue
+                    # Handle dict format: {'orders': [...]} (Definedge broker)
+                    if isinstance(orders, dict):
+                        # Try to extract nested list from common keys
+                        for key in ['orders', 'data', 'order_book']:
+                            if key in orders and isinstance(orders[key], list):
+                                orders = orders[key]
+                                logger.debug(f"[CANCEL-VERIFY] Extracted orders list from dict key '{key}'")
+                                break
+                        else:
+                            # Empty dict means no orders
+                            if not orders:
+                                logger.info(f"[CANCEL-VERIFIED] Order {order_id} not in orderbook (empty dict, attempt {attempt}/{max_retries})")
+                                return True
+                            logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook dict has no valid list key (keys={list(orders.keys())})")
+                            continue
+                    else:
+                        logger.warning(f"[CANCEL-VERIFY] Attempt {attempt}/{max_retries}: Orderbook data is not a list (type={type(orders).__name__}, value={str(orders)[:100]})")
+                        continue
 
                 # Find the order in orderbook
                 target_order = None
@@ -1377,6 +1389,20 @@ class OrderManager:
             if isinstance(broker_orders, str):
                 logger.warning(f"[RECONCILE] Orderbook data is string: {broker_orders}")
                 return results
+
+            # Handle dict format: {'orders': [...]} (Definedge broker)
+            if isinstance(broker_orders, dict):
+                for key in ['orders', 'data', 'order_book']:
+                    if key in broker_orders and isinstance(broker_orders[key], list):
+                        broker_orders = broker_orders[key]
+                        logger.debug(f"[RECONCILE] Extracted orders list from dict key '{key}'")
+                        break
+                else:
+                    if not broker_orders:
+                        logger.debug("[RECONCILE] Empty orderbook dict")
+                        return results
+                    logger.error(f"[RECONCILE] Orderbook dict has no valid list key (keys={list(broker_orders.keys())})")
+                    return results
 
             if not isinstance(broker_orders, list):
                 logger.error(f"[RECONCILE] Orderbook data is not a list: {type(broker_orders)}")
