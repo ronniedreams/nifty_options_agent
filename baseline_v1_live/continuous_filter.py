@@ -200,6 +200,7 @@ class ContinuousFilterEngine:
         # Add new swing to candidates (make a copy to avoid reference issues)
         # CRITICAL: Use deepcopy() to prevent modifications to swing_info from affecting stored value
         self.swing_candidates[symbol] = copy.deepcopy(swing_info)
+        self.swing_candidates[symbol].pop('broke_in_realtime', None)  # Fresh swing = fresh start
         if old_broke_in_history:
             self.swing_candidates[symbol]['broke_in_history'] = True
             logger.info(
@@ -466,6 +467,7 @@ class ContinuousFilterEngine:
                     'entry_price': swing_low,
                     'is_round_strike': is_round_strike,
                     'broke_in_history': swing_info.get('broke_in_history', False),
+                    'broke_in_realtime': swing_info.get('broke_in_realtime', False),
                 }
                 
                 qualified[option_type].append(enriched)
@@ -640,6 +642,19 @@ class ContinuousFilterEngine:
                 }
                 continue
 
+            # CRITICAL: Skip candidates whose swing broke in real-time
+            if candidate.get('broke_in_realtime', False):
+                logger.info(
+                    f"[RT-BREAK-SKIP] {symbol}: Swing @ {swing_low:.2f} already broke in real-time - "
+                    f"blocking order placement"
+                )
+                triggers[option_type] = {
+                    'action': 'cancel',
+                    'candidate': candidate,
+                    'reason': f'swing already broke in real-time'
+                }
+                continue
+
             # [CRITICAL] CRITICAL: Use CURRENT bar for real-time price, not completed bar
             # In live trading, we need to react to ticks as they come in, not wait for bar completion
             price_source = current_bars.get(symbol) or latest_bars.get(symbol)
@@ -684,6 +699,15 @@ class ContinuousFilterEngine:
                     f"[SWING-BREAK] {symbol}: {price_type} price {current_price:.2f} "
                     f"BROKE swing {swing_low:.2f} - Checking if order filled"
                 )
+
+                # Mark swing as broken in real-time (once)
+                if symbol in self.swing_candidates and not self.swing_candidates[symbol].get('broke_in_realtime', False):
+                    self.swing_candidates[symbol]['broke_in_realtime'] = True
+                    logger.info(
+                        f"[SWING-BROKE-RT] {symbol}: Marked broke_in_realtime "
+                        f"(price {current_price:.2f} < swing {swing_low:.2f})"
+                    )
+
                 triggers[option_type] = {
                     'action': 'check_fill',
                     'candidate': candidate,

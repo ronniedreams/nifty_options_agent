@@ -242,8 +242,9 @@ Best CE = 26200CE
         'vwap': 125.00,
         'vwap_premium_pct': 4.4,
         'option_type': 'CE',
-        'index': 75  # Bar index when swing formed
-        # ... other fields
+        'index': 75,  # Bar index when swing formed
+        'broke_in_history': False,    # True if swing broke during historical data (startup protection)
+        'broke_in_realtime': False,   # True if swing broke during live session (cascade prevention)
     }
 }
 ```
@@ -413,6 +414,29 @@ Action:
 2. Remove from swing_candidates if still there
 3. Log swing break event
 ```
+
+### Scenario 4: Swing Break Without Fill — Cascade Prevention
+```
+Context: Three CE swings qualify (25600CE, 25550CE, 25500CE). Best = 25600CE, order placed.
+Price drops sharply → all three swing lows break within seconds.
+
+25600CE: Order was placed proactively → fills on break. Position opened. (Scenario 1)
+25550CE: No order (not best strike). Price breaks swing → broke_in_realtime=True set.
+25500CE: No order (not best strike). Price breaks swing → broke_in_realtime=True set.
+
+After 25600CE fills and is removed, 25550CE becomes current_best.
+Price bounces back above 25550CE swing low momentarily.
+Without broke_in_realtime: system has amnesia → places order → fills immediately (BAD).
+With broke_in_realtime: guard fires [RT-BREAK-SKIP] → action='cancel' → no order placed.
+
+Action:
+1. On first tick below swing_low: set broke_in_realtime=True on swing_candidates[symbol]
+2. Flag propagates to enriched candidate via evaluate_all_candidates() on next tick
+3. get_order_triggers() returns action='cancel' for any candidate with broke_in_realtime=True
+4. Flag resets when a NEW swing forms for the same symbol (add_swing_candidate deepcopy + pop)
+```
+
+**Note:** The flag is in-memory only (not persisted to DB). On restart, `mark_historical_breaks()` covers the same protection via `broke_in_history`. The two flags serve different lifecycles: `broke_in_history` survives swing replacement (startup protection), while `broke_in_realtime` resets on new swing (live session only).
 
 **Key Principle:** If an SL order is pending for a swing, swing break = ORDER FILLS, not cancel!
 
