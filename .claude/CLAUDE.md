@@ -5,9 +5,16 @@
 **What:** Automated trading system for NIFTY index options using swing-break strategy
 **How:** Detect swing lows → Apply 2-stage filters → Place proactive SL (stop-limit) orders BEFORE breaks
 **Risk:** Configurable R_VALUE (default Rs.6,500 per R), daily targets configurable (default +/-5R)
-**Broker:** OpenAlgo/Zerodha (Local: http://127.0.0.1:5000 | EC2: https://openalgo.ronniedreams.in) — orders + primary data
-**Backup Feed:** OpenAlgo/Angel One (Local: http://127.0.0.1:5001) — backup data feed with auto-failover
 **Mode:** Paper trading by default (PAPER_TRADING=true in .env)
+
+### Broker Environments
+
+| Environment | Broker | EC2 IP | Domain | Branch |
+|-------------|--------|--------|--------|--------|
+| **Production** | Zerodha | 13.233.211.15 | ronniedreams.in | `main` |
+| **Sandbox** | Definedge | 13.201.203.56 | somiljain.in | `deploy/ec2-definedge` |
+
+**Local Development:** OpenAlgo at http://127.0.0.1:5000 (any broker)
 
 ---
 
@@ -38,14 +45,24 @@ See `CONTAINER_MONITOR_SETUP.md` for full instructions.
 
 ---
 
-### Daily Login Required (Zerodha + Angel One)
-**Both sessions expire daily.** Every morning before 9:15 AM:
-1. Open **https://openalgo.ronniedreams.in** (admin / Trading@2026) → Log in with Zerodha (TOTP 2FA)
-2. Open Angel One OpenAlgo URL → log in with Angel One
+### Daily Login Required (All Brokers)
+
+**Sessions expire daily.** Login before 9:15 AM:
+
+| EC2 | Broker | URL | Notes |
+|-----|--------|-----|-------|
+| ronniedreams.in | Zerodha | https://openalgo.ronniedreams.in | Auto-login may work |
+| ronniedreams.in | Angel One | Port 5001 | Backup feed |
+| somiljain.in | Definedge | https://openalgo.somiljain.in | **MANUAL login required** (auto-login fails for WebSocket) |
 
 **After login, restart trading agent:**
 ```bash
-docker-compose stop trading_agent && docker-compose rm -f trading_agent && docker-compose up -d trading_agent
+cd ~/nifty_options_agent && docker compose restart trading_agent
+```
+
+**Verify WebSocket connected:**
+```bash
+docker logs baseline_v1_live 2>&1 | grep "WebSocket connectivity: OK"
 ```
 
 ---
@@ -195,12 +212,13 @@ python -m baseline_v1_live.baseline_v1_live --auto
 
 ---
 
-## EC2 Deployment (Production)
+## EC2 Deployment (Production - Zerodha)
 
 - **EC2**: Ubuntu 22.04 | **IP**: 13.233.211.15 | **Domain**: ronniedreams.in
 - **SSH**: `ssh -i "D:/aws_key/openalgo-key.pem" ubuntu@13.233.211.15`
 - **Deploy**: `cd ~/nifty_options_agent && ./deploy.sh`
 - **Basic Auth**: admin / Trading@2026
+- **Branch**: `main`
 
 | Service | URL |
 |---------|-----|
@@ -222,6 +240,87 @@ docker-compose down && docker-compose up -d
 ```
 - Never force push | EC2 is production — test locally first
 - SSH key for EC2→GitHub: `~/.ssh/github_key`
+
+---
+
+## EC2 Deployment (Sandbox - Definedge)
+
+- **EC2**: Ubuntu 22.04 | **IP**: 13.201.203.56 | **Domain**: somiljain.in
+- **Instance ID**: `i-08625be9058db8058`
+- **SSH**: `ssh -i ~/Downloads/openalgo2.pem ubuntu@13.201.203.56`
+- **Branch**: `deploy/ec2-definedge`
+
+| Service | URL |
+|---------|-----|
+| OpenAlgo Dashboard | https://openalgo.somiljain.in |
+| Monitor Dashboard | https://trading.somiljain.in |
+
+### EC2 Auto Start/Stop (Weekdays Only)
+
+| Time (IST) | Action | Method |
+|------------|--------|--------|
+| **8:45 AM** | EC2 starts | AWS Lambda `StartEc2` via EventBridge |
+| **3:15 PM** | WebSocket alerts silenced | Code in `data_pipeline.py` |
+| **3:30 PM** | EC2 stops + Telegram alert | Cron on EC2 |
+
+**Lambda function** (`StartEc2`):
+```python
+import boto3
+
+def lambda_handler(event, context):
+    ec2 = boto3.client('ec2', region_name='ap-south-1')
+    instance_id = 'i-08625be9058db8058'
+    ec2.start_instances(InstanceIds=[instance_id])
+    print(f'Started instance {instance_id}')
+    return {'statusCode': 200, 'body': 'Started'}
+```
+
+**EventBridge Schedule**: `StartTradingEC2-Schedule`
+- Cron: `cron(15 3 ? * MON-FRI *)` (3:15 UTC = 8:45 AM IST)
+
+**EC2 Shutdown Cron** (`/home/ubuntu/shutdown_after_market.sh`):
+- Cron: `0 10 * * 1-5` (10:00 UTC = 3:30 PM IST)
+- Sends Telegram notification before shutdown
+
+### Definedge Daily Login (MANUAL REQUIRED)
+
+⚠️ **Auto-login does NOT work reliably for Definedge WebSocket.** The TOTP login establishes dashboard access but the broker WebSocket token often fails authentication.
+
+**Daily Morning Routine:**
+1. EC2 auto-starts at 8:45 AM IST (Lambda)
+2. **MANUAL**: Go to https://openalgo.somiljain.in
+3. **MANUAL**: Login with Definedge credentials (User ID + Password + TOTP)
+4. **MANUAL**: Restart trading agent:
+   ```bash
+   ssh -i ~/Downloads/openalgo2.pem ubuntu@13.201.203.56
+   cd ~/nifty_options_agent && docker compose restart trading_agent
+   ```
+5. Verify WebSocket connected in logs:
+   ```bash
+   docker logs baseline_v1_live 2>&1 | grep -i "health-check"
+   ```
+
+**Why manual login is required:**
+- Definedge WebSocket requires valid `susertoken` from broker session
+- Auto-login via OpenAlgo web form gets dashboard access but WebSocket auth fails with `{'t': 'ck', 's': 'NOT_OK'}`
+- Manual login through the web UI establishes proper broker session
+
+### Definedge-Specific Issues
+
+| Issue | Symptom | Solution |
+|-------|---------|----------|
+| WebSocket auth failed | `Status: NOT_OK` in OpenAlgo logs | Manual login at https://openalgo.somiljain.in |
+| Orderbook returns dict | `type=dict, value={'orders': [...]}` | Fixed in `order_manager.py` - extracts list from dict |
+| Trading agent starts before OpenAlgo ready | WebSocket connection refused | Restart trading agent after OpenAlgo is healthy |
+
+### Definedge Configuration (.env)
+
+```bash
+AUTOMATED_LOGIN=true  # Attempts auto-login but WebSocket may still fail
+DEFINEDGE_USER_ID=1142509
+DEFINEDGE_PASSWORD=****
+DEFINEDGE_TOTP_SECRET=****
+```
 
 ---
 
@@ -287,10 +386,19 @@ logger.info("[TAG] Message")  # Tags: [SWING], [ORDER], [FILL], [RECOVERY]
 | Position mismatch | Check reconciliation logs |
 | Failover not triggering | Check Angel One at port 5001, verify ANGELONE_OPENALGO_API_KEY |
 | Stuck on Angel One | Check Zerodha reconnection logs; `last_zerodha_tick_time` must update |
+| **Definedge WebSocket NOT_OK** | Manual login required at https://openalgo.somiljain.in |
+| **Definedge orderbook dict error** | Fixed - `order_manager.py` handles dict format |
+| **EC2 not starting** | Check Lambda `StartEc2` in AWS Console (ap-south-1) |
 
 **Filter debug:**
 ```
 [FILTER-SUMMARY] 8 candidates, 0 qualified. Rejections: VWAP<4%=5, SL<2%=0
+```
+
+**Definedge WebSocket debug:**
+```bash
+docker logs openalgo 2>&1 | grep -i "websocket auth"
+# Should see: "Status: OK" (not "NOT_OK")
 ```
 
 ---
