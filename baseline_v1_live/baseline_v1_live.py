@@ -839,6 +839,18 @@ class BaselineV1Live:
         # Only feed bars that are strictly newer than what was last sent per symbol.
         # This prevents the startup overlap window (fill_initial_gap vs live stream)
         # from causing repeated OUT-OF-ORDER/DUPLICATE errors in swing_detector.
+
+        # CRITICAL: Update pending order symbols BEFORE swing detection
+        # This prevents removing swings that have active orders when new swings form
+        pending_orders_by_type = self.order_manager.get_pending_orders_by_type()
+        pending_symbols = set()
+        for option_type in ['CE', 'PE']:
+            if pending_orders_by_type.get(option_type):
+                pending_symbol = pending_orders_by_type[option_type].get('symbol')
+                if pending_symbol:
+                    pending_symbols.add(pending_symbol)
+        self.continuous_filter.set_pending_order_symbols(pending_symbols)
+
         new_bars_dict = {}
         for symbol, bar in latest_bars.items():
             last_ts = self._last_sent_bar_ts.get(symbol)

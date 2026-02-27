@@ -86,6 +86,9 @@ class ContinuousFilterEngine:
         # Track last evaluation state to detect changes (avoid logging same rejection every tick)
         # {symbol: {'status': 'rejected'/'qualified', 'reason': 'rejection_reason'}}
         self.last_evaluation_state = {}
+
+        # Track symbols that have pending orders (to prevent removing their swings)
+        self.symbols_with_pending_orders = set()
     
     def reset_daily_data(self):
         """Clear in-memory swing data for new trading day"""
@@ -93,7 +96,15 @@ class ContinuousFilterEngine:
         self.stage1_swings_by_type = {'CE': [], 'PE': []}
         self.current_best = {'CE': None, 'PE': None}
         self.last_evaluation_state.clear()
+        self.symbols_with_pending_orders.clear()
         logger.info("[DAILY-RESET] Cleared in-memory swing data")
+
+    def set_pending_order_symbols(self, symbols: set):
+        """
+        Update the set of symbols that have pending orders.
+        Called by main orchestrator to prevent removing swings with active orders.
+        """
+        self.symbols_with_pending_orders = symbols or set()
     
     def add_swing_candidate(self, symbol: str, swing_info: Dict):
         """
@@ -119,9 +130,18 @@ class ContinuousFilterEngine:
 
         # Static Filter 1: Price range 100-300
         if not (MIN_ENTRY_PRICE <= swing_price <= MAX_ENTRY_PRICE):
-            # New swing FAILED price filter - reject it AND remove old swing (new swing pattern formed)
+            # New swing FAILED price filter - reject it
             if symbol in self.swing_candidates:
                 old_swing = self.swing_candidates[symbol]
+
+                # Check if old swing has a pending order - if so, DON'T remove it
+                if symbol in self.symbols_with_pending_orders:
+                    logger.info(
+                        f"[PRICE-REJECT-KEEP] {symbol}: New swing @ Rs.{swing_price:.2f} outside 100-300 range - REJECTED. "
+                        f"KEEPING old swing @ Rs.{old_swing['price']:.2f} (has pending order)"
+                    )
+                    return
+
                 logger.debug(
                     f"[PRICE-REJECT] {symbol}: New swing @ Rs.{swing_price:.2f} outside 100-300 range - REJECTED. "
                     f"Removing old swing @ Rs.{old_swing['price']:.2f} (stale)"
@@ -152,9 +172,20 @@ class ContinuousFilterEngine:
         option_type = swing_info.get('option_type')
 
         if vwap_premium < MIN_VWAP_PREMIUM:
-            # New swing FAILED VWAP - reject it AND remove old swing (new swing pattern formed)
+            # New swing FAILED VWAP - reject it
             if symbol in self.swing_candidates:
                 old_swing = self.swing_candidates[symbol]
+
+                # Check if old swing has a pending order - if so, DON'T remove it
+                if symbol in self.symbols_with_pending_orders:
+                    logger.info(
+                        f"[VWAP-REJECT-KEEP] {symbol}: New swing @ Rs.{swing_price:.2f} "
+                        f"VWAP premium {vwap_premium:.1%} < {MIN_VWAP_PREMIUM:.1%} "
+                        f"(VWAP @ swing: Rs.{vwap_at_swing:.2f}) - REJECTED. "
+                        f"KEEPING old swing @ Rs.{old_swing['price']:.2f} (has pending order)"
+                    )
+                    return
+
                 logger.warning(
                     f"[VWAP-REJECT] {symbol}: New swing @ Rs.{swing_price:.2f} "
                     f"VWAP premium {vwap_premium:.1%} < {MIN_VWAP_PREMIUM:.1%} "
