@@ -14,9 +14,9 @@ Replace V1's hardcoded filters and passive exit strategy with an RL agent that l
                           V1 (current)              RL Agent (new)
                           ────────────              ──────────────
 Swing detection:          SwingDetector              SwingDetector (SAME)
-Strike selection:         SL closest to Rs.10        SL closest to Rs.10 (SAME)
+Strike selection:         SL closest to Rs.10        SL closest to Rs.20 (structural)
 Entry filters:            VWAP>4%, SL 2-10%,         REMOVED — agent decides
-                          price 100-300
+                          price 100-300              (price 50-500 kept as liquidity gate)
 Enter or skip:            Filters decide              Agent decides
 SL placement:             highest_high + 1           highest_high + 1 (SAME)
 Position sizing:          R-based formula (1R)        R-based formula 1R (SAME)
@@ -32,14 +32,22 @@ Max positions:            5 (3 CE, 3 PE)             5 (SAME)
 ### Why remove VWAP filter?
 User (6-7 yrs derivative trading): "Price above VWAP has room for reward when shorting, but that doesn't mean below-VWAP trades don't give reward — they might give smaller reward. Agent can decide to enter these and book at lower R like +0.5R or +1R."
 
-### Why remove SL% and price filters?
-"I gave these by intuition. When price has fallen a lot and is significantly below VWAP, reversal risk is higher. But instead of blanket filtering, the agent can learn when these are actually dangerous vs when they're fine for a quick profit."
+### Why remove SL% and price filters as hard gates?
+"I gave these by intuition. They might be specific to the 9-month training period and overfit. When price has fallen a lot and is significantly below VWAP, reversal risk is higher. But instead of blanket filtering, the agent can learn when these are actually dangerous vs when they're fine for a quick profit. The raw values become features — agent sees SL%=1.5% and learns from experience whether that's viable."
 
 ### The pyramiding problem (critical)
 "V1's strict filters prevent cascading. After first entry, price moves in our favor but subsequent swing breaks fail the filter (VWAP dropped, price out of range). Left with 1 lonely position trying to reach +5R. Agent should pyramid 2-3 positions and collectively reach target faster."
 
 ### Why fixed position sizing?
-"SL is always ~10 pts. Same lots every time = same 1R risk per trade. Good normalization, one less thing for agent to learn. Every trade is exactly 1R bet — like fixed chip size in poker."
+"SL is always ~20 pts. Same lots every time = same 1R risk per trade. Good normalization, one less thing for agent to learn. Every trade is exactly 1R bet — like fixed chip size in poker."
+
+### Why SL target changed from 10 to 20 pts?
+"With SL=10: 10 lots needed for 1R, margin ~Rs.20L (at ~Rs.2L/lot). With SL=20: 5 lots for same 1R, margin ~Rs.10L. Half the margin, same R-return — ROI doubles. This change will also apply to V1 in future."
+
+```
+SL=10:  lots = 6500/(10×65) = 10 lots  → margin ~Rs.20,00,000 → ROI = 0.33% per R
+SL=20:  lots = 6500/(20×65) =  5 lots  → margin ~Rs.10,00,000 → ROI = 0.65% per R
+```
 
 ---
 
@@ -209,12 +217,71 @@ Solution: **Behavior cloning warmstart (Phase 0)**
 - Never discovers "never trade" because starting point already trades
 - Session-end -0.5R penalty is just a safety net, not the primary fix
 
-### 2. Decision Timing
-- Entry: when swing breaks (obvious)
-- Exit: every 1-min bar close? Less frequent?
-- How often does agent evaluate open positions?
+### 2. Decision Timing (Entry) — FINALIZED
 
-### 3. Multi-Position Management
+**Entry decision trigger:** When the continuous filter selects a new best strike (not every bar).
+
+```
+SWING CONFIRMED (2-watch)
+  │
+  ├── Continuous filter picks best strike (SL closest to 20, mechanical)
+  │   → Agent Decision Point: sees strike features → ENTER or SKIP
+  │
+  ├── Best strike changes (new strike becomes favorable)
+  │   → Agent Decision Point: sees new strike features → ENTER or SKIP
+  │   → If agent had previous order, cancel it first
+  │
+  └── SWING BREAKS
+      → If agent has active order → fill
+      → If agent skipped → nothing happens
+```
+
+**Key decisions made:**
+- **Strike selection stays mechanical** — continuous filter picks SL-closest-to-20, not the agent
+- **Agent only decides ENTER/SKIP** — binary decision on the presented strike, not which strike
+- **No V1 filter thresholds in V2** — VWAP%, SL%, price are features the agent sees, not gates
+- **Execution constraints kept** — price 50-500 (liquidity), minimum volume (market structure gates, not strategy)
+
+**What's structural (kept from V1) vs what agent learns:**
+```
+STRUCTURAL (hard rules, not strategy):
+  ├── Swing detection (watch-based, alternating)     → same as V1
+  ├── Strike selection (SL closest to 20 pts)        → margin/ROI normalization
+  ├── Position sizing (R_VALUE / SL × LOT_SIZE)      → consistent risk per trade
+  ├── Price 50-500 gate                              → liquidity/execution constraint
+  └── Proactive SL order mechanics                   → same as V1
+
+AGENT LEARNS (no hardcoded thresholds):
+  ├── VWAP premium %     → sees raw value, learns if/when it matters
+  ├── SL %               → sees raw value, learns viable range
+  ├── Option premium      → sees raw price, learns sweet spot
+  ├── Market context      → momentum, time of day, session P&L
+  └── ENTER / SKIP        → the actual decision
+```
+
+**Training = Live parity:**
+```
+Training:  Replay bars → SwingDetector → continuous_filter picks best strike
+           → when best strike changes → create decision point → agent decides
+
+Live:      Live bars → SwingDetector → continuous_filter picks best strike
+           → when best strike changes → ask agent → place/cancel order
+
+Same triggers, same features, same decision points. No distribution mismatch.
+```
+
+**Training data is adequate:**
+- Training data = number of swings, not number of strikes
+- Each swing = 1 decision point (on the SL-closest-to-20 strike)
+- ~10 swings/day × 1,000 days = ~10,000 entry decisions
+- Training only on SL≈20 strikes avoids distribution mismatch
+  (agent never sees SL=10, so can't develop preference for unavailable SL ranges)
+
+### Decision Timing (Exit) — OPEN
+- How often does agent evaluate open positions? (every bar? event-driven?)
+- To be discussed separately
+
+### 3. Multi-Position Management — OPEN
 - 3 positions open + new swing breaks: one decision or separate?
 - How does agent express "exit position 2 but hold position 1"?
 
@@ -264,11 +331,11 @@ Priority 3 (NOT NEEDED): Pre-2020
 - State space is small (16 features) and action space is small (~4 discrete actions)
 - 1,010 episodes with ~150K decision points is solid for this problem size
 
-### 5. Algorithm Choice
+### 5. Algorithm Choice — OPEN
 - DQN vs PPO vs A2C
 - Discrete action space
 
-### 6. Evaluation Metrics
+### 6. Evaluation Metrics — OPEN
 - What proves agent > V1?
 
 ---
