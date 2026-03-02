@@ -51,9 +51,16 @@ SL=20:  lots = 6500/(20×65) =  5 lots  → margin ~Rs.10,00,000 → ROI = 0.65%
 
 ---
 
-## Feature Set (16 features) — FINALIZED
+## Feature Set — FINALIZED
 
-### Market Context (per swing low — what the chart shows):
+### Two-Model Architecture
+The agent uses two separate models with different feature sets:
+- **Entry Model**: 18 global features → ENTER or SKIP (at swing break events)
+- **Exit Model**: 18 global features + 4 per-position features = 22 features → HOLD or EXIT (every bar, per position)
+
+### Global Features (18) — shared across entry and exit decisions:
+
+#### Market Context (per option — what the chart shows):
 ```
  1. vwap_premium_pct              — price vs VWAP (no threshold, agent sees raw value)
  2. sl_pct                        — stop loss as % of price
@@ -68,17 +75,40 @@ SL=20:  lots = 6500/(20×65) =  5 lots  → margin ~Rs.10,00,000 → ROI = 0.65%
 11. minutes_since_open            — time of day context
 ```
 
-### Session State (the game state):
+#### Volatility Regime (computed from NIFTY spot, shared across all decisions):
 ```
-12. cumulative_daily_pnl_R        — where am I in the game
-13. open_position_count           — how many active bets
-14. trades_taken_today            — session activity level
+12. spot_volatility_ratio          — spot_avg_bar_range_5 / spot_avg_bar_range_50
+                                     1.0 = normal day, 2.5+ = high vol (event day), 0.5 = dead day
+                                     Computed once per bar on NIFTY spot, not per-strike
 ```
 
-### Game Parameters (configurable, no retraining needed):
+#### Session State (the game state):
 ```
-15. distance_to_target_R          — how far to win (target_R - cumulative_pnl)
-16. distance_to_stop_R            — how far to loss limit (cumulative_pnl - stop_R)
+13. cumulative_daily_pnl_R        — where am I in the game (realized P&L)
+14. open_position_count           — how many active bets (0-5)
+15. trades_taken_today            — session activity level
+16. total_unrealized_pnl_R        — sum of all open positions' unrealized P&L in R terms
+                                     +1.5 = pyramid is working, -0.8 = positions underwater
+                                     Critical for pyramiding: agent knows if it's building on strength or chasing losses
+```
+
+#### Game Parameters (configurable, no retraining needed):
+```
+17. distance_to_target_R          — how far to win (target_R - cumulative_pnl)
+18. distance_to_stop_R            — how far to loss limit (cumulative_pnl - stop_R)
+```
+
+### Per-Position Features (4) — exit decisions only:
+```
+ A. position_unrealized_pnl_R    — THIS position's P&L in R terms (+2.0R, -0.3R, etc.)
+ B. bars_since_entry             — how long this position has been held
+ C. pct_from_sl                  — distance of current price to this position's SL
+                                    (far = safe, close = at risk)
+ D. option_price_roc_5           — 5-bar rate of change of this position's option price
+                                    -3% = strong momentum (HOLD), -0.3% = fading (consider EXIT)
+                                    +1% = reversing (EXIT NOW)
+                                    Embeds recent price trajectory into current observation
+                                    (agent has no memory across bars — this compensates)
 ```
 
 **Design principle:** All features are percentage-based or R-based. No absolute prices (vary across strikes). Agent sees VWAP as a feature but has no hardcoded threshold — learns its own relationship.
@@ -88,8 +118,21 @@ SL=20:  lots = 6500/(20×65) =  5 lots  → margin ~Rs.10,00,000 → ROI = 0.65%
 - Features 6-7: HOW FAST did price get here (impulsive vs grinding)
 - Features 8-10: Is this move BEGINNING, MIDWAY, or EXHAUSTED
 - Feature 11: WHERE in the trading session are we
-- Features 12-14: The GAME STATE (stack, bets placed)
-- Features 15-16: DISTANCE to win/lose (goal-conditioned)
+- Feature 12: Is today NORMAL or ABNORMAL volatility (regime context from NIFTY spot)
+- Features 13-16: The GAME STATE (stack, bets placed, pyramid health)
+- Features 17-18: DISTANCE to win/lose (goal-conditioned)
+- Features A-D: THIS POSITION's state (for exit decisions only)
+
+**How the agent detects "momentum fading" (exit intelligence):**
+Standard RL agents see one snapshot per bar, no memory of previous bars.
+Per-position feature D (option_price_roc_5) encodes recent trajectory:
+```
+roc_5 = -3.0%  → price falling fast → strong momentum → HOLD
+roc_5 = -0.5%  → price barely falling → momentum fading → consider EXIT
+roc_5 = +1.0%  → price rising → reversal underway → EXIT
+```
+Combined with avg_bar_range_pct_5 (candle sizes shrinking) and position_unrealized_pnl_R
+(P&L plateauing), the agent has enough signal to detect fading momentum without memory.
 
 ---
 
@@ -120,25 +163,136 @@ config.STOP_R = -3.0    # Tighter stop
 
 ---
 
-## Agent's Three Skills
+## Agent Architecture — Two Models, Two-Layer Exit
 
-### 1. Entry Intelligence — "Should I take this trade?"
-- Not based on hardcoded thresholds
-- Context-dependent: cumulative P&L, positions held, VWAP, time of day
-- Learns: low-VWAP trades fine for quick +0.5R bookings
-- Learns: below-VWAP risky but sometimes worth it for recovery
-- Learns: close to target → be selective; behind on day → be aggressive
+### Entry Model (18 global features → target selection)
 
-### 2. Exit Intelligence — "Should I book this trade now?"
-- High VWAP premium trade running well → hold for bigger R
-- Low VWAP premium trade at +0.8R → book it, this is its ceiling
-- At +4R cumulative with +0.6R unrealized → book it, almost home
-- At -2R with +1.5R unrealized → let it run, need bigger win
+```
+Input:   18 global features
+Output:  SKIP or ENTER_0.3R / ENTER_0.5R / ENTER_0.8R / ENTER_1.0R / ENTER_1.5R / ENTER_2.0R
+When:    Swing break + best strike change events
+Network: 2-3 hidden layers, 64-128 neurons each (~50KB)
+```
 
-### 3. Pyramiding — "Should I stack positions?"
-- After first entry, subsequent swing breaks aren't filtered out
-- Agent learns: 2-3 positions cascading reach target faster
-- Agent learns: adding position when already near target = unnecessary risk
+**Skill 1: Entry + Target Intelligence — "Should I trade, and at what target?"**
+- Predicts the R-multiple target for THIS trade based on market context
+- High VWAP premium + trending → higher target (1.5R, 2.0R)
+- Low VWAP premium + high vol + late session → quick grab (0.3R, 0.5R)
+- Close to daily target → just need a bit more (0.3R, 0.5R)
+- On ENTER: places TP limit order at target price + SL order (structural)
+
+**Skill 2: Pyramiding — "Should I stack positions?"**
+- Same Entry Model, but session state features change the decision context
+- `open_position_count > 0` + `total_unrealized_pnl_R > 0` → building on strength
+- Agent learns: 2-3 positions cascading reach target faster (ballooning effect)
+- Agent learns: adding when underwater = chasing losses (SKIP)
+- Agent learns: adding when near target = unnecessary risk (SKIP)
+
+### Session Review Model (18 global features → session-level exit)
+
+```
+Input:   18 global features (crucially: cumulative_pnl_R, total_unrealized_pnl_R,
+         distance_to_target_R, open_position_count, minutes_since_open)
+Output:  HOLD_ALL or EXIT_ALL
+When:    Every 10 bars (~10 minutes) when positions are open
+Network: 2-3 hidden layers, 64-128 neurons each (~50KB)
+```
+
+**Skill 3: Session Exit Intelligence — "Is the cumulative picture enough?"**
+- Overrides individual TP orders when cumulative P&L warrants booking everything
+- EXIT_ALL: cancel all TP limit orders → market exit all positions
+- HOLD_ALL: let individual TP orders continue working
+
+**When EXIT_ALL makes sense (agent learns these patterns):**
+- Cumulative unrealized is attractive + momentum fading across all positions
+- Close to daily target (distance_to_target_R < 1.0) → preserve gains
+- Late in session + decent cumulative → don't risk giving it back
+- Sharp reversal signal → get out before individual SLs eat into profits
+
+### Two-Layer Exit System — FINALIZED
+
+```
+Layer 1: Individual Position Targets (automatic, proactive)
+  → Entry fills → agent's predicted target_R → TP limit order placed
+  → TP fills automatically at exact price (captures intra-bar moves)
+  → SL fills automatically if trade goes wrong (-1R)
+  → No per-bar checking needed — orders handle it
+
+Layer 2: Session-Level Override (periodic review)
+  → Every 10 bars, Session Review Model evaluates cumulative picture
+  → HOLD_ALL: let individual TPs continue working
+  → EXIT_ALL: cancel all TPs → market exit all positions → book cumulative profit
+
+Result: Individual intelligence (right target per trade) + collective intelligence
+        (override when cumulative picture says "enough")
+```
+
+### Why Two Layers, Not One
+
+```
+Individual TPs alone:
+  ✗ Can't react to cumulative picture
+  ✗ Position 1 at +0.9R, Position 2 at +0.7R, Position 3 at +0.4R = +2.0R total
+    Individual TPs might be set at +1.0R each — none have filled yet
+    But +2.0R combined is great — should book it before reversal
+
+Session override alone:
+  ✗ Can't set different targets per trade context
+  ✗ Always exits at market price (misses optimal intra-bar prices)
+  ✗ Would need per-bar checking (noisy, 360 decisions/day)
+
+Both together:
+  ✓ TPs capture optimal prices for individual trades
+  ✓ Session override captures cumulative opportunities
+  ✓ Only ~10 session review decisions per day (clean signal)
+```
+
+### Complete Position Lifecycle
+
+```
+9:30  Swing break → Entry Model: ENTER_1.0R (Position 1)
+        → TP limit order at +1.0R price level
+        → SL order at -1R (structural)
+
+9:35  Swing break → Entry Model: ENTER_1.0R (Position 2)
+        → TP limit order at +1.0R, SL at -1R
+
+9:40  Session Review: HOLD_ALL (unrealized +0.4R, far from target)
+
+9:42  Swing break → Entry Model: ENTER_0.5R (Position 3, pyramid)
+        → TP limit order at +0.5R, SL at -1R
+
+9:50  Session Review: HOLD_ALL (unrealized +1.2R, building nicely)
+
+9:55  Position 3 TP FILLS automatically at +0.5R ✓
+
+10:00 Session Review: HOLD_ALL (realized +0.5R, unrealized +1.8R)
+
+10:10 Session Review: momentum fading, total +2.5R
+        → EXIT_ALL
+        → Cancel Pos 1 and Pos 2 TP orders
+        → Market exit both → books remaining profit
+        → Day total: +2.5R
+```
+
+### Training vs Live Parity — Perfect Match
+
+```
+Training (in Gym environment):
+  Entry: agent picks target → simulate TP limit order
+         Scan subsequent bars: if price reaches target → fill at exact target price
+         If SL triggers first → fill at SL (-1R)
+  Session Review: every 10 bars → if EXIT_ALL → simulate market exit at current close
+
+Live:
+  Entry: agent picks target → place real TP limit order via broker
+         Order fills automatically when price hits target
+         SL order fills automatically if price hits SL
+  Session Review: every 10 bars → if EXIT_ALL → cancel TPs, place market orders
+
+Both use limit orders at exact prices. No next-bar-open compromise.
+No bar-delay slippage for individual exits. Session exits use market price (acceptable).
+```
 
 ---
 
@@ -163,8 +317,17 @@ Rules:
   - Session: 9:16 AM to 3:15 PM
   - Each trade risks exactly 1R
   - Episode ends: reach target_R, hit stop_R, or 3:15 PM
-  - Actions: ENTER/SKIP + HOLD/EXIT per position
   - target_R and stop_R randomized per episode
+
+  Entry Model (QR-DQN + PER):
+    - SKIP or ENTER_targetR at swing events
+    - Replay buffer seeded with Phase 0 BC transitions (kept permanently)
+    - Distributional Q-values learn return uncertainty per target level
+
+  Session Review Model (PPO):
+    - HOLD_ALL or EXIT_ALL every 10 bars
+    - Fine-tuned from Phase 0 BC actor with KL penalty (decaying)
+    - Outputs action probabilities for confidence-based decisions
 
   Clear win/lose conditions. Bounded game. Fast convergence.
 ```
@@ -189,7 +352,7 @@ If Phase 1 agent is profitable, Phase 2 may be unnecessary.
 
 ---
 
-## OPEN DECISIONS (still to finalize)
+## DECISIONS (6 finalized, 1 open)
 
 ### 1. Reward Function — FINALIZED
 
@@ -277,13 +440,78 @@ Same triggers, same features, same decision points. No distribution mismatch.
 - Training only on SL≈20 strikes avoids distribution mismatch
   (agent never sees SL=10, so can't develop preference for unavailable SL ranges)
 
-### Decision Timing (Exit) — OPEN
-- How often does agent evaluate open positions? (every bar? event-driven?)
-- To be discussed separately
+### Decision Timing (Exit) — FINALIZED
 
-### 3. Multi-Position Management — OPEN
-- 3 positions open + new swing breaks: one decision or separate?
-- How does agent express "exit position 2 but hold position 1"?
+**Two-layer exit system (see "Agent Architecture" section above for full details):**
+
+```
+Layer 1: Individual TP limit orders (set at entry by Entry Model)
+  → Automatic fill at exact target price. No per-bar checking.
+  → Captures intra-bar moves. Training = Live (both use limit orders).
+
+Layer 2: Session-level override (every 10 bars by Session Review Model)
+  → HOLD_ALL or EXIT_ALL based on cumulative picture.
+  → Overrides individual TPs when collective profit warrants booking everything.
+```
+
+**Key decisions made:**
+- **NOT per-bar HOLD/EXIT** — replaced with predictive targets (limit orders)
+- **Individual exits via TP limit orders** — agent predicts target R at entry, order fills automatically
+- **Session exits via periodic review** — every 10 bars, binary HOLD_ALL/EXIT_ALL
+- **Per-position features (A-D) still used** — but by Session Review Model context, not per-bar exit
+- **Training = Live parity** — both use limit orders at exact prices, no bar-delay slippage
+
+### 3. Multi-Position Management (Pyramiding) — FINALIZED
+
+**The pyramiding vision (core strategy):**
+The primary profit mechanism is NOT individual trades. It's pyramided positions moving together:
+```
+Position 1: Enter CE short at 150 → 1R risk, TP at +1.0R (limit at 130)
+  CE falls... Position 1 unrealized: +0.65R
+Position 2: New swing breaks → Enter CE short at 140 → 1R risk, TP at +1.0R (limit at 120)
+  CE falls... Position 1: +1.6R, Position 2: +1R
+Position 3: New swing breaks → Enter CE short at 125 → 1R risk, TP at +0.5R (limit at 115)
+  CE falls... Position 1: +2.3R, Position 2: +1.6R, Position 3: +0.65R
+
+COMBINED: +4.55R from 3R total risk = ballooning effect
+```
+
+**Why V1 can't pyramid:** After first entry, subsequent swing breaks fail filters (VWAP dropped,
+price out of range). V1 sits with 1 lonely position. No ballooning.
+
+**V2 solution:** No filter gates. Entry Model sees session state features:
+- `open_position_count = 1` → "I have one working position"
+- `total_unrealized_pnl_R = +0.5` → "My pyramid is profitable, keep building"
+- `is_lower_low = 1` → "Still trending"
+- Agent learns: adding when pyramid is profitable → bigger daily R
+
+**Individual TPs + Session Override together enable flexible exit:**
+```
+Example: 3 positions, all running
+  Position 3 TP fills at +0.5R (automatic, limit order)  ✓
+  Positions 1 & 2 still running, TPs not hit yet
+  Session Review: cumulative realized + unrealized = +2.5R
+    → Momentum fading → EXIT_ALL
+    → Cancel Pos 1 & 2 TPs → market exit → book remaining profit
+```
+
+**The complete pyramid lifecycle:**
+```
+PHASE 1 — BUILD (Entry Model):
+  Swing breaks → Entry Model picks target_R and adds positions
+  Each position gets: TP limit order (agent's target) + SL order (structural)
+  Agent learns: add when pyramid is profitable, skip when underwater
+
+PHASE 2 — HOLD (orders working):
+  TP and SL orders sit in market. No per-bar decisions.
+  Individual TPs fill automatically as targets are reached.
+  Session Review every 10 bars: mostly HOLD_ALL while things are working.
+
+PHASE 3 — HARVEST (Session Review override):
+  Cumulative picture is attractive OR momentum fading.
+  Session Review: EXIT_ALL → cancel remaining TPs → market exit all.
+  Or: individual TPs fill naturally → positions close one by one.
+```
 
 ### 4. Training Data Strategy — FINALIZED
 
@@ -299,10 +527,11 @@ GAP                     Nov 2023 - Feb 2026     ~567 days      MISSING
 Historify (ongoing)     Feb 2026 →              ~1 day/day     Collecting
 ```
 
-**Decision points per episode multiply effective data:**
-- ~5-15 swing breaks/day (entry decisions) + ~360 bar closes × open positions (exit decisions)
-- ~50-200 decision points per episode
-- 443 days → ~50K-90K decision points (marginal for RL, OK for Phase 0 behavior cloning)
+**Decision points per episode:**
+- ~5-15 swing breaks/day (Entry Model decisions)
+- ~36 session reviews/day (Session Review Model, every 10 bars when positions open)
+- ~20-50 decision points per episode
+- 443 days → ~10K-22K decision points (OK for Phase 0 behavior cloning, marginal for RL)
 
 **Data acquisition priority:**
 ```
@@ -328,12 +557,95 @@ Priority 3 (NOT NEEDED): Pre-2020
 **Why 1,010 days is enough:**
 - Phase 0 (behavior cloning) is supervised learning — very data-efficient, 443 days workable
 - Phase 1 (RL) starts from pre-trained policy — needs less data than from-scratch RL
-- State space is small (16 features) and action space is small (~4 discrete actions)
+- Entry Model: 18 features → 7 discrete actions (SKIP + 6 target levels)
+- Session Review: 18 features → 2 actions (HOLD_ALL / EXIT_ALL)
+- Both models are tiny (~50KB each)
 - 1,010 episodes with ~150K decision points is solid for this problem size
 
-### 5. Algorithm Choice — OPEN
-- DQN vs PPO vs A2C
-- Discrete action space
+### 5. Algorithm Choice — FINALIZED
+
+**Split algorithm strategy: different algorithms for each model.**
+
+#### Entry Model → QR-DQN + Prioritized Experience Replay (sb3-contrib)
+```
+Library:  sb3-contrib.QRDQN + PrioritizedReplayBuffer
+Why:
+  1. OFF-POLICY — replay buffer keeps Phase 0 BC data permanently.
+     Agent keeps learning from V1's examples throughout Phase 1.
+     PPO would discard BC data after first rollout batch.
+  2. DISTRIBUTIONAL Q-learning — learns full return distribution, not just mean.
+     Handles uncertainty: "will target 1.0R fill, or will SL hit?"
+     QR-DQN achieved 2.17x PPO's score in sparse-reward benchmarks (2025 study).
+  3. Q-VALUE = EXPECTED R — Q(state, ENTER_1.0R) directly answers
+     "what R-multiple do I expect if I enter with target 1.0R here?"
+  4. PER — oversamples rare trade-close transitions (high TD-error).
+     Addresses sparse rewards (most bars = 0 reward).
+```
+
+#### Session Review Model → PPO (SB3 core)
+```
+Library:  stable_baselines3.PPO
+Why:
+  1. ENOUGH DATA — 36 decisions/day × 1,000 days = 36,000 decision points.
+     PPO's on-policy data inefficiency is not a problem at this scale.
+  2. BINARY ACTION — 2-action policy gradient is very clean and stable.
+  3. CONFIDENCE OUTPUT — PPO outputs P(EXIT_ALL) = 0.85.
+     Useful in live: only exit when confidence > threshold.
+  4. STABILITY — PPO's clipping prevents flipping to always-EXIT or always-HOLD.
+  5. SIMPLEST — session review is the easier model. Keep it simple.
+```
+
+#### Why not the same algorithm for both?
+```
+DQN for Entry (critical):
+  Phase 0: 10K BC transitions stored in replay buffer
+  Phase 1: Buffer still contains ALL BC data → V1's knowledge persists
+  With only ~10K entry decision points, losing BC data is costly
+
+PPO for Session Review (sufficient):
+  36K decision points = enough for on-policy learning
+  Action probabilities enable confidence-based exit in live
+  Binary action = stable policy gradient, no overfitting risk
+```
+
+#### Algorithms evaluated and rejected:
+```
+A2C:           Dominated by PPO on all axes. No advantage. SKIP.
+SAC-Discrete:  Not in SB3 core (unmerged PR). BC warmstart awkward
+               (multi-network calibration problem). SKIP.
+Rainbow DQN:   Best empirical performance but not in SB3.
+               QR-DQN captures the most valuable component (distributional).
+               Full Rainbow = future aspiration if we outgrow SB3.
+DQN (vanilla): Works, but QR-DQN's distributional returns propagate
+               sparse reward signal more effectively. Use vanilla DQN
+               as fallback if QR-DQN proves complex.
+```
+
+#### Implementation sketch:
+```python
+# Entry Model
+from sb3_contrib import QRDQN
+entry_model = QRDQN(
+    "MlpPolicy", entry_env,
+    n_quantiles=50,
+    policy_kwargs=dict(net_arch=[128, 64]),
+    learning_rate=1e-4,
+    buffer_size=100_000,
+    learning_starts=1000,
+    batch_size=64,
+)
+
+# Session Review Model
+from stable_baselines3 import PPO
+session_model = PPO(
+    "MlpPolicy", session_env,
+    policy_kwargs=dict(net_arch=[64, 32]),
+    learning_rate=3e-4,
+    n_steps=2048,
+    clip_range=0.2,
+    ent_coef=0.01,
+)
+```
 
 ### 6. Evaluation Metrics — OPEN
 - What proves agent > V1?
@@ -391,6 +703,34 @@ Build backtest engine using actual SwingDetector + filter code to validate V1's 
 6. Live Deployment (after shadow validation)
    → Replace V1 filters + exit logic
    → Keep swing detection + SL placement unchanged
+```
+
+---
+
+## Infrastructure
+
+### Training Hardware
+- **GPU:** NVIDIA RTX 4060 Ti 16GB (Zotac Twin Edge) — desktop
+- **More than sufficient** — models are ~50KB each, 20K parameters total
+- Training estimate: 1,000 episodes in 5-30 minutes per run
+- Can run 100+ experiments in a single evening
+
+### Training Stack
+- **PyTorch** — model definition and training
+- **stable-baselines3** — PPO for Session Review Model
+- **sb3-contrib** — QR-DQN + PrioritizedReplayBuffer for Entry Model
+- **Gymnasium** — environment interface (replays bars, simulates orders)
+- **CUDA 12.x** — GPU acceleration
+
+### Complexity Check
+```
+Models:          2 tiny networks (~50KB each, 2-3 layers, 64-128 neurons)
+Decisions/day:   ~20-50 (not 360 — limit orders handle most exits)
+Code to write:   ~900 lines total
+  - Gym environment:     ~500 lines (replay bars, simulate TP/SL orders)
+  - Entry model:         ~100 lines (small network + PPO wrapper)
+  - Session review model: ~100 lines (even smaller network)
+  - Training script:     ~200 lines (standard PyTorch + stable-baselines3)
 ```
 
 ---
