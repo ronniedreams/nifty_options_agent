@@ -50,6 +50,8 @@ from .config import (
     BAR_PRUNING_THRESHOLD,
     MARKET_START_TIME,
     MARKET_CLOSE_TIME,
+    NO_DATA_STARTUP_TIMEOUT_MINUTES,
+    MARKET_OPEN_TIME,
 )
 
 logger = logging.getLogger(__name__)
@@ -1357,10 +1359,28 @@ class DataPipeline:
             return True, ""
 
         with self.lock:
-            # Skip check if no data received yet (startup phase)
+            # Check 0: No data received yet - but only allow grace period after market open
             if self.first_data_received_at is None:
-                return True, ""
-            
+                # Calculate time since market open
+                today = now.date()
+                market_open_datetime = datetime.combine(today, MARKET_OPEN_TIME)
+                market_open_datetime = IST.localize(market_open_datetime)
+
+                minutes_since_market_open = (now - market_open_datetime).total_seconds() / 60
+
+                if minutes_since_market_open < NO_DATA_STARTUP_TIMEOUT_MINUTES:
+                    # Still in startup grace period - don't alert yet
+                    return True, ""
+                else:
+                    # Grace period expired - no data received at all!
+                    self.watchdog_triggered = True
+                    logger.error(
+                        f"[WATCHDOG] NO DATA RECEIVED since market open! "
+                        f"Market opened {minutes_since_market_open:.0f} minutes ago. "
+                        f"WebSocket may be disconnected or auth failed."
+                    )
+                    return False, f"NO_DATA_SINCE_MARKET_OPEN:{minutes_since_market_open:.0f}min"
+
             # Check 1: Data coverage threshold
             total_symbols = len(self.subscribed_symbols)
             if total_symbols == 0:
