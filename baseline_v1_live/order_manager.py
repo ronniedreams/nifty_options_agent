@@ -40,6 +40,7 @@ from .config import (
     EMERGENCY_EXIT_RETRY_DELAY,
     DRY_RUN,
     MODIFICATION_THRESHOLD,
+    PAPER_TRADING,
 )
 
 logger = logging.getLogger(__name__)
@@ -621,79 +622,237 @@ class OrderManager:
         
         return False
     
-    def check_fills(self) -> List[Dict]:
+    def check_fills(self, current_prices: Optional[Dict[str, float]] = None) -> List[Dict]:
         """
         Check for filled orders by polling orderbook
-        
+
+        In PAPER_TRADING mode, simulates fills based on current prices when
+        price crosses the SL trigger level.
+
+        Args:
+            current_prices: Dict of symbol -> current LTP (required for paper trading simulation)
+
         Returns:
             List of newly filled order dicts
         """
         if DRY_RUN:
             return []  # No real fills in dry run
-        
+
         newly_filled = []
-        
+
+        # PAPER TRADING: Simulate fills based on price crossing trigger
+        if PAPER_TRADING and current_prices:
+            newly_filled.extend(self._simulate_paper_fills(current_prices))
+            self.last_orderbook_check = datetime.now(IST)
+            return newly_filled
+
         try:
             # Get orderbook
             response = self.client.orderbook()
-            
+
             if response.get('status') != 'success':
                 logger.error(f"Failed to fetch orderbook: {response}")
                 return []
-            
+
             orders = response.get('data', [])
-            
+
             # Check pending limit orders
             for symbol in list(self.pending_limit_orders.keys()):
                 order_info = self.pending_limit_orders[symbol]
                 order_id = order_info['order_id']
-                
+
                 # Find order in orderbook
                 order_details = self._find_order_status(orders, order_id)
-                
+
                 if not order_details:
                     continue
-                
-                # 🚨 CRITICAL: Explicit status validation
+
+                # CRITICAL: Explicit status validation
                 if order_details['status'] == 'rejected':
                     logger.error(
                         f"Order {order_id} REJECTED: {symbol} - {order_details['rejected_reason']}"
                     )
                     del self.pending_limit_orders[symbol]
                     continue
-                
+
                 if order_details['status'] == 'complete':
-                    # ✅ Use FILLED QUANTITY from broker, not intended quantity
+                    # Use FILLED QUANTITY from broker, not intended quantity
                     filled_qty = order_details['filled_quantity']
                     fill_price = order_details['average_price'] or order_info['limit_price']
-                    
+
                     filled_info = {
                         'symbol': symbol,
                         'order_id': order_id,
                         'fill_price': fill_price,
-                        'quantity': filled_qty,  # ✅ Actual filled quantity
+                        'quantity': filled_qty,  # Actual filled quantity
                         'filled_at': datetime.now(IST),
                         'candidate_info': order_info['candidate_info'],
                     }
-                    
+
                     newly_filled.append(filled_info)
                     self.filled_orders.append(filled_info)
-                    
+
                     # Remove from pending
                     del self.pending_limit_orders[symbol]
-                    
+
                     logger.info(
                         f"Order {order_id} FILLED: "
                         f"{symbol} {filled_qty} @ {fill_price:.2f} (intended: {order_info['quantity']})"
                     )
-            
+
             self.last_orderbook_check = datetime.now(IST)
-            
+
         except Exception as e:
             logger.error(f"Exception checking fills: {e}")
-        
+
         return newly_filled
-    
+
+    def _simulate_paper_fills(self, current_prices: Dict[str, float]) -> List[Dict]:
+        """
+        Simulate order fills for paper trading mode.
+
+        For SELL SL orders (short entry):
+        - Trigger activates when price FALLS to trigger_price
+        - Fill simulated at limit_price (assumes fill, not gap-through)
+
+        Args:
+            current_prices: Dict of symbol -> current LTP
+
+        Returns:
+            List of simulated fill dicts
+        """
+        simulated_fills = []
+
+        for option_type in list(self.pending_limit_orders.keys()):
+            order_info = self.pending_limit_orders[option_type]
+            symbol = order_info.get('symbol')
+
+            if not symbol:
+                continue
+
+            current_price = current_prices.get(symbol)
+            if current_price is None:
+                continue
+
+            trigger_price = order_info.get('trigger_price')
+            limit_price = order_info.get('limit_price')
+
+            if trigger_price is None or limit_price is None:
+                continue
+
+            # For SELL SL order: triggers when price falls to or below trigger
+            # This is a short entry - we want to sell when price drops
+            if current_price <= trigger_price:
+                # Order triggered! Simulate fill at limit price
+                # In reality, fill could be between trigger and limit, but we use limit for consistency
+                fill_price = limit_price
+                quantity = order_info['quantity']
+                order_id = order_info['order_id']
+
+                logger.info(
+                    f"[PAPER-FILL] {symbol}: Price {current_price:.2f} <= trigger {trigger_price:.2f}. "
+                    f"Simulating fill @ {fill_price:.2f}"
+                )
+
+                filled_info = {
+                    'symbol': symbol,
+                    'order_id': order_id,
+                    'fill_price': fill_price,
+                    'quantity': quantity,
+                    'filled_at': datetime.now(IST),
+                    'candidate_info': order_info.get('candidate_info', {}),
+                    'simulated': True,  # Mark as paper trade
+                }
+
+                simulated_fills.append(filled_info)
+                self.filled_orders.append(filled_info)
+
+                # Remove from pending
+                del self.pending_limit_orders[option_type]
+
+                logger.info(
+                    f"[PAPER-FILL] Order {order_id} SIMULATED FILL: "
+                    f"{symbol} {quantity} @ {fill_price:.2f}"
+                )
+
+        return simulated_fills
+
+    def _simulate_paper_fills_by_type(self, current_prices: Dict[str, float]) -> Dict:
+        """
+        Simulate order fills for paper trading mode, returning fills grouped by option type.
+
+        For SELL SL orders (short entry):
+        - Trigger activates when price FALLS to trigger_price
+        - Fill simulated at limit_price
+
+        Args:
+            current_prices: Dict of symbol -> current LTP
+
+        Returns:
+            {'CE': fill_info_or_None, 'PE': fill_info_or_None}
+        """
+        fills = {'CE': None, 'PE': None}
+
+        for option_type in list(self.pending_limit_orders.keys()):
+            order_info = self.pending_limit_orders[option_type]
+
+            # Validate order_info is a dict
+            if not isinstance(order_info, dict):
+                logger.error(f"[PAPER-FILL] Invalid order_info for {option_type}: {type(order_info)}")
+                continue
+
+            symbol = order_info.get('symbol')
+            if not symbol:
+                continue
+
+            # Skip in-flight orders
+            if order_info.get('order_id') == 'PLACING' or order_info.get('status') == 'in_flight':
+                continue
+
+            current_price = current_prices.get(symbol)
+            if current_price is None:
+                continue
+
+            trigger_price = order_info.get('trigger_price')
+            limit_price = order_info.get('limit_price')
+
+            if trigger_price is None or limit_price is None:
+                continue
+
+            # For SELL SL order: triggers when price falls to or below trigger
+            if current_price <= trigger_price:
+                fill_price = limit_price
+                quantity = order_info['quantity']
+                order_id = order_info['order_id']
+
+                logger.info(
+                    f"[PAPER-FILL] {symbol}: Price {current_price:.2f} <= trigger {trigger_price:.2f}. "
+                    f"Simulating fill @ {fill_price:.2f}"
+                )
+
+                fill_info = {
+                    'option_type': option_type,
+                    'symbol': symbol,
+                    'order_id': order_id,
+                    'fill_price': fill_price,
+                    'quantity': quantity,
+                    'candidate_info': order_info.get('candidate_info', {}),
+                    'fill_time': datetime.now(IST),
+                    'simulated': True,
+                }
+
+                fills[option_type] = fill_info
+                self.filled_orders.append(fill_info)
+
+                # Remove from pending
+                del self.pending_limit_orders[option_type]
+
+                logger.info(
+                    f"[PAPER-FILL-{option_type}] {symbol} @ {fill_price:.2f} QTY {quantity}"
+                )
+
+        return fills
+
     def _find_order_status(self, orders: List[Dict], order_id: str) -> Optional[Dict]:
         """Find order details in orderbook response
         
@@ -1172,9 +1331,15 @@ class OrderManager:
             logger.error(f"Error modifying order: {e}")
             return False
     
-    def check_fills_by_type(self) -> Dict:
+    def check_fills_by_type(self, current_prices: Optional[Dict[str, float]] = None) -> Dict:
         """
         Check for filled orders, grouped by option type
+
+        In PAPER_TRADING mode, simulates fills based on current prices when
+        price crosses the SL trigger level.
+
+        Args:
+            current_prices: Dict of symbol -> current LTP (required for paper trading simulation)
 
         Returns:
             {'CE': fill_info_or_None, 'PE': fill_info_or_None}
@@ -1183,6 +1348,10 @@ class OrderManager:
 
         if not self.pending_limit_orders:
             return fills  # No pending orders to check
+
+        # PAPER TRADING: Simulate fills based on price crossing trigger
+        if PAPER_TRADING and current_prices:
+            return self._simulate_paper_fills_by_type(current_prices)
 
         try:
             response = self.client.orderbook()

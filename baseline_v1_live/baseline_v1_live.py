@@ -850,6 +850,8 @@ class BaselineV1Live:
                 if pending_symbol:
                     pending_symbols.add(pending_symbol)
         self.continuous_filter.set_pending_order_symbols(pending_symbols)
+        if pending_symbols:
+            logger.debug(f"[DEBUG-PENDING] Set pending symbols before swing detection: {pending_symbols}")
 
         new_bars_dict = {}
         for symbol, bar in latest_bars.items():
@@ -1102,10 +1104,9 @@ class BaselineV1Live:
                     )
                     self._pending_switch[option_type] = None
         
-        # 6. Check for order fills
-        fills = self.order_manager.check_fills_by_type()
-
+        # 6. Check for order fills (pass current prices for paper trading simulation)
         current_prices = {symbol: bar.close for symbol, bar in latest_bars.items()}
+        fills = self.order_manager.check_fills_by_type(current_prices)
 
         for option_type in ['CE', 'PE']:
             if fills[option_type]:
