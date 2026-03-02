@@ -352,7 +352,7 @@ If Phase 1 agent is profitable, Phase 2 may be unnecessary.
 
 ---
 
-## DECISIONS (6 finalized, 1 open)
+## DECISIONS (6 finalized, 1 blocked)
 
 ### 1. Reward Function — FINALIZED
 
@@ -647,8 +647,12 @@ session_model = PPO(
 )
 ```
 
-### 6. Evaluation Metrics — OPEN
-- What proves agent > V1?
+### 6. Evaluation Metrics — BLOCKED (waiting on V1 backtest results)
+- Cannot finalize until we know V1's actual performance
+- V1's claimed ~1.12R/day is unverified — need real backtest numbers
+- **Prerequisite:** Clean Dinesh data → build backtest engine → backtest V1 over 9-month period
+- Once V1's actual daily R, win rate, drawdown are known → set V2 targets relative to those
+- Evaluation metrics will be finalized after Implementation Step 1 (Backtest Engine)
 
 ---
 
@@ -675,32 +679,41 @@ Build backtest engine using actual SwingDetector + filter code to validate V1's 
 ## Implementation Sequence
 
 ```
-1. Backtest Engine (validate V1 — MUST DO FIRST)
-   → Answers: "Does V1 actually work?"
-   → Uses same SwingDetector, same filters
-   → Realistic slippage + brokerage
+1. Data Preparation (MUST DO FIRST)
+   → Clean Dinesh data (Jan 2022 - Mar 2023, 29K CSVs)
+   → Merge with rl_dataset_v2 (Feb - Nov 2023)
+   → Output: one comprehensive file with 1-min OHLCV for all symbols + NIFTY spot
 
-2. RL Environment (Gym interface)
+2. Backtest Engine (validate V1)
+   → Answers: "Does V1 actually work? What are the real numbers?"
+   → Uses same SwingDetector, same filters, same position sizing
+   → Realistic slippage + brokerage
+   → Output: V1's actual daily R, win rate, drawdown, pyramiding stats
+   → These numbers become V2's evaluation targets
+
+3. RL Environment (Gym interface)
    → Replay historical bars through SwingDetector
    → Agent receives features at each decision point
-   → Simulated execution with slippage
+   → Simulated TP/SL limit orders with realistic slippage
 
-3. Phase 0: Behavior Cloning (supervised pre-training)
-   → Replay data through V1 logic, generate ENTER/SKIP/HOLD/EXIT labels
-   → Train agent to imitate V1 via supervised learning
+4. Phase 0: Behavior Cloning (supervised pre-training)
+   → Replay data through V1 logic, generate ENTER/SKIP labels + target R labels
+   → Entry Model: pre-train QR-DQN Q-network, seed replay buffer with BC transitions
+   → Session Review Model: pre-train PPO actor as binary classifier
    → Solves lazy agent problem — agent starts from a trading policy
 
-4. Phase 1: RL Fine-Tuning (fixed game)
-   → Start from Phase 0 pre-trained policy
+5. Phase 1: RL Fine-Tuning (fixed game)
+   → Entry Model: QR-DQN fine-tuning (BC data stays in replay buffer)
+   → Session Review Model: PPO fine-tuning with decaying KL penalty
    → Goal-conditioned with randomized ±target/stop
    → Curriculum: start tight, widen over training
 
-5. Shadow Mode (paper trade alongside V1)
+6. Shadow Mode (paper trade alongside V1)
    → V1 makes real decisions
    → Agent logs what it would do
-   → Compare: daily R, win rate, drawdown
+   → Compare: daily R, win rate, drawdown against V1 backtest numbers
 
-6. Live Deployment (after shadow validation)
+7. Live Deployment (after shadow validation)
    → Replace V1 filters + exit logic
    → Keep swing detection + SL placement unchanged
 ```
