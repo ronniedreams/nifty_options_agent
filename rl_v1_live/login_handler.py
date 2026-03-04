@@ -35,25 +35,35 @@ UPSTOX_LOGIN = "https://login.upstox.com"
 # Internal redirect URI used by Upstox during login flow
 UPSTOX_INTERNAL_REDIRECT = "https://api-v2.upstox.com/login/authorization/redirect"
 
-# Browser-like headers (Upstox may block non-browser requests)
-BROWSER_HEADERS = {
-    "accept": "*/*",
-    "accept-language": "en-GB,en;q=0.9",
-    "content-type": "application/json",
-    "origin": UPSTOX_LOGIN,
-    "referer": f"{UPSTOX_LOGIN}/",
-    "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-site",
-    "user-agent": (
+# Browser-like headers (Upstox requires x-device-details or rejects requests)
+def _build_browser_headers(request_id: str) -> dict:
+    """Build browser-like headers with a unique device UUID."""
+    uuid_str = "".join(random.choices(string.ascii_letters + string.digits, k=20))
+    ua = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/131.0.0.0 Safari/537.36"
-    ),
-}
+    )
+    return {
+        "accept": "*/*",
+        "accept-language": "en-GB,en;q=0.9",
+        "content-type": "application/json",
+        "origin": UPSTOX_LOGIN,
+        "referer": f"{UPSTOX_LOGIN}/",
+        "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site",
+        "user-agent": ua,
+        "x-device-details": (
+            f"platform=WEB|osName=Windows/10|osVersion=Chrome/131.0.0.0|"
+            f"appVersion=4.0.0|modelName=Chrome|manufacturer=Unknown|"
+            f"uuid={uuid_str}|userAgent=Upstox 3.0 {ua}"
+        ),
+        "x-request-id": request_id,
+    }
 
 
 def _generate_request_id() -> str:
@@ -70,10 +80,9 @@ class LoginHandlerV1:
         # OpenAlgo session (for dashboard auth + callback)
         self.oa_session = requests.Session()
         # Upstox session (for broker OAuth flow)
-        self.upstox_session = requests.Session()
-        self.upstox_session.headers.update(BROWSER_HEADERS)
         self._request_id = _generate_request_id()
-        self.upstox_session.headers["x-request-id"] = self._request_id
+        self.upstox_session = requests.Session()
+        self.upstox_session.headers.update(_build_browser_headers(self._request_id))
 
     # ------------------------------------------------------------------
     # OpenAlgo dashboard auth (reused from baseline pattern)
