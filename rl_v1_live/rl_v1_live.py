@@ -856,6 +856,10 @@ def main():
         from baseline_v1_live.auto_detector import AutoDetector
         from baseline_v1_live.config import OPENALGO_API_KEY as BASE_API_KEY, OPENALGO_HOST as BASE_HOST
 
+        # Initialize Telegram early for startup notifications
+        from .telegram_notifier import TelegramNotifierV3
+        tg = TelegramNotifierV3()
+
         # Upstox auto-login if configured
         if AUTOMATED_LOGIN and PAPER_TRADING:
             required = [UPSTOX_MOBILE, UPSTOX_PIN, UPSTOX_TOTP_SECRET,
@@ -867,7 +871,7 @@ def main():
                         OPENALGO_USERNAME, OPENALGO_PASSWORD,
                     )
                     handler = LoginHandlerV1(UPSTOX_OPENALGO_HOST)
-                    handler.auto_login(
+                    login_ok = handler.auto_login(
                         mobile=UPSTOX_MOBILE,
                         password=UPSTOX_PASSWORD,
                         pin=UPSTOX_PIN,
@@ -878,10 +882,16 @@ def main():
                         openalgo_username=OPENALGO_USERNAME,
                         openalgo_password=OPENALGO_PASSWORD,
                     )
+                    if login_ok:
+                        tg.send_message("[RL-V1] Upstox auto-login successful")
+                    else:
+                        tg.send_error("[RL-V1] Upstox auto-login FAILED - manual login required")
                 except Exception as e:
                     logger.warning(f"[RL-V1-AUTO] Upstox auto-login failed: {e}")
+                    tg.send_error(f"[RL-V1] Upstox auto-login exception: {e}")
             else:
                 logger.warning("[RL-V1-AUTO] Upstox auto-login: missing credentials")
+                tg.send_error("[RL-V1] Upstox auto-login: missing credentials in .env")
 
         # Wait for market open and first candle
         now = datetime.now(IST)
@@ -895,7 +905,12 @@ def main():
             sys.exit(0)
         elif now < auto_detect_time:
             wait_seconds = (auto_detect_time - now).total_seconds()
+            wait_min = int(wait_seconds / 60)
             logger.info(f"[RL-V1-AUTO] Waiting {wait_seconds:.0f}s for 9:16 AM...")
+            tg.send_message(
+                f"[RL-V1] Waiting for market open and first candle to close... "
+                f"({wait_min} min until 9:16 AM)"
+            )
             time.sleep(wait_seconds)
 
         # Auto-detect ATM and expiry using baseline's AutoDetector
