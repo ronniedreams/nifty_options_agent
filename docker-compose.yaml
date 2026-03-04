@@ -82,6 +82,70 @@ services:
         max-size: "50m"
         max-file: "5"
 
+  # OpenAlgo Upstox (V3 Agent Orders)
+  openalgo_upstox:
+    build:
+      context: ./openalgo-upstox/openalgo
+    container_name: openalgo_upstox
+    ports:
+      - "5002:5000"
+    volumes:
+      - ./openalgo-upstox/openalgo/.env:/app/.env:ro
+      - ./data/openalgo_upstox_db:/app/db
+      - ./data/openalgo_upstox_logs:/app/log
+    environment:
+      - FLASK_ENV=production
+    restart: unless-stopped
+    healthcheck:
+      test: python -c "import socket; s=socket.socket(); s.connect(('localhost', 5000)); s.close()"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ML V3 RL Trading Agent (QR-DQN)
+  ml_v3_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.v3
+    container_name: ml_v3_agent
+    depends_on:
+      openalgo:
+        condition: service_healthy
+      openalgo_angelone:
+        condition: service_healthy
+      openalgo_upstox:
+        condition: service_healthy
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./ml_v3_live/logs:/app/ml_v3_live/logs
+      - ./data/v3_trading_state:/app/state
+      - ./results/rl_models_v3:/app/models:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - V3_STATE_DB_PATH=/app/state/v3_state.db
+      - V3_STATE_DIR=/app/state
+      - OPENALGO_HOST=http://openalgo:5000
+      - OPENALGO_WS_URL=ws://openalgo:8765
+      - ANGELONE_HOST=http://openalgo_angelone:5000
+      - ANGELONE_WS_URL=ws://openalgo_angelone:8766
+      - UPSTOX_OPENALGO_HOST=http://openalgo_upstox:5000
+      - UPSTOX_OPENALGO_API_KEY=${UPSTOX_OPENALGO_API_KEY}
+      - V3_TELEGRAM_ENABLED=${V3_TELEGRAM_ENABLED:-true}
+      - V3_TELEGRAM_BOT_TOKEN=${V3_TELEGRAM_BOT_TOKEN}
+      - V3_TELEGRAM_CHAT_ID=${V3_TELEGRAM_CHAT_ID}
+      - V3_MODEL_PATH=/app/models/best_model.zip
+      - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-true}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+    restart: unless-stopped
+    command: python -m ml_v3_live --auto
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
   # Optional: Monitor Dashboard
   monitor:
     build:

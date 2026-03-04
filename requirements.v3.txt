@@ -1,0 +1,30 @@
+# ML V3 Live Trading Agent Requirements
+
+# Core dependencies (shared with baseline)
+pandas>=2.2.0
+numpy>=2.0.0
+pytz>=2023.3
+python-dotenv>=1.0.0
+
+# OpenAlgo Python SDK
+openalgo>=1.0.45
+
+# Telegram notifications
+requests>=2.31.0
+
+# Utilities
+python-dateutil>=2.8.2
+
+# TOTP authentication
+pyotp>=2.9.0
+
+# RL model inference — PyTorch CPU only (smaller image)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
+
+# Stable Baselines 3 + contrib (QR-DQN)
+stable-baselines3>=2.3.0
+sb3-contrib>=2.3.0
+
+# Gymnasium (required by SB3)
+gymnasium>=0.29.0
