@@ -1,4 +1,4 @@
-# Dockerfile for ML V3 Live Trading Agent (QR-DQN with PyTorch CPU)
+# Dockerfile for RL V1 Live Trading Agent (QR-DQN with PyTorch CPU)
 FROM python:3.11-slim
 
 # Set working directory
@@ -12,12 +12,12 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for layer caching
-COPY requirements.v3.txt .
-RUN pip install --no-cache-dir -r requirements.v3.txt
+COPY requirements.rl_v1.txt .
+RUN pip install --no-cache-dir -r requirements.rl_v1.txt
 
 # Copy baseline (V3 imports from it) and V3 application code
 COPY baseline_v1_live/ ./baseline_v1_live/
-COPY ml_v3_live/ ./ml_v3_live/
+COPY rl_v1_live/ ./rl_v1_live/
 
 # Create directories for logs, state, and models
 RUN mkdir -p /app/logs /app/state /app/models
@@ -31,7 +31,7 @@ ENV MKL_NUM_THREADS=1
 
 # Healthcheck
 HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import os; exit(0 if os.path.exists('/app/state/v3_state.db') else 1)"
+    CMD python -c "import os; exit(0 if os.path.exists('/app/state/rl_v1_state.db') else 1)"
 
 # Default command
-CMD ["python", "-m", "ml_v3_live", "--auto"]
+CMD ["python", "-m", "rl_v1_live", "--auto"]

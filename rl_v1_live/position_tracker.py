@@ -120,7 +120,7 @@ class PositionTrackerV3:
             self._trade_log.append(record)
 
             logger.info(
-                f"[V3-EXIT] {pos.symbol} {exit_reason}: "
+                f"[RL-V1-EXIT] {pos.symbol} {exit_reason}: "
                 f"Entry={pos.entry_price:.2f} Exit={exit_price:.2f} "
                 f"R={realized_R:+.2f} PnL={pnl:+.0f} "
                 f"CumR={self.cumulative_R:+.2f}"
@@ -142,7 +142,7 @@ class PositionTrackerV3:
                 exit_price = bar['close']
             else:
                 exit_price = pos.entry_price
-                logger.warning(f"[V3-EXIT] No bar for {pos.symbol}, using entry price")
+                logger.warning(f"[RL-V1-EXIT] No bar for {pos.symbol}, using entry price")
 
             if pos.actual_R_value > 0:
                 realized_R = (
@@ -188,7 +188,7 @@ class PositionTrackerV3:
             self._trade_log.append(record)
 
             logger.info(
-                f"[V3-EXIT] {pos.symbol} {exit_reason}: "
+                f"[RL-V1-EXIT] {pos.symbol} {exit_reason}: "
                 f"Entry={pos.entry_price:.2f} Exit={exit_price:.2f} "
                 f"R={realized_R:+.2f} PnL={pnl:+.0f} "
                 f"CumR={self.cumulative_R:+.2f}"

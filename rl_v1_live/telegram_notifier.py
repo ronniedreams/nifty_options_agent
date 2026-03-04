@@ -1,7 +1,7 @@
 """
 Telegram Notifier for V3 Live Trading
 
-Uses separate bot tokens from baseline. All messages prefixed with [V3].
+Uses separate bot tokens from baseline. All messages prefixed with [RL-V1].
 Fire-and-forget async sends (same pattern as baseline TelegramNotifier).
 """
 
@@ -14,9 +14,9 @@ import pytz
 import requests
 
 from .config import (
-    V3_TELEGRAM_ENABLED,
-    V3_TELEGRAM_BOT_TOKEN,
-    V3_TELEGRAM_CHAT_ID,
+    RLV1_TELEGRAM_ENABLED,
+    RLV1_TELEGRAM_BOT_TOKEN,
+    RLV1_TELEGRAM_CHAT_ID,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,20 +27,20 @@ class TelegramNotifierV3:
     """Send V3 trading notifications via Telegram (separate bot)."""
 
     def __init__(self, instance_name: str = None):
-        self.enabled = V3_TELEGRAM_ENABLED
-        self.bot_token = V3_TELEGRAM_BOT_TOKEN
-        self.chat_id = V3_TELEGRAM_CHAT_ID
+        self.enabled = RLV1_TELEGRAM_ENABLED
+        self.bot_token = RLV1_TELEGRAM_BOT_TOKEN
+        self.chat_id = RLV1_TELEGRAM_CHAT_ID
         self.instance_name = instance_name or os.getenv("INSTANCE_NAME", "UNKNOWN")
 
         if self.enabled:
             if not self.bot_token or not self.chat_id:
-                logger.warning("[V3-TG] Telegram enabled but token/chat_id not configured")
+                logger.warning("[RL-V1-TG] Telegram enabled but token/chat_id not configured")
                 self.enabled = False
             else:
-                logger.info(f"[V3-TG] Notifications enabled (instance: {self.instance_name})")
+                logger.info(f"[RL-V1-TG] Notifications enabled (instance: {self.instance_name})")
 
     def _prefix(self) -> str:
-        return f"[{self.instance_name}] [V3]"
+        return f"[{self.instance_name}] [RL-V1]"
 
     def _send_async(self, message: str):
         """Send message in a background thread (fire-and-forget)."""
@@ -62,9 +62,9 @@ class TelegramNotifierV3:
             }
             response = requests.post(url, json=payload, timeout=10)
             if response.status_code != 200:
-                logger.warning(f"[V3-TG] Send failed: {response.status_code}")
+                logger.warning(f"[RL-V1-TG] Send failed: {response.status_code}")
         except Exception as e:
-            logger.warning(f"[V3-TG] Send error: {e}")
+            logger.warning(f"[RL-V1-TG] Send error: {e}")
 
     def send_startup(self, expiry: str, atm: int, model_path: str):
         now = datetime.now(IST).strftime('%H:%M:%S')

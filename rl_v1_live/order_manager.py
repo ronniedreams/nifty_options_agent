@@ -21,7 +21,7 @@ from .config import (
     UPSTOX_OPENALGO_API_KEY,
     EXCHANGE,
     PRODUCT_TYPE,
-    V3_STRATEGY_NAME,
+    RLV1_STRATEGY_NAME,
     SL_TRIGGER_PRICE_OFFSET,
     SL_LIMIT_PRICE_OFFSET,
     MAX_ORDER_RETRIES,
@@ -54,16 +54,16 @@ class OrderManagerV3:
 
     def _init_client(self):
         if not self.api_key:
-            logger.warning("[V3-ORDER] No Upstox API key configured")
+            logger.warning("[RL-V1-ORDER] No Upstox API key configured")
             return
         try:
             self.client = OpenAlgoClient(
                 api_key=self.api_key,
                 host=self.host,
             )
-            logger.info(f"[V3-ORDER] OpenAlgo client initialized: {self.host}")
+            logger.info(f"[RL-V1-ORDER] OpenAlgo client initialized: {self.host}")
         except Exception as e:
-            logger.error(f"[V3-ORDER] Failed to init OpenAlgo client: {e}")
+            logger.error(f"[RL-V1-ORDER] Failed to init OpenAlgo client: {e}")
             self.client = None
 
     def _retry_call(self, func, *args, **kwargs):
@@ -74,11 +74,11 @@ class OrderManagerV3:
                 return result
             except Exception as e:
                 logger.warning(
-                    f"[V3-ORDER] Attempt {attempt}/{MAX_ORDER_RETRIES} failed: {e}"
+                    f"[RL-V1-ORDER] Attempt {attempt}/{MAX_ORDER_RETRIES} failed: {e}"
                 )
                 if attempt < MAX_ORDER_RETRIES:
                     time.sleep(ORDER_RETRY_DELAY)
-        logger.error(f"[V3-ORDER] All {MAX_ORDER_RETRIES} attempts failed")
+        logger.error(f"[RL-V1-ORDER] All {MAX_ORDER_RETRIES} attempts failed")
         return None
 
     def place_market_entry(self, symbol: str, quantity: int) -> Optional[str]:
@@ -92,18 +92,18 @@ class OrderManagerV3:
             Order ID string, or None on failure
         """
         if DRY_RUN:
-            logger.info(f"[V3-ORDER] DRY_RUN: SELL MARKET {symbol} qty={quantity}")
+            logger.info(f"[RL-V1-ORDER] DRY_RUN: SELL MARKET {symbol} qty={quantity}")
             return "DRY_RUN_ENTRY"
 
         if not self.client:
-            logger.error("[V3-ORDER] No client — cannot place entry order")
+            logger.error("[RL-V1-ORDER] No client — cannot place entry order")
             return None
 
-        logger.info(f"[V3-ORDER] Placing SELL MARKET {symbol} qty={quantity}")
+        logger.info(f"[RL-V1-ORDER] Placing SELL MARKET {symbol} qty={quantity}")
 
         response = self._retry_call(
             self.client.placeorder,
-            strategy=V3_STRATEGY_NAME,
+            strategy=RLV1_STRATEGY_NAME,
             symbol=symbol,
             action="SELL",
             exchange=EXCHANGE,
@@ -114,9 +114,9 @@ class OrderManagerV3:
 
         order_id = self._extract_order_id(response)
         if order_id:
-            logger.info(f"[V3-ORDER] Entry order placed: {order_id}")
+            logger.info(f"[RL-V1-ORDER] Entry order placed: {order_id}")
         else:
-            logger.error(f"[V3-ORDER] Entry order failed: {response}")
+            logger.error(f"[RL-V1-ORDER] Entry order failed: {response}")
         return order_id
 
     def place_sl_order(self, symbol: str, quantity: int,
@@ -135,23 +135,23 @@ class OrderManagerV3:
 
         if DRY_RUN:
             logger.info(
-                f"[V3-ORDER] DRY_RUN: BUY SL {symbol} qty={quantity} "
+                f"[RL-V1-ORDER] DRY_RUN: BUY SL {symbol} qty={quantity} "
                 f"trigger={sl_trigger:.2f} limit={limit_price:.2f}"
             )
             return "DRY_RUN_SL"
 
         if not self.client:
-            logger.error("[V3-ORDER] No client — cannot place SL order")
+            logger.error("[RL-V1-ORDER] No client — cannot place SL order")
             return None
 
         logger.info(
-            f"[V3-ORDER] Placing BUY SL {symbol} qty={quantity} "
+            f"[RL-V1-ORDER] Placing BUY SL {symbol} qty={quantity} "
             f"trigger={sl_trigger:.2f} limit={limit_price:.2f}"
         )
 
         response = self._retry_call(
             self.client.placeorder,
-            strategy=V3_STRATEGY_NAME,
+            strategy=RLV1_STRATEGY_NAME,
             symbol=symbol,
             action="BUY",
             exchange=EXCHANGE,
@@ -164,9 +164,9 @@ class OrderManagerV3:
 
         order_id = self._extract_order_id(response)
         if order_id:
-            logger.info(f"[V3-ORDER] SL order placed: {order_id}")
+            logger.info(f"[RL-V1-ORDER] SL order placed: {order_id}")
         else:
-            logger.error(f"[V3-ORDER] SL order failed: {response}")
+            logger.error(f"[RL-V1-ORDER] SL order failed: {response}")
         return order_id
 
     def cancel_order(self, order_id: str) -> bool:
@@ -175,26 +175,26 @@ class OrderManagerV3:
         Returns True on success, False on failure.
         """
         if DRY_RUN:
-            logger.info(f"[V3-ORDER] DRY_RUN: Cancel order {order_id}")
+            logger.info(f"[RL-V1-ORDER] DRY_RUN: Cancel order {order_id}")
             return True
 
         if not self.client:
-            logger.error("[V3-ORDER] No client — cannot cancel order")
+            logger.error("[RL-V1-ORDER] No client — cannot cancel order")
             return False
 
-        logger.info(f"[V3-ORDER] Cancelling order {order_id}")
+        logger.info(f"[RL-V1-ORDER] Cancelling order {order_id}")
 
         response = self._retry_call(
             self.client.cancelorder,
             order_id=order_id,  # keyword is order_id (underscore)
-            strategy=V3_STRATEGY_NAME,
+            strategy=RLV1_STRATEGY_NAME,
         )
 
         if response and self._is_success(response):
-            logger.info(f"[V3-ORDER] Cancel confirmed: {order_id}")
+            logger.info(f"[RL-V1-ORDER] Cancel confirmed: {order_id}")
             return True
         else:
-            logger.error(f"[V3-ORDER] Cancel failed: {order_id} -> {response}")
+            logger.error(f"[RL-V1-ORDER] Cancel failed: {order_id} -> {response}")
             return False
 
     def place_market_exit(self, symbol: str, quantity: int) -> Optional[str]:
@@ -203,18 +203,18 @@ class OrderManagerV3:
         Used for: EXIT_ALL, STOP_SESSION, daily limits, force close.
         """
         if DRY_RUN:
-            logger.info(f"[V3-ORDER] DRY_RUN: BUY MARKET {symbol} qty={quantity}")
+            logger.info(f"[RL-V1-ORDER] DRY_RUN: BUY MARKET {symbol} qty={quantity}")
             return "DRY_RUN_EXIT"
 
         if not self.client:
-            logger.error("[V3-ORDER] No client — cannot place exit order")
+            logger.error("[RL-V1-ORDER] No client — cannot place exit order")
             return None
 
-        logger.info(f"[V3-ORDER] Placing BUY MARKET {symbol} qty={quantity}")
+        logger.info(f"[RL-V1-ORDER] Placing BUY MARKET {symbol} qty={quantity}")
 
         response = self._retry_call(
             self.client.placeorder,
-            strategy=V3_STRATEGY_NAME,
+            strategy=RLV1_STRATEGY_NAME,
             symbol=symbol,
             action="BUY",
             exchange=EXCHANGE,
@@ -225,9 +225,9 @@ class OrderManagerV3:
 
         order_id = self._extract_order_id(response)
         if order_id:
-            logger.info(f"[V3-ORDER] Exit order placed: {order_id}")
+            logger.info(f"[RL-V1-ORDER] Exit order placed: {order_id}")
         else:
-            logger.error(f"[V3-ORDER] Exit order failed: {response}")
+            logger.error(f"[RL-V1-ORDER] Exit order failed: {response}")
         return order_id
 
     def get_orderbook(self) -> list:
@@ -236,7 +236,7 @@ class OrderManagerV3:
             return []
 
         try:
-            response = self.client.orderbook(strategy=V3_STRATEGY_NAME)
+            response = self.client.orderbook(strategy=RLV1_STRATEGY_NAME)
             if isinstance(response, list):
                 return response
             if isinstance(response, dict) and 'data' in response:
@@ -244,7 +244,7 @@ class OrderManagerV3:
                 return data if isinstance(data, list) else []
             return []
         except Exception as e:
-            logger.error(f"[V3-ORDER] Orderbook fetch failed: {e}")
+            logger.error(f"[RL-V1-ORDER] Orderbook fetch failed: {e}")
             return []
 
     def get_positionbook(self) -> list:
@@ -253,7 +253,7 @@ class OrderManagerV3:
             return []
 
         try:
-            response = self.client.positionbook(strategy=V3_STRATEGY_NAME)
+            response = self.client.positionbook(strategy=RLV1_STRATEGY_NAME)
             if isinstance(response, list):
                 return response
             if isinstance(response, dict) and 'data' in response:
@@ -261,7 +261,7 @@ class OrderManagerV3:
                 return data if isinstance(data, list) else []
             return []
         except Exception as e:
-            logger.error(f"[V3-ORDER] Positionbook fetch failed: {e}")
+            logger.error(f"[RL-V1-ORDER] Positionbook fetch failed: {e}")
             return []
 
     def shift_sl_order(self, old_sl_order_id: Optional[str],
@@ -279,7 +279,7 @@ class OrderManagerV3:
             cancelled = self.cancel_order(old_sl_order_id)
             if not cancelled:
                 logger.warning(
-                    f"[V3-ORDER] Could not cancel old SL {old_sl_order_id}, "
+                    f"[RL-V1-ORDER] Could not cancel old SL {old_sl_order_id}, "
                     f"placing new SL anyway"
                 )
 

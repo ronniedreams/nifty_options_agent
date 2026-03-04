@@ -103,12 +103,12 @@ services:
       retries: 5
       start_period: 30s
 
-  # ML V3 RL Trading Agent (QR-DQN)
-  ml_v3_agent:
+  # RL V1 RL Trading Agent (QR-DQN)
+  rl_v1_agent:
     build:
       context: .
-      dockerfile: Dockerfile.v3
-    container_name: ml_v3_agent
+      dockerfile: Dockerfile.rl_v1
+    container_name: rl_v1_agent
     depends_on:
       openalgo:
         condition: service_healthy
@@ -118,28 +118,28 @@ services:
         condition: service_healthy
     volumes:
       - ./.env:/app/.env:ro
-      - ./ml_v3_live/logs:/app/ml_v3_live/logs
-      - ./data/v3_trading_state:/app/state
-      - ./results/rl_models_v3:/app/models:ro
+      - ./rl_v1_live/logs:/app/rl_v1_live/logs
+      - ./data/rl_v1_trading_state:/app/state
+      - ./results/rl_models_v1:/app/models:ro
     environment:
       - PYTHONUNBUFFERED=1
-      - V3_STATE_DB_PATH=/app/state/v3_state.db
-      - V3_STATE_DIR=/app/state
+      - RLV1_STATE_DB_PATH=/app/state/rl_v1_state.db
+      - RLV1_STATE_DIR=/app/state
       - OPENALGO_HOST=http://openalgo:5000
       - OPENALGO_WS_URL=ws://openalgo:8765
       - ANGELONE_HOST=http://openalgo_angelone:5000
       - ANGELONE_WS_URL=ws://openalgo_angelone:8766
       - UPSTOX_OPENALGO_HOST=http://openalgo_upstox:5000
       - UPSTOX_OPENALGO_API_KEY=${UPSTOX_OPENALGO_API_KEY}
-      - V3_TELEGRAM_ENABLED=${V3_TELEGRAM_ENABLED:-true}
-      - V3_TELEGRAM_BOT_TOKEN=${V3_TELEGRAM_BOT_TOKEN}
-      - V3_TELEGRAM_CHAT_ID=${V3_TELEGRAM_CHAT_ID}
-      - V3_MODEL_PATH=/app/models/best_model.zip
+      - RLV1_TELEGRAM_ENABLED=${RLV1_TELEGRAM_ENABLED:-true}
+      - RLV1_TELEGRAM_BOT_TOKEN=${RLV1_TELEGRAM_BOT_TOKEN}
+      - RLV1_TELEGRAM_CHAT_ID=${RLV1_TELEGRAM_CHAT_ID}
+      - RLV1_MODEL_PATH=/app/models/best_model.zip
       - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-true}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
     restart: unless-stopped
-    command: python -m ml_v3_live --auto
+    command: python -m rl_v1_live --auto
     logging:
       driver: "json-file"
       options:

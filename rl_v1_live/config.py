@@ -1,5 +1,5 @@
 """
-Configuration for ML V3 Live Trading Agent
+Configuration for RL V1 Live Trading Agent
 
 Imports shared constants from baseline_v1_live.config where applicable.
 V3-specific parameters (Upstox broker, separate Telegram, model path) defined here.
@@ -69,13 +69,13 @@ from baseline_v1_live.config import (
 # V3-SPECIFIC: STRATEGY IDENTITY
 # ============================================================================
 
-V3_STRATEGY_NAME = "ml_v3_live"
+RLV1_STRATEGY_NAME = "rl_v1_live"
 
 # ============================================================================
 # V3-SPECIFIC: RL MODEL
 # ============================================================================
 
-V3_MODEL_PATH = os.getenv('V3_MODEL_PATH', str(Path(__file__).parent.parent / 'results' / 'rl_models_v3' / 'best_model.zip'))
+RLV1_MODEL_PATH = os.getenv('RLV1_MODEL_PATH', str(Path(__file__).parent.parent / 'results' / 'rl_models_v1' / 'best_model.zip'))
 
 # ============================================================================
 # V3-SPECIFIC: UPSTOX BROKER
@@ -88,9 +88,9 @@ UPSTOX_OPENALGO_API_KEY = os.getenv('UPSTOX_OPENALGO_API_KEY', '')
 # V3-SPECIFIC: TELEGRAM (separate bot for V3 alerts)
 # ============================================================================
 
-V3_TELEGRAM_ENABLED = os.getenv('V3_TELEGRAM_ENABLED', 'true').lower() == 'true'
-V3_TELEGRAM_BOT_TOKEN = os.getenv('V3_TELEGRAM_BOT_TOKEN', '')
-V3_TELEGRAM_CHAT_ID = os.getenv('V3_TELEGRAM_CHAT_ID', '')
+RLV1_TELEGRAM_ENABLED = os.getenv('RLV1_TELEGRAM_ENABLED', 'true').lower() == 'true'
+RLV1_TELEGRAM_BOT_TOKEN = os.getenv('RLV1_TELEGRAM_BOT_TOKEN', '')
+RLV1_TELEGRAM_CHAT_ID = os.getenv('RLV1_TELEGRAM_CHAT_ID', '')
 
 # ============================================================================
 # V3-SPECIFIC: RL PARAMETERS (from env_v3.py)
@@ -132,14 +132,14 @@ GST_RATE = 0.18
 # V3-SPECIFIC: STATE & LOGGING
 # ============================================================================
 
-V3_STATE_DB_PATH = os.getenv('V3_STATE_DB_PATH', os.path.join(os.path.dirname(__file__), 'v3_state.db'))
-V3_LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
-V3_LOG_LEVEL = 'INFO'
+RLV1_STATE_DB_PATH = os.getenv('RLV1_STATE_DB_PATH', os.path.join(os.path.dirname(__file__), 'rl_v1_state.db'))
+RLV1_LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
+RLV1_LOG_LEVEL = 'INFO'
 
 # Kill/Pause switch files
-_V3_STATE_DIR = os.getenv('V3_STATE_DIR', os.path.dirname(__file__))
-V3_KILL_SWITCH_FILE = os.path.join(_V3_STATE_DIR, 'V3_KILL_SWITCH')
-V3_PAUSE_SWITCH_FILE = os.path.join(_V3_STATE_DIR, 'V3_PAUSE_SWITCH')
+_RLV1_STATE_DIR = os.getenv('RLV1_STATE_DIR', os.path.dirname(__file__))
+RLV1_KILL_SWITCH_FILE = os.path.join(_RLV1_STATE_DIR, 'RLV1_KILL_SWITCH')
+RLV1_PAUSE_SWITCH_FILE = os.path.join(_RLV1_STATE_DIR, 'RLV1_PAUSE_SWITCH')
 
 # ============================================================================
 # V3-SPECIFIC: ORDER EXECUTION

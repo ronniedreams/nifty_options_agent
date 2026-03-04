@@ -1,5 +1,5 @@
 """
-ML V3 Live Trading Orchestrator
+RL V1 Live Trading Orchestrator
 
 Main script for running the V3 QR-DQN RL agent in live markets via Upstox OpenAlgo.
 Runs parallel to baseline on the same WebSocket data feeds.
@@ -43,13 +43,13 @@ from .config import (
     STRIKE_INTERVAL,
     LOT_SIZE,
     # V3-specific
-    V3_STRATEGY_NAME,
-    V3_MODEL_PATH,
-    V3_LOG_DIR,
-    V3_LOG_LEVEL,
-    V3_KILL_SWITCH_FILE,
-    V3_PAUSE_SWITCH_FILE,
-    V3_STATE_DB_PATH,
+    RLV1_STRATEGY_NAME,
+    RLV1_MODEL_PATH,
+    RLV1_LOG_DIR,
+    RLV1_LOG_LEVEL,
+    RLV1_KILL_SWITCH_FILE,
+    RLV1_PAUSE_SWITCH_FILE,
+    RLV1_STATE_DB_PATH,
     UPSTOX_OPENALGO_HOST,
     UPSTOX_OPENALGO_API_KEY,
     # RL params
@@ -72,18 +72,18 @@ from .config import (
     UPSTOX_TOTP_SECRET,
 )
 from .observation_builder import ObservationBuilder
-from .order_manager_v3 import OrderManagerV3
-from .position_tracker_v3 import PositionTrackerV3
+from .order_manager import OrderManagerV3
+from .position_tracker import PositionTrackerV3
 from .pyramid_manager import PyramidManager, PyramidSequence
-from .state_manager_v3 import StateManagerV3
-from .telegram_notifier_v3 import TelegramNotifierV3
+from .state_manager import StateManagerV3
+from .telegram_notifier import TelegramNotifierV3
 
 # Imported from baseline (shared components)
 from baseline_v1_live.data_pipeline import DataPipeline
 from baseline_v1_live.swing_detector import MultiSwingDetector
 
 # Setup logging with IST timestamps
-os.makedirs(V3_LOG_DIR, exist_ok=True)
+os.makedirs(RLV1_LOG_DIR, exist_ok=True)
 
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -96,14 +96,14 @@ class _ISTFormatter(logging.Formatter):
 
 _formatter = _ISTFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 _file_handler = logging.FileHandler(
-    os.path.join(V3_LOG_DIR, f'ml_v3_live_{datetime.now(IST).strftime("%Y%m%d")}.log')
+    os.path.join(RLV1_LOG_DIR, f'rl_v1_live_{datetime.now(IST).strftime("%Y%m%d")}.log')
 )
 _file_handler.setFormatter(_formatter)
 _stream_handler = logging.StreamHandler()
 _stream_handler.setFormatter(_formatter)
 
 logging.basicConfig(
-    level=getattr(logging, V3_LOG_LEVEL),
+    level=getattr(logging, RLV1_LOG_LEVEL),
     handlers=[_file_handler, _stream_handler]
 )
 
@@ -145,11 +145,11 @@ class MLV3Live:
         self.shutdown_requested = False
 
         logger.info("=" * 80)
-        logger.info("ML V3 Live Trading - Initialization")
+        logger.info("RL V1 Live Trading - Initialization")
         logger.info("=" * 80)
         logger.info(f"Expiry: {expiry_date}, ATM Strike: {atm_strike}")
         logger.info(f"Paper Trading: {PAPER_TRADING}")
-        logger.info(f"Model: {V3_MODEL_PATH}")
+        logger.info(f"Model: {RLV1_MODEL_PATH}")
 
         # Build symbol list (same pattern as env_v3: +-20 strikes around ATM)
         self.symbols = []
@@ -189,23 +189,23 @@ class MLV3Live:
         """Load the trained QR-DQN model."""
         try:
             from sb3_contrib import QRDQN
-            model_path = V3_MODEL_PATH
+            model_path = RLV1_MODEL_PATH
             if not os.path.exists(model_path):
-                logger.error(f"[V3-MODEL] Model not found: {model_path}")
+                logger.error(f"[RL-V1-MODEL] Model not found: {model_path}")
                 return
             self.model = QRDQN.load(model_path)
-            logger.info(f"[V3-MODEL] Loaded model from {model_path}")
+            logger.info(f"[RL-V1-MODEL] Loaded model from {model_path}")
         except ImportError:
-            logger.error("[V3-MODEL] sb3_contrib not installed, cannot load model")
+            logger.error("[RL-V1-MODEL] sb3_contrib not installed, cannot load model")
         except Exception as e:
-            logger.error(f"[V3-MODEL] Failed to load model: {e}")
+            logger.error(f"[RL-V1-MODEL] Failed to load model: {e}")
 
     def _try_restore_state(self):
         """Attempt crash recovery from today's state."""
         try:
             state = self.state_mgr.load_daily_state()
             if state is None:
-                logger.info("[V3-RECOVERY] No state to restore (new day)")
+                logger.info("[RL-V1-RECOVERY] No state to restore (new day)")
                 return
 
             self.position_tracker.cumulative_R = state.get('cumulative_R', 0.0)
@@ -220,13 +220,13 @@ class MLV3Live:
             n_pos = self.pyramid_mgr.position_count()
             if n_pos > 0 or self.position_tracker.cumulative_R != 0:
                 logger.info(
-                    f"[V3-RECOVERY] Restored: {n_pos} positions, "
+                    f"[RL-V1-RECOVERY] Restored: {n_pos} positions, "
                     f"cumR={self.position_tracker.cumulative_R:+.2f}, "
                     f"trades={self.position_tracker.trades_today}, "
                     f"bar_idx={self.bar_idx}"
                 )
         except Exception as e:
-            logger.error(f"[V3-RECOVERY] Failed to restore state: {e}")
+            logger.error(f"[RL-V1-RECOVERY] Failed to restore state: {e}")
 
     def _save_state(self):
         """Persist current state to SQLite."""
@@ -241,7 +241,7 @@ class MLV3Live:
                 pyramid_state=self.pyramid_mgr.to_dict(),
             )
         except Exception as e:
-            logger.error(f"[V3-STATE] Failed to save state: {e}")
+            logger.error(f"[RL-V1-STATE] Failed to save state: {e}")
 
     # ------------------------------------------------------------------
     # Startup
@@ -250,16 +250,16 @@ class MLV3Live:
     def start(self):
         """Start V3 live trading."""
         logger.info("=" * 80)
-        logger.info("Starting ML V3 Live Trading")
+        logger.info("Starting RL V1 Live Trading")
         logger.info("=" * 80)
 
         if self.model is None:
-            logger.critical("[V3] No RL model loaded. Cannot start.")
+            logger.critical("[RL-V1] No RL model loaded. Cannot start.")
             self.telegram.send_error("No RL model loaded. Agent cannot start.")
             sys.exit(1)
 
         if self.session_stopped:
-            logger.info("[V3] Session was stopped by model in previous run. Exiting.")
+            logger.info("[RL-V1] Session was stopped by model in previous run. Exiting.")
             self.telegram.send_message("Session stopped (model decision from earlier). Not restarting.")
             return
 
@@ -272,7 +272,7 @@ class MLV3Live:
         self.data_pipeline.subscribe_angelone_backup(self.symbols)
 
         # Load historical data
-        logger.info("[V3-HIST] Loading historical data...")
+        logger.info("[RL-V1-HIST] Loading historical data...")
         self.data_pipeline.load_historical_data(symbols=self.symbols)
         self.data_pipeline.fill_initial_gap()
 
@@ -300,15 +300,15 @@ class MLV3Live:
                     self.obs_builder.update_bar(symbol, bar_dict)
 
         self.swing_detector.enable_live_mode()
-        logger.info("[V3-HIST] Historical data processing complete")
+        logger.info("[RL-V1-HIST] Historical data processing complete")
 
         # Wait for live stream to stabilize
         time.sleep(5)
 
-        self.telegram.send_startup(self.expiry_date, self.atm_strike, V3_MODEL_PATH)
+        self.telegram.send_startup(self.expiry_date, self.atm_strike, RLV1_MODEL_PATH)
 
         # Main trading loop
-        logger.info("[V3] Starting main trading loop...")
+        logger.info("[RL-V1] Starting main trading loop...")
         self._run_trading_loop()
 
     # ------------------------------------------------------------------
@@ -325,26 +325,26 @@ class MLV3Live:
                 now = datetime.now(IST)
 
                 # Kill switch check
-                if os.path.exists(V3_KILL_SWITCH_FILE):
-                    logger.info("[V3] Kill switch detected. Shutting down.")
+                if os.path.exists(RLV1_KILL_SWITCH_FILE):
+                    logger.info("[RL-V1] Kill switch detected. Shutting down.")
                     self._exit_all_positions('KILL_SWITCH')
                     break
 
                 # Pause switch check
-                if os.path.exists(V3_PAUSE_SWITCH_FILE):
-                    logger.info("[V3] Pause switch active. Sleeping 30s...")
+                if os.path.exists(RLV1_PAUSE_SWITCH_FILE):
+                    logger.info("[RL-V1] Pause switch active. Sleeping 30s...")
                     time.sleep(30)
                     continue
 
                 # Force exit at 3:15 PM
                 if now.time() >= FORCE_EXIT_TIME:
-                    logger.info("[V3] Force exit time reached (3:15 PM)")
+                    logger.info("[RL-V1] Force exit time reached (3:15 PM)")
                     self._exit_all_positions('FORCE_EXIT')
                     break
 
                 # Past market close
                 if now.time() >= MARKET_CLOSE_TIME:
-                    logger.info("[V3] Market closed (3:30 PM)")
+                    logger.info("[RL-V1] Market closed (3:30 PM)")
                     break
 
                 # Get new bars
@@ -379,7 +379,7 @@ class MLV3Live:
                     self.pyramid_mgr, self.obs_builder._latest_bars
                 )
                 if limit_hit:
-                    logger.info(f"[V3] Daily {limit_hit} hit. Exiting all.")
+                    logger.info(f"[RL-V1] Daily {limit_hit} hit. Exiting all.")
                     self._exit_all_positions(f'DAILY_{limit_hit}')
                     break
 
@@ -408,16 +408,16 @@ class MLV3Live:
                     n_pos = self.pyramid_mgr.position_count()
                     cum_r = self.position_tracker.cumulative_R
                     logger.info(
-                        f"[V3-HEARTBEAT] bar_idx={self.bar_idx} | "
+                        f"[RL-V1-HEARTBEAT] bar_idx={self.bar_idx} | "
                         f"positions={n_pos} | cumR={cum_r:+.2f} | "
                         f"trades={self.position_tracker.trades_today}"
                     )
 
             except KeyboardInterrupt:
-                logger.info("[V3] Interrupted by user")
+                logger.info("[RL-V1] Interrupted by user")
                 break
             except Exception as e:
-                logger.error(f"[V3] Error in main loop: {e}", exc_info=True)
+                logger.error(f"[RL-V1] Error in main loop: {e}", exc_info=True)
                 self.telegram.send_error(f"Main loop error: {e}")
                 time.sleep(5)
 
@@ -586,7 +586,7 @@ class MLV3Live:
         action_name = ACTION_NAMES.get(action, f'UNKNOWN({action})')
 
         logger.info(
-            f"[V3-ENTRY] {break_info['symbol']} break -> model: {action_name} "
+            f"[RL-V1-ENTRY] {break_info['symbol']} break -> model: {action_name} "
             f"(entry={break_info['entry_price']:.2f}, sl={break_info['sl_points']:.1f}pts)"
         )
 
@@ -622,7 +622,7 @@ class MLV3Live:
         n_pos = self.pyramid_mgr.position_count()
         cum_r = self.position_tracker.cumulative_R
         logger.info(
-            f"[V3-REVIEW] bar_idx={self.bar_idx} positions={n_pos} "
+            f"[RL-V1-REVIEW] bar_idx={self.bar_idx} positions={n_pos} "
             f"cumR={cum_r:+.2f} -> model: {action_name}"
         )
 
@@ -689,7 +689,7 @@ class MLV3Live:
                 # SL hit — exit ALL positions in sequence
                 exit_price = seq.shared_sl_trigger
                 logger.info(
-                    f"[V3-SL] {seq.symbol} SL triggered at {exit_price:.2f} "
+                    f"[RL-V1-SL] {seq.symbol} SL triggered at {exit_price:.2f} "
                     f"(bar high={bar['high']:.2f})"
                 )
 
@@ -759,7 +759,7 @@ class MLV3Live:
 
     def _shutdown(self):
         """Graceful shutdown: persist state, send summary, disconnect."""
-        logger.info("[V3] Shutting down...")
+        logger.info("[RL-V1] Shutting down...")
 
         # Final state save
         self._save_state()
@@ -793,7 +793,7 @@ class MLV3Live:
             pass
 
         self.state_mgr.close()
-        logger.info("[V3] Shutdown complete")
+        logger.info("[RL-V1] Shutdown complete")
 
     def handle_graceful_shutdown(self):
         """Called by signal handler."""
@@ -811,7 +811,7 @@ strategy_instance: Optional[MLV3Live] = None
 
 def signal_handler(signum, frame):
     global strategy_instance
-    logger.info(f"[V3] Signal {signum} received. Initiating shutdown...")
+    logger.info(f"[RL-V1] Signal {signum} received. Initiating shutdown...")
     if strategy_instance:
         strategy_instance.handle_graceful_shutdown()
     sys.exit(0)
@@ -828,7 +828,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     parser = argparse.ArgumentParser(
-        description='ML V3 Live Trading - QR-DQN RL Agent'
+        description='RL V1 Live Trading - QR-DQN RL Agent'
     )
     parser.add_argument('--auto', action='store_true',
                         help='Auto-detect ATM and expiry')
@@ -842,11 +842,11 @@ def main():
     args = parser.parse_args()
 
     if args.test_obs:
-        logger.info("[V3-TEST] Observation validation mode — not implemented yet")
+        logger.info("[RL-V1-TEST] Observation validation mode — not implemented yet")
         sys.exit(0)
 
     if args.auto:
-        logger.info("[V3-AUTO] Auto-detection mode enabled")
+        logger.info("[RL-V1-AUTO] Auto-detection mode enabled")
 
         from baseline_v1_live.auto_detector import AutoDetector
         from baseline_v1_live.config import OPENALGO_API_KEY as BASE_API_KEY, OPENALGO_HOST as BASE_HOST
@@ -855,13 +855,13 @@ def main():
         if AUTOMATED_LOGIN and PAPER_TRADING:
             if all([UPSTOX_USER_ID, UPSTOX_PASSWORD, UPSTOX_TOTP_SECRET]):
                 try:
-                    from .login_handler_v3 import LoginHandlerV3
+                    from .login_handler import LoginHandlerV3
                     handler = LoginHandlerV3(UPSTOX_OPENALGO_HOST)
                     handler.auto_login(UPSTOX_USER_ID, UPSTOX_PASSWORD, UPSTOX_TOTP_SECRET)
                 except Exception as e:
-                    logger.warning(f"[V3-AUTO] Upstox auto-login failed: {e}")
+                    logger.warning(f"[RL-V1-AUTO] Upstox auto-login failed: {e}")
             else:
-                logger.warning("[V3-AUTO] Upstox auto-login: missing credentials")
+                logger.warning("[RL-V1-AUTO] Upstox auto-login: missing credentials")
 
         # Wait for market open and first candle
         now = datetime.now(IST)
@@ -871,11 +871,11 @@ def main():
 
         if is_weekend or now.time() >= market_close:
             reason = "weekend" if is_weekend else "after market hours"
-            logger.info(f"[V3-AUTO] Market closed ({reason}). Exiting.")
+            logger.info(f"[RL-V1-AUTO] Market closed ({reason}). Exiting.")
             sys.exit(0)
         elif now < auto_detect_time:
             wait_seconds = (auto_detect_time - now).total_seconds()
-            logger.info(f"[V3-AUTO] Waiting {wait_seconds:.0f}s for 9:16 AM...")
+            logger.info(f"[RL-V1-AUTO] Waiting {wait_seconds:.0f}s for 9:16 AM...")
             time.sleep(wait_seconds)
 
         # Auto-detect ATM and expiry using baseline's AutoDetector
@@ -886,7 +886,7 @@ def main():
             temp_pipeline.subscribe_options([], spot_symbol="Nifty 50")
             time.sleep(3)
         except Exception as e:
-            logger.warning(f"[V3-AUTO] WebSocket connection failed: {e}")
+            logger.warning(f"[RL-V1-AUTO] WebSocket connection failed: {e}")
             temp_pipeline = None
 
         detector = AutoDetector(
@@ -898,7 +898,7 @@ def main():
         if temp_pipeline:
             temp_pipeline.disconnect()
 
-        logger.info(f"[V3-AUTO] Detected ATM: {atm_strike}, Expiry: {expiry_date}")
+        logger.info(f"[RL-V1-AUTO] Detected ATM: {atm_strike}, Expiry: {expiry_date}")
     else:
         if not args.expiry or not args.atm:
             parser.error("--expiry and --atm required when --auto not used")
@@ -912,10 +912,10 @@ def main():
     try:
         strategy.start()
     except KeyboardInterrupt:
-        print("\n[V3-SHUTDOWN] Interrupted. Shutting down...")
+        print("\n[RL-V1-SHUTDOWN] Interrupted. Shutting down...")
         strategy.handle_graceful_shutdown()
     except Exception as e:
-        logger.critical(f"[V3] Fatal error: {e}", exc_info=True)
+        logger.critical(f"[RL-V1] Fatal error: {e}", exc_info=True)
         strategy.handle_graceful_shutdown()
 
 
