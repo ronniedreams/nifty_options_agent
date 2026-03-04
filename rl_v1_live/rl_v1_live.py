@@ -68,8 +68,13 @@ from .config import (
     # Auto-login
     AUTOMATED_LOGIN,
     UPSTOX_USER_ID,
+    UPSTOX_MOBILE,
     UPSTOX_PASSWORD,
+    UPSTOX_PIN,
     UPSTOX_TOTP_SECRET,
+    UPSTOX_API_KEY,
+    UPSTOX_API_SECRET,
+    UPSTOX_REDIRECT_URI,
 )
 from .observation_builder import ObservationBuilder
 from .order_manager import OrderManagerV3
@@ -853,11 +858,26 @@ def main():
 
         # Upstox auto-login if configured
         if AUTOMATED_LOGIN and PAPER_TRADING:
-            if all([UPSTOX_USER_ID, UPSTOX_PASSWORD, UPSTOX_TOTP_SECRET]):
+            required = [UPSTOX_MOBILE, UPSTOX_PIN, UPSTOX_TOTP_SECRET,
+                        UPSTOX_API_KEY, UPSTOX_API_SECRET]
+            if all(required):
                 try:
-                    from .login_handler import LoginHandlerV3
-                    handler = LoginHandlerV3(UPSTOX_OPENALGO_HOST)
-                    handler.auto_login(UPSTOX_USER_ID, UPSTOX_PASSWORD, UPSTOX_TOTP_SECRET)
+                    from .login_handler import LoginHandlerV1
+                    from baseline_v1_live.config import (
+                        OPENALGO_USERNAME, OPENALGO_PASSWORD,
+                    )
+                    handler = LoginHandlerV1(UPSTOX_OPENALGO_HOST)
+                    handler.auto_login(
+                        mobile=UPSTOX_MOBILE,
+                        password=UPSTOX_PASSWORD,
+                        pin=UPSTOX_PIN,
+                        totp_secret=UPSTOX_TOTP_SECRET,
+                        api_key=UPSTOX_API_KEY,
+                        api_secret=UPSTOX_API_SECRET,
+                        redirect_uri=UPSTOX_REDIRECT_URI,
+                        openalgo_username=OPENALGO_USERNAME,
+                        openalgo_password=OPENALGO_PASSWORD,
+                    )
                 except Exception as e:
                     logger.warning(f"[RL-V1-AUTO] Upstox auto-login failed: {e}")
             else:

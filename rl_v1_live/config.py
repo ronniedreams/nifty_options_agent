@@ -164,6 +164,11 @@ EMERGENCY_EXIT_RETRY_DELAY = 2
 # V3-SPECIFIC: UPSTOX AUTO-LOGIN
 # ============================================================================
 
-UPSTOX_USER_ID = os.getenv('UPSTOX_USER_ID', '')
-UPSTOX_PASSWORD = os.getenv('UPSTOX_PASSWORD', '')
-UPSTOX_TOTP_SECRET = os.getenv('UPSTOX_TOTP_SECRET', '')
+UPSTOX_USER_ID = os.getenv('UPSTOX_USER_ID', '')        # Upstox client ID
+UPSTOX_MOBILE = os.getenv('UPSTOX_MOBILE', '')           # 10-digit mobile number
+UPSTOX_PASSWORD = os.getenv('UPSTOX_PASSWORD', '')        # Upstox password
+UPSTOX_PIN = os.getenv('UPSTOX_PIN', '')                  # 6-digit PIN
+UPSTOX_TOTP_SECRET = os.getenv('UPSTOX_TOTP_SECRET', '') # TOTP secret (base32)
+UPSTOX_API_KEY = os.getenv('UPSTOX_API_KEY', '')          # OAuth app API key (client_id)
+UPSTOX_API_SECRET = os.getenv('UPSTOX_API_SECRET', '')    # OAuth app API secret
+UPSTOX_REDIRECT_URI = os.getenv('UPSTOX_REDIRECT_URI', 'http://127.0.0.1:5002/upstox/callback')
