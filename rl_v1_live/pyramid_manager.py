@@ -41,6 +41,10 @@ class PyramidPosition:
     actual_R_value: float     # sl_points * quantity at entry (risk in Rs)
     sl_points_at_entry: float
     order_id: Optional[str] = None  # Broker order ID for tracking
+    sl_trigger: float = 0.0        # independent SL trigger for this position
+    tp_trigger: float = 0.0        # TP trigger price (below entry for shorts)
+    tp_R_level: float = 0.0        # TP target in R (0.5, 1.0, 2.0, 3.0)
+    tp_order_id: Optional[str] = None  # Broker TP order ID
 
 
 @dataclass
@@ -127,7 +131,8 @@ class PyramidManager:
         return True
 
     def add_to_pyramid(self, break_info: dict, bar_idx: int,
-                       order_id: Optional[str] = None) -> Optional[PyramidPosition]:
+                       order_id: Optional[str] = None,
+                       tp_R_level: float = 0.0) -> Optional[PyramidPosition]:
         """Add a position to the appropriate pyramid sequence.
 
         Args:
@@ -135,6 +140,7 @@ class PyramidManager:
                         sl_trigger, sl_points, highest_high, break_time
             bar_idx: Current bar index
             order_id: Optional broker order ID
+            tp_R_level: TP target in R-multiples (0 = no TP)
 
         Returns:
             PyramidPosition if added, None if rejected
@@ -169,6 +175,10 @@ class PyramidManager:
             sl_points_at_entry=sl_points,
             order_id=order_id,
         )
+        # V3 per-position fields
+        pos.sl_trigger = sl_trigger
+        pos.tp_R_level = tp_R_level
+        pos.tp_trigger = (entry_price - (tp_R_level * sl_points)) if tp_R_level > 0 else 0.0
 
         seq = self.get_sequence(opt_type)
         if seq is None or seq.position_count == 0:
@@ -179,7 +189,8 @@ class PyramidManager:
 
         logger.info(
             f"[PYRAMID] Added {symbol} {opt_type}: {lots} lots @ {entry_price:.2f}, "
-            f"SL trigger={sl_trigger:.2f}, seq_count={seq.position_count}"
+            f"SL trigger={sl_trigger:.2f}, tp_R={tp_R_level}, "
+            f"tp_trigger={pos.tp_trigger:.2f}, seq_count={seq.position_count}"
         )
         return pos
 
@@ -217,6 +228,10 @@ class PyramidManager:
                         'actual_R_value': p.actual_R_value,
                         'sl_points_at_entry': p.sl_points_at_entry,
                         'order_id': p.order_id,
+                        'sl_trigger': p.sl_trigger,
+                        'tp_trigger': p.tp_trigger,
+                        'tp_R_level': p.tp_R_level,
+                        'tp_order_id': p.tp_order_id,
                     }
                     for p in seq.positions
                 ],
@@ -250,6 +265,10 @@ class PyramidManager:
                     actual_R_value=p_data['actual_R_value'],
                     sl_points_at_entry=p_data['sl_points_at_entry'],
                     order_id=p_data.get('order_id'),
+                    sl_trigger=p_data.get('sl_trigger', 0.0),
+                    tp_trigger=p_data.get('tp_trigger', 0.0),
+                    tp_R_level=p_data.get('tp_R_level', 0.0),
+                    tp_order_id=p_data.get('tp_order_id'),
                 )
                 seq.positions.append(pos)
             if key == 'ce_sequence':

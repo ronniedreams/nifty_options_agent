@@ -75,7 +75,7 @@ RLV1_STRATEGY_NAME = "rl_v1_live"
 # V3-SPECIFIC: RL MODEL
 # ============================================================================
 
-RLV1_MODEL_PATH = os.getenv('RLV1_MODEL_PATH', str(Path(__file__).parent.parent / 'results' / 'rl_models_v1' / 'best_model.zip'))
+RLV1_MODEL_PATH = os.getenv('RLV1_MODEL_PATH', str(Path(__file__).parent.parent / 'results' / 'rl_models_v3' / 'best_model.zip'))
 
 # ============================================================================
 # V3-SPECIFIC: UPSTOX BROKER
@@ -106,17 +106,39 @@ MAX_PRICE = 500
 STRIKE_INTERVAL = 50
 
 # Review decision interval
-REVIEW_INTERVAL = 5    # Every 5 bars when positions open
+REVIEW_INTERVAL = 1    # Every 1 bar when positions open
 
 # Daily exits (goal-conditioned in training, fixed for live)
 DAILY_TARGET_R = 5.0
 DAILY_STOP_R = -5.0
 
-# Actions (from env_v3.py)
-ACTION_SKIP_HOLD = 0
-ACTION_ENTER = 1
-ACTION_EXIT_ALL = 2
-ACTION_STOP_SESSION = 3
+# Actions: Discrete(12) from env_v3.py
+ACTION_HOLD = 0              # SKIP at entry, HOLD at review
+ACTION_ENTER_TP_05 = 1       # Enter + TP at 0.5R profit
+ACTION_ENTER_TP_10 = 2       # Enter + TP at 1.0R profit
+ACTION_ENTER_TP_20 = 3       # Enter + TP at 2.0R profit
+ACTION_ENTER_TP_30 = 4       # Enter + TP at 3.0R profit
+ACTION_MARKET_EXIT_1 = 5     # Exit oldest position (only if profitable)
+ACTION_MARKET_EXIT_2 = 6
+ACTION_MARKET_EXIT_3 = 7
+ACTION_MARKET_EXIT_4 = 8
+ACTION_MARKET_EXIT_5 = 9
+ACTION_EXIT_ALL = 10          # Market exit everything
+ACTION_STOP_SESSION = 11      # Exit all + end episode
+NUM_ACTIONS = 12
+
+# TP R-level mapping for entry actions
+TP_R_LEVELS = {
+    ACTION_ENTER_TP_05: 0.5,
+    ACTION_ENTER_TP_10: 1.0,
+    ACTION_ENTER_TP_20: 2.0,
+    ACTION_ENTER_TP_30: 3.0,
+}
+
+# Observation dimensions (V3)
+NUM_FEATURES = 46
+NUM_POSITION_SLOTS = 5
+FEATURES_PER_POSITION = 5
 
 # Decision types
 DECISION_ENTRY = 0.0

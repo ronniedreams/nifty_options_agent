@@ -2,13 +2,14 @@
 Observation Builder for V3 Live Trading
 
 Direct port of env_v3._compute_observation() for live data.
-Builds the 24-feature observation vector that the RL model expects.
+Builds the 46-feature observation vector that the RL model expects.
 
-Feature layout (24 features):
-  0-11:  Global market context (from break symbol or latest position symbol)
-  12-17: Session state (cumulative R, position count, trades, unrealized, dist to limits)
-  18:    Decision type (0.0=entry, 1.0=review)
-  19-23: Position summary (avg/max unrealized R, avg bars held, pyramid depth, avg pct from SL)
+Feature layout (46 features):
+  0-9:   Break context (from swing break; all zeros at review)
+  10-13: Market context (always populated)
+  14-19: Session state (cumulative R, unrealized, distances, positions, trades)
+  20:    Decision type (0.0=entry, 1.0=review)
+  21-45: Per-position state (5 slots x 5 features, oldest first)
 
 Training-live parity is critical — any divergence invalidates the model.
 """
@@ -25,6 +26,11 @@ from .config import DECISION_ENTRY, DECISION_REVIEW, R_VALUE
 logger = logging.getLogger(__name__)
 
 MARKET_OPEN = dtime(9, 15)
+
+# V3 observation dimensions
+NUM_FEATURES = 46
+NUM_POSITION_SLOTS = 5
+FEATURES_PER_POSITION = 5
 
 
 class VWAPCalculator:
@@ -56,7 +62,7 @@ class VWAPCalculator:
 
 
 class ObservationBuilder:
-    """Builds 24-feature observation vectors for the V3 RL model.
+    """Builds 46-feature observation vectors for the V3 RL model.
 
     Maintains per-symbol tracking state (day high/low, bar ranges, spot ranges)
     and delegates to the same feature computation logic as env_v3.
@@ -70,6 +76,9 @@ class ObservationBuilder:
         self.spot_high_so_far = 0.0
         self.spot_low_so_far = float('inf')
         self.spot_bar_ranges: deque = deque(maxlen=50)
+        self.spot_open: float = 0.0       # Set once when first spot data arrives
+        self.spot_close: float = 0.0      # Latest spot close
+        self._spot_open_set: bool = False  # Track if spot_open has been set today
         self.swing_break_count: Dict[str, int] = {'CE': 0, 'PE': 0}
         self._latest_bars: Dict[str, dict] = {}
 
@@ -82,6 +91,9 @@ class ObservationBuilder:
         self.spot_high_so_far = 0.0
         self.spot_low_so_far = float('inf')
         self.spot_bar_ranges.clear()
+        self.spot_open = 0.0
+        self.spot_close = 0.0
+        self._spot_open_set = False
         self.swing_break_count = {'CE': 0, 'PE': 0}
         self._latest_bars.clear()
 
@@ -115,11 +127,17 @@ class ObservationBuilder:
 
     def update_spot(self, spot_high: float, spot_low: float, spot_close: float):
         """Update spot tracking with NIFTY index bar data."""
+        # Set spot_open once (first spot data of the day)
+        if not self._spot_open_set and spot_close > 0:
+            self.spot_open = spot_close  # Use first close as proxy for open
+            self._spot_open_set = True
+
         if spot_high > self.spot_high_so_far:
             self.spot_high_so_far = spot_high
         if spot_low < self.spot_low_so_far:
             self.spot_low_so_far = spot_low
         if spot_close > 0:
+            self.spot_close = spot_close
             self.spot_bar_ranges.append((spot_high - spot_low) / spot_close)
 
     def record_swing_break(self, option_type: str):
@@ -129,170 +147,154 @@ class ObservationBuilder:
         )
 
     def build(self, decision_type: float, break_info: Optional[dict],
-              pyramid_mgr, swing_detector, bar_idx: int,
+              positions: List, swing_detector, bar_idx: int,
               cumulative_R: float, trades_today: int,
-              target_R: float, stop_R: float) -> np.ndarray:
-        """Build the 24-feature observation vector.
+              target_R: float, stop_R: float,
+              d_to_expiry: int = 0) -> np.ndarray:
+        """Build the 46-feature observation vector.
 
         Args:
             decision_type: DECISION_ENTRY (0.0) or DECISION_REVIEW (1.0)
             break_info: Break dict for entry decisions (None for review)
-            pyramid_mgr: PyramidManager instance
+            positions: List of PyramidPosition objects
             swing_detector: MultiSwingDetector instance
             bar_idx: Current bar index in session
             cumulative_R: Realized R so far today
             trades_today: Number of trades today
             target_R: Daily target R
             stop_R: Daily stop R
+            d_to_expiry: Days to expiry (0 = expiry day)
 
         Returns:
-            np.ndarray of shape (24,), dtype float32
+            np.ndarray of shape (46,), dtype float32
         """
-        # Determine reference symbol and bar
+        obs = np.zeros(NUM_FEATURES, dtype=np.float32)
+
+        # --- Group 1: Break Context (features 0-9) ---
+        # At entry: from swing break. At review: all zeros.
         if decision_type == DECISION_ENTRY and break_info is not None:
             symbol = break_info['symbol']
             bar = break_info['bar']
-            ref_entry_price = break_info['entry_price']
-            ref_vwap = break_info['vwap']
-            ref_sl_points = break_info['sl_points']
-            ref_option_type = break_info['option_type']
-        else:
-            # Review: use most recent position's symbol
-            positions = pyramid_mgr.all_positions()
-            if positions:
-                latest_pos = positions[-1]
-                symbol = latest_pos.symbol
-                bar = self._latest_bars.get(symbol)
-                if bar is None:
-                    bar = {'high': 0, 'low': 0, 'close': 0, 'open': 0}
-                ref_entry_price = bar.get('close', 0)
-                ref_vwap = self.vwap_calc.get(symbol)
-                ref_sl_points = latest_pos.sl_points_at_entry
-                ref_option_type = latest_pos.option_type
-            else:
-                return np.zeros(24, dtype=np.float32)
+            entry_price = break_info['entry_price']
+            vwap = break_info['vwap']
+            sl_points = break_info['sl_points']
+            opt_type = break_info['option_type']
+            detector = swing_detector.get_detector(symbol)
 
-        detector = swing_detector.get_detector(symbol)
+            # 0: vwap_premium_pct
+            obs[0] = (entry_price - vwap) / vwap if vwap > 0 else 0.0
 
-        # 0. vwap_premium_pct
-        vwap_premium = (
-            (ref_entry_price - ref_vwap) / ref_vwap if ref_vwap > 0 else 0.0
-        )
+            # 1: sl_pct
+            obs[1] = sl_points / entry_price if entry_price > 0 else 0.0
 
-        # 1. sl_pct
-        sl_pct = (
-            ref_sl_points / ref_entry_price if ref_entry_price > 0 else 0.0
-        )
+            # 2: option_type (0=CE, 1=PE)
+            obs[2] = 0.0 if opt_type == 'CE' else 1.0
 
-        # 2. pct_from_day_high
-        dh = self.day_high.get(symbol, bar['high'])
-        close = bar['close'] if isinstance(bar, dict) else 0
-        pct_from_day_high = (dh - close) / dh if dh > 0 else 0.0
+            # 3: pct_from_day_high
+            close = bar['close']
+            dh = self.day_high.get(symbol, bar['high'])
+            obs[3] = (dh - close) / dh if dh > 0 else 0.0
 
-        # 3. pct_from_day_low
-        dl = self.day_low.get(symbol, bar['low'])
-        pct_from_day_low = (close - dl) / close if close > 0 else 0.0
+            # 4: pct_from_day_low
+            dl = self.day_low.get(symbol, bar['low'])
+            obs[4] = (close - dl) / close if close > 0 else 0.0
 
-        # 4. pct_diff_swing_low_vs_prev_high
-        prev_high = self._get_prev_swing_high(detector)
-        pct_diff = (
-            (prev_high - ref_entry_price) / prev_high if prev_high > 0 else 0.0
-        )
+            # 5: is_lower_low
+            obs[5] = float(self._check_lower_low(detector, entry_price))
 
-        # 5. bars_since_prev_swing_high
-        bars_since_high = self._get_bars_since_prev_swing_high(detector)
+            # 6: avg_bar_range_pct_5
+            ranges = self.bar_ranges.get(symbol)
+            obs[6] = float(np.mean(ranges)) if ranges and len(ranges) > 0 else 0.02
 
-        # 6. avg_bar_range_pct_5
-        ranges = self.bar_ranges.get(symbol)
-        avg_range = float(np.mean(ranges)) if ranges and len(ranges) > 0 else 0.02
+            # 7: day_range_pct
+            obs[7] = (dh - dl) / entry_price if entry_price > 0 else 0.0
 
-        # 7. swing_low_count_today
-        swing_count = self.swing_break_count.get(ref_option_type, 0)
+            # 8: swing_break_count for this option type
+            obs[8] = float(self.swing_break_count.get(opt_type, 0))
 
-        # 8. is_lower_low
-        is_lower_low = self._check_lower_low(detector, ref_entry_price)
+            # 9: d_to_expiry_norm
+            obs[9] = min(d_to_expiry / 7.0, 4.0)
 
-        # 9. day_range_pct
-        day_range = (
-            (dh - dl) / ref_entry_price if ref_entry_price > 0 else 0.0
-        )
+        # --- Group 2: Market Context (features 10-13) ---
+        # Always populated
 
-        # 10. minutes_since_open
+        # 10: minutes_since_open (normalized to ~0-1 by /360.0)
         now = datetime.now()
-        if hasattr(bar.get('timestamp', None), 'date'):
-            ts_date = bar['timestamp'].date() if hasattr(bar['timestamp'], 'date') else now.date()
-        else:
-            ts_date = now.date()
-        market_open_dt = datetime.combine(ts_date, MARKET_OPEN)
+        market_open_dt = datetime.combine(now.date(), MARKET_OPEN)
         mins = (now - market_open_dt).total_seconds() / 60.0
-        if mins < 0:
-            mins = 0.0
+        obs[10] = max(0.0, mins) / 360.0
 
-        # 11. spot_volatility_ratio
-        vol_ratio = self._compute_spot_volatility_ratio()
+        # 11: spot_volatility_ratio
+        obs[11] = self._compute_spot_volatility_ratio()
 
-        # 12-17: Session state
-        unrealized = self._total_unrealized_R(pyramid_mgr)
+        # 12: spot_pct_from_open
+        if self.spot_open > 0 and self.spot_close > 0:
+            obs[12] = (self.spot_close - self.spot_open) / self.spot_open
+
+        # 13: spot_day_range_pct
+        if self.spot_open > 0 and self.spot_low_so_far < float('inf'):
+            spot_range = self.spot_high_so_far - self.spot_low_so_far
+            if spot_range > 0:
+                obs[13] = spot_range / self.spot_open
+
+        # --- Group 3: Session State (features 14-19) ---
+        unrealized = self._total_unrealized_R(positions)
         total_R = cumulative_R + unrealized
-        n_pos = pyramid_mgr.position_count()
-        dist_target = target_R - total_R
-        dist_stop = total_R - stop_R
 
-        # 19-23: Position summary
-        pos_unrealized = self._per_position_unrealized_R(pyramid_mgr)
+        # 14: cumulative_R
+        obs[14] = cumulative_R
 
-        avg_pos_unrealized_R = float(np.mean(pos_unrealized)) if pos_unrealized else 0.0
-        max_pos_unrealized_R = float(max(pos_unrealized)) if pos_unrealized else 0.0
+        # 15: unrealized_R
+        obs[15] = unrealized
 
-        positions = pyramid_mgr.all_positions()
-        if positions:
-            avg_bars_held = float(np.mean([
-                max(0, bar_idx - p.entry_bar_idx) for p in positions
-            ]))
-        else:
-            avg_bars_held = 0.0
+        # 16: dist_to_target
+        obs[16] = target_R - total_R
 
-        pyramid_depth = n_pos
+        # 17: dist_to_stop
+        obs[17] = total_R - stop_R
 
-        avg_pct_from_sl = 0.0
-        if positions:
-            pct_from_sl_list = []
-            for pos in positions:
-                seq = pyramid_mgr.get_sequence(pos.option_type)
-                if seq and seq.shared_sl_trigger > 0:
-                    bar_p = self._latest_bars.get(pos.symbol)
-                    if bar_p and bar_p['close'] > 0:
-                        pct = (seq.shared_sl_trigger - bar_p['close']) / bar_p['close']
-                        pct_from_sl_list.append(pct)
-            if pct_from_sl_list:
-                avg_pct_from_sl = float(np.mean(pct_from_sl_list))
+        # 18: n_positions
+        obs[18] = float(len(positions))
 
-        obs = np.array([
-            vwap_premium,               # 0
-            sl_pct,                     # 1
-            pct_from_day_high,          # 2
-            pct_from_day_low,           # 3
-            pct_diff,                   # 4
-            bars_since_high,            # 5
-            avg_range,                  # 6
-            swing_count,                # 7
-            float(is_lower_low),        # 8
-            day_range,                  # 9
-            mins,                       # 10
-            vol_ratio,                  # 11
-            cumulative_R,               # 12
-            float(n_pos),               # 13
-            float(trades_today),        # 14
-            unrealized,                 # 15
-            dist_target,                # 16
-            dist_stop,                  # 17
-            decision_type,              # 18
-            avg_pos_unrealized_R,       # 19
-            max_pos_unrealized_R,       # 20
-            avg_bars_held,              # 21
-            float(pyramid_depth),       # 22
-            avg_pct_from_sl,            # 23
-        ], dtype=np.float32)
+        # 19: trades_today
+        obs[19] = float(trades_today)
+
+        # --- Group 4: Decision Type (feature 20) ---
+        obs[20] = decision_type
+
+        # --- Group 5: Per-Position State (features 21-45) ---
+        # 5 slots x 5 features. Ordered by entry time (oldest first).
+        # Empty slots = all zeros.
+        positions_sorted = sorted(positions, key=lambda p: p.entry_bar_idx)
+
+        for i, pos in enumerate(positions_sorted[:NUM_POSITION_SLOTS]):
+            base = 21 + i * FEATURES_PER_POSITION
+
+            # +0: pos_unrealized_R
+            bar_p = self._latest_bars.get(pos.symbol)
+            if bar_p is not None and pos.actual_R_value > 0:
+                pos_unrealized = (
+                    (pos.entry_price - bar_p['close']) * pos.quantity
+                    / pos.actual_R_value
+                )
+                obs[base + 0] = pos_unrealized
+            else:
+                obs[base + 0] = 0.0
+
+            # +1: pos_bars_held (normalized by 360)
+            bars_held = max(0, bar_idx - pos.entry_bar_idx)
+            obs[base + 1] = bars_held / 360.0
+
+            # +2: pos_pct_from_sl
+            sl_trigger = getattr(pos, 'sl_trigger', 0.0)
+            if bar_p and bar_p['close'] > 0 and sl_trigger > 0:
+                obs[base + 2] = (sl_trigger - bar_p['close']) / bar_p['close']
+
+            # +3: pos_option_type (CE=+1, PE=-1)
+            obs[base + 3] = 1.0 if pos.option_type == 'CE' else -1.0
+
+            # +4: pos_tp_R_level (0.5, 1.0, 2.0, 3.0)
+            obs[base + 4] = getattr(pos, 'tp_R_level', 1.0)
 
         return obs
 
@@ -306,14 +308,6 @@ class ObservationBuilder:
         for swing in reversed(detector.swings):
             if swing['type'] == 'High':
                 return swing['price']
-        return 0.0
-
-    def _get_bars_since_prev_swing_high(self, detector) -> float:
-        if detector is None:
-            return 0.0
-        for swing in reversed(detector.swings):
-            if swing['type'] == 'High':
-                return max(0, len(detector.bars) - 1 - swing['index'])
         return 0.0
 
     def _check_lower_low(self, detector, current_low: float) -> bool:
@@ -337,9 +331,9 @@ class ObservationBuilder:
             return float(avg_5 / avg_all)
         return 1.0
 
-    def _total_unrealized_R(self, pyramid_mgr) -> float:
+    def _total_unrealized_R(self, positions: List) -> float:
         total = 0.0
-        for pos in pyramid_mgr.all_positions():
+        for pos in positions:
             bar = self._latest_bars.get(pos.symbol)
             if bar is None or pos.actual_R_value <= 0:
                 continue
@@ -349,17 +343,3 @@ class ObservationBuilder:
             )
             total += unrealized
         return total
-
-    def _per_position_unrealized_R(self, pyramid_mgr) -> List[float]:
-        result = []
-        for pos in pyramid_mgr.all_positions():
-            bar = self._latest_bars.get(pos.symbol)
-            if bar is None or pos.actual_R_value <= 0:
-                result.append(0.0)
-                continue
-            unrealized = (
-                (pos.entry_price - bar['close']) * pos.quantity
-                / pos.actual_R_value
-            )
-            result.append(unrealized)
-        return result

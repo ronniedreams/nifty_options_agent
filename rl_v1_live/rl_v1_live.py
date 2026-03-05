@@ -4,12 +4,12 @@ RL V1 Live Trading Orchestrator
 Main script for running the V3 QR-DQN RL agent in live markets via Upstox OpenAlgo.
 Runs parallel to baseline on the same WebSocket data feeds.
 
-Trading Logic (RL-driven):
+Trading Logic (RL-driven, V3 Discrete(12)):
 1. Monitor options for swing low breaks (same swing detector as baseline)
 2. Select best strike (SL closest to 20pts, round strike, highest premium)
-3. On break: build 24-feature obs -> model.predict() -> ENTER/SKIP/EXIT_ALL/STOP_SESSION
-4. Every 5 bars with positions: review obs -> model.predict() -> HOLD/EXIT_ALL/STOP_SESSION
-5. Track cumulative R, exit all at +/-5R or 3:15 PM EOD
+3. On break: build 46-feature obs -> model.predict() -> 4 TP entry levels / EXIT actions / STOP
+4. Every bar with positions: review obs -> model.predict() -> per-position exit / EXIT_ALL / STOP
+5. Bracket orders: SL + TP placed on entry. Track cumulative R, exit at +/-5R or 3:15 PM
 
 Order Flow:
 - Entry: Market SELL order AFTER RL decides ENTER (not proactive like baseline)
@@ -42,6 +42,7 @@ from .config import (
     STRIKE_SCAN_RANGE,
     STRIKE_INTERVAL,
     LOT_SIZE,
+    R_VALUE,
     # V3-specific
     RLV1_STRATEGY_NAME,
     RLV1_MODEL_PATH,
@@ -52,11 +53,17 @@ from .config import (
     RLV1_STATE_DB_PATH,
     UPSTOX_OPENALGO_HOST,
     UPSTOX_OPENALGO_API_KEY,
-    # RL params
-    ACTION_SKIP_HOLD,
-    ACTION_ENTER,
+    # RL params (V3 Discrete(12))
+    ACTION_HOLD,
+    ACTION_ENTER_TP_05,
+    ACTION_ENTER_TP_10,
+    ACTION_ENTER_TP_20,
+    ACTION_ENTER_TP_30,
+    ACTION_MARKET_EXIT_1,
+    ACTION_MARKET_EXIT_5,
     ACTION_EXIT_ALL,
     ACTION_STOP_SESSION,
+    TP_R_LEVELS,
     DECISION_ENTRY,
     DECISION_REVIEW,
     REVIEW_INTERVAL,
@@ -115,10 +122,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 ACTION_NAMES = {
-    ACTION_SKIP_HOLD: 'SKIP/HOLD',
-    ACTION_ENTER: 'ENTER',
-    ACTION_EXIT_ALL: 'EXIT_ALL',
-    ACTION_STOP_SESSION: 'STOP_SESSION',
+    0: 'HOLD/SKIP', 1: 'ENTER_TP_0.5R', 2: 'ENTER_TP_1.0R',
+    3: 'ENTER_TP_2.0R', 4: 'ENTER_TP_3.0R',
+    5: 'MKT_EXIT_1', 6: 'MKT_EXIT_2', 7: 'MKT_EXIT_3',
+    8: 'MKT_EXIT_4', 9: 'MKT_EXIT_5',
+    10: 'EXIT_ALL', 11: 'STOP_SESSION',
 }
 
 
@@ -406,10 +414,8 @@ class MLV3Live:
                 if best is not None and not self.session_stopped:
                     self._handle_entry_decision(best)
 
-                # REVIEW DECISION (every N bars with open positions)
+                # REVIEW DECISION (every bar with open positions, V3)
                 if (self.pyramid_mgr.position_count() > 0
-                        and self.bar_idx > 0
-                        and self.bar_idx % REVIEW_INTERVAL == 0
                         and not self.session_stopped):
                     self._handle_review_decision()
 
@@ -587,7 +593,7 @@ class MLV3Live:
         obs = self.obs_builder.build(
             decision_type=DECISION_ENTRY,
             break_info=break_info,
-            pyramid_mgr=self.pyramid_mgr,
+            positions=self.pyramid_mgr.all_positions(),
             swing_detector=self.swing_detector,
             bar_idx=self.bar_idx,
             cumulative_R=self.position_tracker.cumulative_R,
@@ -605,13 +611,18 @@ class MLV3Live:
             f"(entry={break_info['entry_price']:.2f}, sl={break_info['sl_points']:.1f}pts)"
         )
 
-        if action == ACTION_ENTER:
-            self._enter_position(break_info)
+        if action in TP_R_LEVELS:
+            tp_R = TP_R_LEVELS[action]
+            self._enter_position(break_info, tp_R)
         elif action == ACTION_EXIT_ALL:
             self._exit_all_positions('MODEL_EXIT_ALL')
         elif action == ACTION_STOP_SESSION:
             self._exit_all_positions('MODEL_STOP_SESSION')
             self.session_stopped = True
+        elif ACTION_MARKET_EXIT_1 <= action <= ACTION_MARKET_EXIT_5:
+            pos_idx = action - ACTION_MARKET_EXIT_1
+            self._market_exit_single(pos_idx)
+        # HOLD (action=0): do nothing
 
     def _handle_review_decision(self):
         """Handle review decision point: build obs -> model.predict()."""
@@ -621,7 +632,7 @@ class MLV3Live:
         obs = self.obs_builder.build(
             decision_type=DECISION_REVIEW,
             break_info=None,
-            pyramid_mgr=self.pyramid_mgr,
+            positions=self.pyramid_mgr.all_positions(),
             swing_detector=self.swing_detector,
             bar_idx=self.bar_idx,
             cumulative_R=self.position_tracker.cumulative_R,
@@ -646,15 +657,20 @@ class MLV3Live:
         elif action == ACTION_STOP_SESSION:
             self._exit_all_positions('MODEL_STOP_SESSION')
             self.session_stopped = True
-        # HOLD (action=0) and ENTER (action=1, invalid at review) -> do nothing
+        elif ACTION_MARKET_EXIT_1 <= action <= ACTION_MARKET_EXIT_5:
+            pos_idx = action - ACTION_MARKET_EXIT_1
+            self._market_exit_single(pos_idx)
+        # HOLD (action=0) and ENTER (actions 1-4, invalid at review) -> do nothing
 
     # ------------------------------------------------------------------
     # Position management
     # ------------------------------------------------------------------
 
-    def _enter_position(self, break_info: dict):
-        """Enter a new position via market order."""
-        pos = self.pyramid_mgr.add_to_pyramid(break_info, self.bar_idx)
+    def _enter_position(self, break_info: dict, tp_R_level: float = 0.0):
+        """Enter a new position via market order with bracket (SL + TP)."""
+        pos = self.pyramid_mgr.add_to_pyramid(
+            break_info, self.bar_idx, tp_R_level=tp_R_level,
+        )
         if pos is None:
             return
 
@@ -678,6 +694,13 @@ class MLV3Live:
                 new_sl_trigger=seq.shared_sl_trigger,
             )
             seq.sl_order_id = new_sl_id
+
+        # Place TP order for this position
+        if pos.tp_trigger > 0:
+            tp_order_id = self.order_mgr.place_tp_order(
+                pos.symbol, pos.quantity, pos.tp_trigger,
+            )
+            pos.tp_order_id = tp_order_id
 
         # Telegram notification
         self.telegram.send_entry(
@@ -731,6 +754,82 @@ class MLV3Live:
                 self.pyramid_mgr.clear_sequence(opt_type)
                 self._save_state()
 
+    def _market_exit_single(self, pos_idx: int):
+        """Exit a single position by index (actions 5-9)."""
+        positions = self.pyramid_mgr.all_positions()
+        if pos_idx < 0 or pos_idx >= len(positions):
+            return
+
+        pos = positions[pos_idx]
+
+        # Cancel TP order if exists
+        if hasattr(pos, 'tp_order_id') and pos.tp_order_id:
+            self.order_mgr.cancel_order(pos.tp_order_id)
+
+        # Place market exit
+        self.order_mgr.place_market_exit(pos.symbol, pos.quantity)
+
+        # Record the exit
+        bar = self.obs_builder._latest_bars.get(pos.symbol)
+        exit_price = bar['close'] if bar else pos.entry_price
+
+        if pos.actual_R_value > 0:
+            realized_R = (
+                (pos.entry_price - exit_price) * pos.quantity
+                / pos.actual_R_value
+            )
+        else:
+            realized_R = 0.0
+
+        cost_R = self.position_tracker.transaction_cost_R(
+            pos.entry_price, exit_price, pos.quantity,
+        )
+        realized_R -= cost_R
+        pnl = (pos.entry_price - exit_price) * pos.quantity - cost_R * R_VALUE
+
+        self.position_tracker.cumulative_R += realized_R
+        self.position_tracker.trades_today += 1
+        if realized_R > 0:
+            self.position_tracker.winning_trades += 1
+        else:
+            self.position_tracker.losing_trades += 1
+
+        logger.info(
+            f"[RL-V1-EXIT] {pos.symbol} MKT_EXIT_SINGLE: "
+            f"Entry={pos.entry_price:.2f} Exit={exit_price:.2f} "
+            f"R={realized_R:+.2f} CumR={self.position_tracker.cumulative_R:+.2f}"
+        )
+
+        self.telegram.send_exit(
+            symbol=pos.symbol, entry_price=pos.entry_price,
+            exit_price=exit_price, realized_R=realized_R,
+            pnl=pnl, exit_reason='MKT_EXIT',
+            cumulative_R=self.position_tracker.cumulative_R,
+        )
+
+        # Remove the position from its sequence
+        for opt_type in ['CE', 'PE']:
+            seq = self.pyramid_mgr.get_sequence(opt_type)
+            if seq and pos in seq.positions:
+                seq.positions.remove(pos)
+                # If sequence is now empty, cancel SL and clear
+                if seq.position_count == 0:
+                    if seq.sl_order_id:
+                        self.order_mgr.cancel_order(seq.sl_order_id)
+                    self.pyramid_mgr.clear_sequence(opt_type)
+                else:
+                    # Shift SL for remaining quantity
+                    new_sl_id = self.order_mgr.shift_sl_order(
+                        old_sl_order_id=seq.sl_order_id,
+                        symbol=seq.symbol,
+                        new_quantity=seq.total_quantity(),
+                        new_sl_trigger=seq.shared_sl_trigger,
+                    )
+                    seq.sl_order_id = new_sl_id
+                break
+
+        self._save_state()
+
     def _exit_all_positions(self, reason: str):
         """Close all positions at market price."""
         for opt_type in ['CE', 'PE']:
@@ -741,6 +840,11 @@ class MLV3Live:
             # Cancel SL order
             if seq.sl_order_id:
                 self.order_mgr.cancel_order(seq.sl_order_id)
+
+            # Cancel TP orders for all positions
+            for pos in seq.positions:
+                if hasattr(pos, 'tp_order_id') and pos.tp_order_id:
+                    self.order_mgr.cancel_order(pos.tp_order_id)
 
             # Place market exit for total quantity
             self.order_mgr.place_market_exit(seq.symbol, seq.total_quantity())

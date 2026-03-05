@@ -169,6 +169,55 @@ class OrderManagerV3:
             logger.error(f"[RL-V1-ORDER] SL order failed: {response}")
         return order_id
 
+    def place_tp_order(self, symbol: str, quantity: int,
+                       tp_trigger: float) -> Optional[str]:
+        """Place a LIMIT BUY order for take-profit exit.
+
+        For short options: TP triggers below entry price.
+        tp_trigger is the limit price at which we buy back.
+        """
+        if DRY_RUN:
+            logger.info(
+                f"[RL-V1-ORDER] DRY_RUN: BUY LIMIT {symbol} qty={quantity} "
+                f"price={tp_trigger:.2f}"
+            )
+            return "DRY_RUN_TP"
+
+        if not self.client:
+            logger.error("[RL-V1-ORDER] No client — cannot place TP order")
+            return None
+
+        logger.info(
+            f"[RL-V1-ORDER] Placing BUY LIMIT (TP) {symbol} qty={quantity} "
+            f"price={tp_trigger:.2f}"
+        )
+
+        response = self._retry_call(
+            self.client.placeorder,
+            strategy=RLV1_STRATEGY_NAME,
+            symbol=symbol,
+            action="BUY",
+            exchange=EXCHANGE,
+            price_type="LIMIT",
+            price=str(tp_trigger),
+            quantity=str(quantity),
+            product=PRODUCT_TYPE,
+        )
+
+        order_id = self._extract_order_id(response)
+        if order_id:
+            logger.info(f"[RL-V1-ORDER] TP order placed: {order_id}")
+        else:
+            logger.error(f"[RL-V1-ORDER] TP order failed: {response}")
+        return order_id
+
+    def place_single_market_exit(self, symbol: str, quantity: int) -> Optional[str]:
+        """Place a market BUY order for exiting a single position.
+
+        Used for per-position MARKET_EXIT actions (actions 5-9).
+        """
+        return self.place_market_exit(symbol, quantity)
+
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an order by ID.
 
