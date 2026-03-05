@@ -163,18 +163,12 @@ def evaluate(model_path, data_path, n_episodes, output_dir, seed=42,
 
             pos_count_after = env._position_count()
 
-            # Detect SL/TP fills from position count changes
-            # (fills happen during _advance_to_next_decision)
-            # We approximate: if positions dropped and it wasn't an agent exit action
-            if pos_count_after < pos_count_before:
-                dropped = pos_count_before - pos_count_after
-                if action not in MARKET_EXIT_ACTIONS and action != 10 and action != 11:
-                    # Positions closed by SL or TP fills
-                    # We count them as fills (can't distinguish SL vs TP here exactly)
-                    pass
-
         cum_R = env.cumulative_R
         trades_count = env.trades_today
+        ep_sl_fills = env.sl_fills_today
+        ep_tp_fills = env.tp_fills_today
+        total_sl_fills += ep_sl_fills
+        total_tp_fills += ep_tp_fills
         all_daily_R.append(cum_R)
         total_trades += trades_count
         total_market_exits += ep_market_exits
@@ -288,6 +282,8 @@ def evaluate(model_path, data_path, n_episodes, output_dir, seed=42,
 
     # Exit analysis
     logger.info('--- Exit Mechanism ---')
+    logger.info(f'  SL fills:                    {total_sl_fills}')
+    logger.info(f'  TP fills:                    {total_tp_fills}')
     logger.info(f'  Market exits (per-position): {total_market_exits}')
     logger.info(f'  EXIT_ALL:                    {total_exit_alls}')
     logger.info(f'  STOP_SESSION:                {total_stop_sessions}')

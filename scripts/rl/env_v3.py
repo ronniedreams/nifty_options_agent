@@ -379,6 +379,8 @@ class TradingSessionEnv(gymnasium.Env):
         self.stop_R: float = -5.0
         self.cumulative_R: float = 0.0
         self.trades_today: int = 0
+        self.sl_fills_today: int = 0
+        self.tp_fills_today: int = 0
         self.bar_idx: int = 0
         self._current_decision: Optional[dict] = None
         self._prev_total_R: float = 0.0  # for delta reward
@@ -424,6 +426,8 @@ class TradingSessionEnv(gymnasium.Env):
         self.positions = []
         self.cumulative_R = 0.0
         self.trades_today = 0
+        self.sl_fills_today = 0
+        self.tp_fills_today = 0
         self.bar_idx = 0
         self._current_decision = None
         self._prev_total_R = 0.0
@@ -852,6 +856,7 @@ class TradingSessionEnv(gymnasium.Env):
                 exit_price = pos.sl_trigger
                 realized_R = self._compute_realized_R(pos, exit_price)
                 self.cumulative_R += realized_R
+                self.sl_fills_today += 1
                 # Stop filling once daily limit breached
                 total_R = self.cumulative_R + self._total_unrealized_R_from(surviving)
                 if total_R >= self.target_R or total_R <= self.stop_R:
@@ -884,6 +889,7 @@ class TradingSessionEnv(gymnasium.Env):
                 exit_price = pos.tp_trigger
                 realized_R = self._compute_realized_R(pos, exit_price)
                 self.cumulative_R += realized_R
+                self.tp_fills_today += 1
                 booking_bonus += BOOKING_BONUS_COEFF * max(0.0, realized_R)
                 # Stop filling once daily limit breached
                 total_R = self.cumulative_R + self._total_unrealized_R_from(surviving)
