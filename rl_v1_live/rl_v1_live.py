@@ -122,6 +122,16 @@ ACTION_NAMES = {
 }
 
 
+def _next_weekday_916(from_dt: datetime) -> datetime:
+    """Returns next weekday's 9:16 AM IST (skips Saturday/Sunday)."""
+    candidate = (from_dt + timedelta(days=1)).replace(
+        hour=9, minute=16, second=0, microsecond=0
+    )
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate
+
+
 def _parse_symbol(symbol: str) -> Tuple[Optional[int], Optional[str]]:
     """Parse strike and option type from NIFTY symbol."""
     try:
@@ -901,8 +911,18 @@ def main():
 
         if is_weekend or now.time() >= market_close:
             reason = "weekend" if is_weekend else "after market hours"
-            logger.info(f"[RL-V1-AUTO] Market closed ({reason}). Exiting.")
-            sys.exit(0)
+            next_trading_day = _next_weekday_916(now)
+            wait_seconds = (next_trading_day - now).total_seconds()
+            wait_hours = wait_seconds / 3600
+            logger.info(f"[RL-V1-AUTO] Market closed ({reason}). Sleeping {wait_hours:.1f}h until {next_trading_day.strftime('%a %H:%M')}.")
+            tg.send_message(
+                f"[RL-V1] Market closed ({reason}). Sleeping until next trading day "
+                f"({next_trading_day.strftime('%a %d %b %H:%M')} IST, {wait_hours:.1f}h)."
+            )
+            time.sleep(wait_seconds)
+            # Re-exec the process so login runs fresh (tokens expire overnight)
+            logger.info("[RL-V1-AUTO] Woke up. Re-executing process for fresh login...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
         elif now < auto_detect_time:
             wait_seconds = (auto_detect_time - now).total_seconds()
             wait_min = int(wait_seconds / 60)

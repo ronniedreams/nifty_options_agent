@@ -1936,16 +1936,18 @@ def main():
             return candidate
 
         if is_weekend or now.time() >= market_close:
-            # Market closed — weekend, or past 3:30 PM on a weekday
-            # Exit cleanly so containers stay up for debugging but strategy doesn't run
+            # Market closed — sleep until next trading day instead of exiting
+            # (exiting with restart:always causes infinite restart loop + OTP spam)
             reason = "weekend" if is_weekend else "after market hours"
-            logger.info(f"[AUTO] Market is closed ({reason}). Strategy will not start.")
-            logger.info("[AUTO] Other containers (OpenAlgo, Angel One) remain available for debugging.")
+            next_start = next_trading_day_start(now)
+            wait_seconds = (next_start - now).total_seconds()
+            wait_hours = wait_seconds / 3600
+            logger.info(f"[AUTO] Market closed ({reason}). Sleeping {wait_hours:.1f}h until {next_start.strftime('%a %H:%M')}.")
 
             if telegram_notifier:
                 telegram_notifier.send_message(
-                    f"[AUTO] EC2 started {reason}. Strategy skipped — no market data available. "
-                    f"Other containers are running for debugging/maintenance."
+                    f"[AUTO] Market closed ({reason}). Sleeping until next trading day "
+                    f"({next_start.strftime('%a %d %b %H:%M')} IST, {wait_hours:.1f}h)."
                 )
 
             # Clean up temporary WebSocket if it was created
@@ -1955,8 +1957,10 @@ def main():
                 except Exception:
                     pass
 
-            logger.info("[AUTO] Exiting trading agent. Use 'docker-compose up -d baseline_v1_live' to restart manually.")
-            sys.exit(0)
+            time.sleep(wait_seconds)
+            # Re-exec the process so login runs fresh (tokens expire overnight)
+            logger.info("[AUTO] Woke up. Re-executing process for fresh login...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
         elif now < auto_detect_time:
             # Weekday, but before 9:16 AM — wait for first candle
             wait_seconds = (auto_detect_time - now).total_seconds()
