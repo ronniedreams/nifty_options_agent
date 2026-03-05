@@ -25,7 +25,8 @@ Tracks bugs, operational issues, feature ideas, and enhancements in a single uni
 | IDEA-003 | Idea | 2026-02-23 | Skip Historify Cron Job on Weekends | Historify cron job / EC2 | P2 — Medium | Implemented | Already done — EC2 crontab uses `* * 1-5` (Mon-Fri only). Verified 2026-02-23. |
 | ISS-011 | Issue | 2026-02-23 | EC2 started after market hours enters futile wait loop | `baseline_v1_live.py` | P2 — Medium | Fixed | Trading agent now exits cleanly with `sys.exit(0)` when started after market hours (post 3:30 PM or weekends). Other containers (OpenAlgo, Angel One, monitor) remain running for debugging. Telegram notification sent on skip. |
 | IDEA-004 | Idea | 2026-02-25 | Weekly DuckDB backup to Google Drive | EC2 cron / rclone / Google Drive | P2 — Medium | Implemented | DuckDB (782 MB) compresses to 23 MB with gzip. rclone uploads to ronniegupta85@gmail.com Google Drive (`nifty-backups/`). Mon-Thu: overwrite `historify_latest.duckdb.gz`. Friday: dated weekly snapshot. Cron at 4:10 PM IST Mon-Fri. ~23 MB/week, ~1.2 GB/year. |
-| IDEA-005 | Idea | 2026-02-26 | Split baseline_v1_live.py into smaller modules | `baseline_v1_live.py` | P3 — Low | Idea | File grew from ~530 to 2,025 lines. Two targeted extractions recommended: (1) Extract `process_tick()` internals (~380 lines) — CE/PE loop body with stale checks, filter eval, order placement, switch deferral → `TickProcessor` or helper methods. (2) Extract startup sequence from `start()` lines 434-567 — historical load, swing replay, bar save, startup protection, reconciliation → `_run_startup_sequence()` or `StartupOrchestrator`. Full module split not recommended (state coupling risk in live trading code). |
+| IDEA-005 | Idea | 2026-02-26 | Split baseline_v1_live.py into smaller modules | `baseline_v1_live.py` | P3 — Low | Rejected | Discussed and decided not to implement — state coupling risk in live trading code outweighs the benefit of splitting. |
+| IDEA-006 | Idea | 2026-03-05 | Optimize Google Drive backup data transfer costs | EC2 cron / rclone / Google Drive | P2 — Medium | Idea | Daily uploads to Google Drive incur data transfer costs. Investigate options: upload only on changes (checksum diff), reduce frequency (weekly only instead of Mon-Thu overwrites), compress further, or skip if file unchanged since last upload. Related to IDEA-004. |
 
 ---
 
@@ -54,5 +55,6 @@ Tracks bugs, operational issues, feature ideas, and enhancements in a single uni
 | ISS-009 | Issue | 2026-02-26 | Fixed: Root cause was `/app/logs` PermissionError in Angel One container. Added bind mount in docker-compose.yaml. WebSocket connects successfully now. |
 | IDEA-001 | Idea | 2026-02-23 | Telegram best-strike notifications now show selection reason + replaced symbol |
 | IDEA-003 | Idea | 2026-02-23 | Already implemented — EC2 crontab uses `1-5` day-of-week field (Mon-Fri only) |
+| IDEA-005 | Idea | 2026-03-05 | Rejected — state coupling risk outweighs benefit of splitting baseline_v1_live.py |
 | ISS-011 | Issue | 2026-02-25 | Fixed: Trading agent exits cleanly after market hours instead of sleeping until next day. Other containers stay up for debugging. |
 | ISS-007 | Issue | 2026-02-25 | Fixed: Added `location /api/` (auth_basic off) + `location /ws/` (WebSocket proxy to port 8765) in nginx config on EC2. Mobile app connects via `wss://openalgo.ronniedreams.in/ws/`. |
