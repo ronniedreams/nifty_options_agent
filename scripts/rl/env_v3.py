@@ -1,12 +1,16 @@
 """
-TradingSessionEnv — Unified RL environment for V3 (entry + exit decisions).
+TradingSessionEnv V3 — Complete redesign for RL exit agent.
 
-Key differences from env.py (V1):
-- Discrete(4): SKIP/HOLD, ENTER, EXIT_ALL, STOP_SESSION
-- Two decision types: entry (swing break) and review (periodic, positions open)
-- PyramidSequence with SL shifting (no per-trade TP orders)
-- 24-feature observation (+ decision_type + position summary)
-- BC warmstart replaces ForceEntryWrapper
+The Game: Reach +5R before hitting -5R by selling options at swing breaks,
+setting profit targets, and rotating between CE and PE.
+
+Key features:
+- Discrete(12): HOLD, ENTER_TP_0.5/1.0/2.0/3.0R, MARKET_EXIT_POS_1-5, EXIT_ALL, STOP_SESSION
+- 46-feature observation (break context + market context + session state + per-position)
+- Bracket orders: each position has SL (above entry) + TP (below entry)
+- Intra-bar TP/SL execution at exact trigger prices
+- Per-step delta reward + booking bonus + terminal bonus
+- Market exit only when position is profitable (unrealized_R >= 0)
 
 One episode = one trading day (9:16 AM to 3:15 PM).
 """
@@ -49,24 +53,50 @@ STRIKE_SCAN_RANGE = 20
 MARKET_OPEN = dtime(9, 15)
 FORCE_EXIT = dtime(15, 15)
 
-# Review decision interval (every N bars when positions are open)
-REVIEW_INTERVAL = 5
-
 # Transaction cost parameters (Zerodha F&O Options)
 BROKERAGE_PER_TRADE = 40.0
 STT_RATE = 0.001
 EXCHANGE_TXN_RATE = 0.000356
 GST_RATE = 0.18
 
-# Actions
-ACTION_SKIP_HOLD = 0   # SKIP at entry, HOLD_ALL at review
-ACTION_ENTER = 1        # Open new position in pyramid
-ACTION_EXIT_ALL = 2     # Close all positions at market price
-ACTION_STOP_SESSION = 3 # Exit all + end episode
+# Actions: Discrete(12)
+ACTION_HOLD = 0             # SKIP at entry, HOLD at review
+ACTION_ENTER_TP_05 = 1      # Enter + TP at 0.5R profit
+ACTION_ENTER_TP_10 = 2      # Enter + TP at 1.0R profit
+ACTION_ENTER_TP_20 = 3      # Enter + TP at 2.0R profit
+ACTION_ENTER_TP_30 = 4      # Enter + TP at 3.0R profit
+ACTION_MARKET_EXIT_1 = 5    # Exit oldest position (only if profitable)
+ACTION_MARKET_EXIT_2 = 6    # Exit 2nd oldest
+ACTION_MARKET_EXIT_3 = 7    # Exit 3rd oldest
+ACTION_MARKET_EXIT_4 = 8    # Exit 4th oldest
+ACTION_MARKET_EXIT_5 = 9    # Exit newest (5th)
+ACTION_EXIT_ALL = 10         # Market exit everything
+ACTION_STOP_SESSION = 11     # Exit all + end episode
+
+NUM_ACTIONS = 12
+
+# TP R-level mapping for entry actions
+TP_R_LEVELS = {
+    ACTION_ENTER_TP_05: 0.5,
+    ACTION_ENTER_TP_10: 1.0,
+    ACTION_ENTER_TP_20: 2.0,
+    ACTION_ENTER_TP_30: 3.0,
+}
+
+# Observation dimensions
+NUM_FEATURES = 46
+NUM_POSITION_SLOTS = 5
+FEATURES_PER_POSITION = 5
 
 # Decision types
 DECISION_ENTRY = 0.0
 DECISION_REVIEW = 1.0
+
+# Reward: booking bonus coefficient
+BOOKING_BONUS_COEFF = 0.1
+# Reward: terminal bonus/penalty
+TERMINAL_WIN_BONUS = 5.0
+TERMINAL_LOSE_PENALTY = -5.0
 
 MONTH_ABBREVS = {
     1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN",
@@ -95,7 +125,7 @@ def _parse_symbol(symbol: str) -> Tuple[Optional[int], Optional[str]]:
 
 
 # ---------------------------------------------------------------------------
-# VWAPCalculator (reused from env.py)
+# VWAPCalculator
 # ---------------------------------------------------------------------------
 
 class VWAPCalculator:
@@ -125,7 +155,7 @@ class VWAPCalculator:
 
 
 # ---------------------------------------------------------------------------
-# DayData (reused from env.py)
+# DayData
 # ---------------------------------------------------------------------------
 
 class DayData:
@@ -225,7 +255,7 @@ class DayData:
 
 @dataclass
 class PyramidPosition:
-    """One open position within a pyramid sequence."""
+    """One open short position with independent SL and TP."""
     symbol: str
     option_type: str
     entry_price: float
@@ -233,36 +263,12 @@ class PyramidPosition:
     entry_bar_idx: int
     lots: int
     quantity: int
-    actual_R_value: float   # sl_points * quantity at entry (risk in Rs)
+    actual_R_value: float       # sl_points * quantity at entry (risk in Rs)
     sl_points_at_entry: float
-
-
-@dataclass
-class PyramidSequence:
-    """A group of same-symbol positions sharing a single SL.
-
-    When a new position is added, the shared SL shifts to the new
-    (tighter) level. If SL is hit, ALL positions in the sequence exit.
-    """
-    symbol: str
-    option_type: str
-    positions: List[PyramidPosition] = field(default_factory=list)
-    shared_sl_trigger: float = 0.0   # highest_high + 1 (updated on add)
+    sl_trigger: float = 0.0     # buy stop above entry (loss if hit)
     highest_high: float = 0.0
-
-    def add_position(self, pos: PyramidPosition, sl_trigger: float,
-                     highest_high: float):
-        self.positions.append(pos)
-        # SL shifts to the new (tighter) level
-        self.shared_sl_trigger = sl_trigger
-        self.highest_high = highest_high
-
-    @property
-    def position_count(self) -> int:
-        return len(self.positions)
-
-    def total_quantity(self) -> int:
-        return sum(p.quantity for p in self.positions)
+    tp_trigger: float = 0.0     # buy limit below entry (profit if hit)
+    tp_R_level: float = 0.0     # TP target in R (0.5, 1.0, 2.0, 3.0)
 
 
 # ---------------------------------------------------------------------------
@@ -271,53 +277,55 @@ class PyramidSequence:
 
 class TradingSessionEnv(gymnasium.Env):
     """
-    Unified RL environment for entry + exit decisions.
+    V3 RL environment: The Daily Game.
 
-    Action space: Discrete(4)
-        0: SKIP (entry) / HOLD_ALL (review)
-        1: ENTER — open new position
-        2: EXIT_ALL — close all positions at market
-        3: STOP_SESSION — exit all + end episode
+    Goal: Reach +5R realized profit before hitting -5R by selling options
+    at swing breaks, setting profit targets, and rotating CE/PE.
 
-    Observation space: Box(24,)
-        0-11:  Global market context
-        12-17: Session state
-        18:    Decision type (0=entry, 1=review)
-        19-23: Position summary
+    Action space: Discrete(12)
+        0: HOLD (skip entry / hold all positions)
+        1-4: ENTER with TP at 0.5R / 1.0R / 2.0R / 3.0R
+        5-9: MARKET_EXIT position 1-5 (only if profitable, oldest first)
+        10: EXIT_ALL (market exit everything)
+        11: STOP_SESSION (exit all + end episode)
 
-    Episode: one trading day. Goal-conditioned target_R / stop_R.
+    Observation space: Box(46,)
+        0-9:   Break context (zeroed during review)
+        10-13: Market context
+        14-19: Session state
+        20:    Decision type (0=entry, 1=review)
+        21-45: Per-position state (5 slots x 5 features)
+
+    Episode: one trading day. Fixed target +5R / stop -5R.
     """
 
     metadata = {'render_modes': []}
 
     def __init__(
         self,
-        data_path: str = 'data/nifty_options_combined.parquet',
+        data_path: str = 'data/nifty_options_full.parquet',
         eval_mode: bool = False,
         seed: int = 42,
         start_date: str = None,
         end_date: str = None,
-        fixed_target_R: float = None,
-        fixed_stop_R: float = None,
-        review_interval: int = REVIEW_INTERVAL,
+        fixed_target_R: float = 5.0,
+        fixed_stop_R: float = -5.0,
     ):
         super().__init__()
         self._fixed_target_R = fixed_target_R
         self._fixed_stop_R = fixed_stop_R
-        self.review_interval = review_interval
 
-        self.action_space = spaces.Discrete(4)
+        self.action_space = spaces.Discrete(NUM_ACTIONS)
         self.observation_space = spaces.Box(
-            -np.inf, np.inf, shape=(24,), dtype=np.float32,
+            -np.inf, np.inf, shape=(NUM_FEATURES,), dtype=np.float32,
         )
 
-        # Load parquet (with date filtering at read time for memory efficiency)
+        # Load parquet
         data_path = Path(data_path)
         if not data_path.is_absolute():
             data_path = PROJECT_ROOT / data_path
         logger.info(f"Loading data from {data_path} ...")
 
-        # Build pyarrow filters to avoid loading entire file into memory
         pa_filters = []
         if start_date:
             pa_filters.append(('Datetime', '>=', pd.Timestamp(start_date)))
@@ -327,7 +335,6 @@ class TradingSessionEnv(gymnasium.Env):
 
         self._data = pd.read_parquet(data_path, filters=filters)
 
-        # Downcast numeric columns to reduce memory (~60% savings)
         for col in ['Strike', 'd_to_expiry']:
             if col in self._data.columns:
                 self._data[col] = pd.to_numeric(self._data[col], downcast='integer')
@@ -337,10 +344,9 @@ class TradingSessionEnv(gymnasium.Env):
                 self._data[col] = pd.to_numeric(self._data[col], downcast='float')
 
         self._data['_date'] = self._data['Datetime'].dt.date
-
-        # Build day groups using index slicing (avoids groupby copy overhead)
         self._data.sort_values('Datetime', inplace=True)
         self._data.reset_index(drop=True, inplace=True)
+
         self._day_groups: Dict[date, pd.DataFrame] = {}
         for d, grp in self._data.groupby('_date', sort=False, observed=True):
             self._day_groups[d] = grp
@@ -354,7 +360,6 @@ class TradingSessionEnv(gymnasium.Env):
             self.trading_days = [d for d in self.trading_days if d <= end_d]
 
         n_rows = len(self._data)
-        # Drop the full DataFrame reference — day_groups holds the views
         del self._data
         self._data = None
 
@@ -368,38 +373,27 @@ class TradingSessionEnv(gymnasium.Env):
         self._day_idx = 0
         self._rng = np.random.default_rng(seed)
 
-        # Episode state
+        # Episode state (initialized in reset)
         self.day: Optional[DayData] = None
         self.target_R: float = 5.0
         self.stop_R: float = -5.0
         self.cumulative_R: float = 0.0
         self.trades_today: int = 0
         self.bar_idx: int = 0
-        self._current_decision: Optional[dict] = None  # {type, break_info}
+        self._current_decision: Optional[dict] = None
+        self._prev_total_R: float = 0.0  # for delta reward
 
-        # Pyramid sequences (one per option type)
-        self.ce_sequence: Optional[PyramidSequence] = None
-        self.pe_sequence: Optional[PyramidSequence] = None
-
-    def _all_positions(self) -> List[PyramidPosition]:
-        positions = []
-        if self.ce_sequence:
-            positions.extend(self.ce_sequence.positions)
-        if self.pe_sequence:
-            positions.extend(self.pe_sequence.positions)
-        return positions
+        # Positions: flat list ordered by entry time (slot 1=oldest)
+        self.positions: List[PyramidPosition] = []
 
     def _position_count(self) -> int:
-        return len(self._all_positions())
+        return len(self.positions)
 
-    def _get_sequence(self, opt_type: str) -> Optional[PyramidSequence]:
-        return self.ce_sequence if opt_type == 'CE' else self.pe_sequence
+    def _ce_count(self) -> int:
+        return sum(1 for p in self.positions if p.option_type == 'CE')
 
-    def _set_sequence(self, opt_type: str, seq: Optional[PyramidSequence]):
-        if opt_type == 'CE':
-            self.ce_sequence = seq
-        else:
-            self.pe_sequence = seq
+    def _pe_count(self) -> int:
+        return sum(1 for p in self.positions if p.option_type == 'PE')
 
     def reset(self, seed=None, options=None):
         if seed is not None:
@@ -414,15 +408,8 @@ class TradingSessionEnv(gymnasium.Env):
         else:
             day_date = self._rng.choice(self.trading_days)
 
-        # Goal conditioning
-        if self._fixed_target_R is not None:
-            self.target_R = self._fixed_target_R
-        else:
-            self.target_R = float(self._rng.choice([3, 4, 5, 6, 7]))
-        if self._fixed_stop_R is not None:
-            self.stop_R = self._fixed_stop_R
-        else:
-            self.stop_R = float(self._rng.choice([-3, -4, -5, -6, -7]))
+        self.target_R = self._fixed_target_R if self._fixed_target_R is not None else 5.0
+        self.stop_R = self._fixed_stop_R if self._fixed_stop_R is not None else -5.0
 
         # Load day
         self.day = DayData(self._day_groups[day_date], day_date)
@@ -434,12 +421,12 @@ class TradingSessionEnv(gymnasium.Env):
             det.is_historical_processing = True
 
         # Reset state
-        self.ce_sequence = None
-        self.pe_sequence = None
+        self.positions = []
         self.cumulative_R = 0.0
         self.trades_today = 0
         self.bar_idx = 0
         self._current_decision = None
+        self._prev_total_R = 0.0
         self.vwap_calc = VWAPCalculator()
         self.swing_break_count = {'CE': 0, 'PE': 0}
 
@@ -467,77 +454,108 @@ class TradingSessionEnv(gymnasium.Env):
         return obs, info
 
     def step(self, action):
-        reward = 0.0
         info = {}
+        booking_bonus = 0.0
 
         decision = self._current_decision
         if decision is None:
-            # No pending decision — episode should end
             obs = np.zeros(self.observation_space.shape, dtype=np.float32)
             return obs, 0.0, False, True, {'eod': True}
 
         decision_type = decision['type']
 
-        # --- STOP_SESSION (action=3) ---
+        # --- STOP_SESSION (action=11) ---
         if action == ACTION_STOP_SESSION:
-            reward += self._exit_all_sequences()
+            self._exit_all_positions()
             info['stop_session'] = True
+            total_R = self.cumulative_R
+            delta = total_R - self._prev_total_R
+            terminal = self._terminal_bonus()
+            reward = delta + terminal
+            self._prev_total_R = total_R
             obs = np.zeros(self.observation_space.shape, dtype=np.float32)
             info['final_cumR'] = self.cumulative_R
             info['final_trades'] = self.trades_today
-            info['final_target_R'] = self.target_R
-            info['final_stop_R'] = self.stop_R
             return obs, reward, True, False, info
 
-        # --- EXIT_ALL (action=2) ---
+        # --- EXIT_ALL (action=10) ---
         if action == ACTION_EXIT_ALL:
-            reward += self._exit_all_sequences()
+            self._exit_all_positions()
             info['exit_all'] = True
 
-        # --- ENTER (action=1) ---
-        elif action == ACTION_ENTER:
+        # --- MARKET_EXIT_POS_N (actions 5-9) ---
+        elif ACTION_MARKET_EXIT_1 <= action <= ACTION_MARKET_EXIT_5:
+            pos_idx = action - ACTION_MARKET_EXIT_1  # 0-based slot index
+            realized = self._market_exit_position(pos_idx)
+            if realized is not None:
+                booking_bonus = BOOKING_BONUS_COEFF * max(0.0, realized)
+                info['market_exit'] = True
+                info['market_exit_R'] = realized
+
+        # --- ENTER with TP (actions 1-4) ---
+        elif action in TP_R_LEVELS:
             if decision_type == DECISION_ENTRY and decision.get('break_info'):
-                added = self._add_to_pyramid(decision['break_info'])
+                tp_R = TP_R_LEVELS[action]
+                added = self._add_to_pyramid(decision['break_info'], tp_R)
                 if added:
                     self.trades_today += 1
                     info['entered'] = True
+                    info['tp_R_level'] = tp_R
                 else:
                     info['position_limit_hit'] = True
-            # ENTER at review is invalid — treated as HOLD
-            elif decision_type == DECISION_REVIEW:
-                pass
+            # ENTER at review is invalid -> treated as HOLD
 
-        # --- SKIP/HOLD (action=0): do nothing ---
+        # --- HOLD (action=0): do nothing ---
 
         # Advance to next decision
         obs, advance_info = self._advance_to_next_decision()
 
-        reward += advance_info.get('reward', 0.0)
+        # Compute delta reward
+        total_R = self.cumulative_R + self._total_unrealized_R()
+        delta = total_R - self._prev_total_R
+        self._prev_total_R = total_R
+
+        # Add booking bonus from advance phase (SL/TP fills)
+        booking_bonus += advance_info.get('booking_bonus', 0.0)
+
         info.update(advance_info)
 
         # Check termination
-        total_R = self.cumulative_R + self._total_unrealized_R()
-        terminated = total_R >= self.target_R or total_R <= self.stop_R
+        terminated = False
         truncated = advance_info.get('eod', False) or obs is None
+
+        if advance_info.get('daily_limit', False):
+            terminated = True
+            truncated = False
 
         if obs is None:
             obs = np.zeros(self.observation_space.shape, dtype=np.float32)
 
+        # Terminal bonus
+        terminal = 0.0
         if terminated or truncated:
+            terminal = self._terminal_bonus()
             info['final_cumR'] = self.cumulative_R
             info['final_trades'] = self.trades_today
-            info['final_target_R'] = self.target_R
-            info['final_stop_R'] = self.stop_R
+
+        reward = delta + booking_bonus + terminal
 
         return obs, reward, terminated, truncated, info
+
+    def _terminal_bonus(self) -> float:
+        if self.cumulative_R >= self.target_R:
+            return TERMINAL_WIN_BONUS
+        elif self.cumulative_R <= self.stop_R:
+            return TERMINAL_LOSE_PENALTY
+        return 0.0
 
     # ------------------------------------------------------------------
     # Core loop: advance bars until next decision point
     # ------------------------------------------------------------------
 
     def _advance_to_next_decision(self):
-        accumulated_reward = 0.0
         info = {}
+        booking_bonus = 0.0
 
         while self.bar_idx < len(self.day.timestamps):
             ts = self.day.timestamps[self.bar_idx]
@@ -545,9 +563,9 @@ class TradingSessionEnv(gymnasium.Env):
 
             # Force exit at 3:15 PM
             if ts_time >= FORCE_EXIT:
-                accumulated_reward += self._exit_all_sequences()
+                self._exit_all_positions()
                 info['eod'] = True
-                info['reward'] = accumulated_reward
+                info['booking_bonus'] = booking_bonus
                 return None, info
 
             ts_pydatetime = pd.Timestamp(ts).to_pydatetime()
@@ -558,25 +576,29 @@ class TradingSessionEnv(gymnasium.Env):
             # Update spot tracking
             self._update_spot_tracking(ts)
 
-            # Check SL fills for pyramid sequences
-            fill_reward = self._check_sl_fills(ts)
-            accumulated_reward += fill_reward
+            # Step 1: Check SL fills (conservative — checked FIRST)
+            sl_bonus = self._check_sl_fills(ts)
+            booking_bonus += sl_bonus
 
-            # Check daily limits after fills
+            # Step 2: Check TP fills
+            tp_bonus = self._check_tp_fills(ts)
+            booking_bonus += tp_bonus
+
+            # Step 3: Check daily limits after fills
             total_R = self.cumulative_R + self._total_unrealized_R()
             if total_R >= self.target_R or total_R <= self.stop_R:
-                accumulated_reward += self._exit_all_sequences()
-                info['reward'] = accumulated_reward
+                self._exit_all_positions()
+                info['booking_bonus'] = booking_bonus
                 info['daily_limit'] = True
                 return None, info
 
-            # Feed bars to swing detector
+            # Step 4: Feed bars to swing detector
             self.swing_detector.update_all(swing_bars)
 
-            # Update per-symbol tracking
+            # Step 5: Update per-symbol tracking
             self._update_symbol_tracking(swing_bars)
 
-            # Detect swing breaks
+            # Step 6: Detect swing breaks
             breaks = self._detect_breaks(swing_bars, ts_pydatetime)
             best = self._select_best_strike(breaks)
 
@@ -591,13 +613,11 @@ class TradingSessionEnv(gymnasium.Env):
                     DECISION_ENTRY, ts_pydatetime, break_info=best,
                 )
                 self.bar_idx += 1
-                info['reward'] = accumulated_reward
+                info['booking_bonus'] = booking_bonus
                 return obs, info
 
-            # Review decision: positions open AND interval reached
-            if (self._position_count() > 0 and
-                    self.bar_idx > 0 and
-                    self.bar_idx % self.review_interval == 0):
+            # Review decision: positions open (every bar)
+            if self._position_count() > 0:
                 self._current_decision = {
                     'type': DECISION_REVIEW,
                     'break_info': None,
@@ -607,20 +627,20 @@ class TradingSessionEnv(gymnasium.Env):
                     DECISION_REVIEW, ts_pydatetime,
                 )
                 self.bar_idx += 1
-                info['reward'] = accumulated_reward
+                info['booking_bonus'] = booking_bonus
                 return obs, info
 
             self.bar_idx += 1
 
         # End of day
         if self.day.timestamps:
-            accumulated_reward += self._exit_all_sequences()
-        info['reward'] = accumulated_reward
+            self._exit_all_positions()
+        info['booking_bonus'] = booking_bonus
         info['eod'] = True
         return None, info
 
     # ------------------------------------------------------------------
-    # Bar building + tracking (reused from env.py)
+    # Bar building + tracking
     # ------------------------------------------------------------------
 
     def _build_bars(self, ts, ts_pydatetime) -> Dict[str, dict]:
@@ -664,7 +684,7 @@ class TradingSessionEnv(gymnasium.Env):
                 self.bar_ranges[symbol].append((h - l) / c)
 
     # ------------------------------------------------------------------
-    # Swing break detection (reused from env.py)
+    # Swing break detection
     # ------------------------------------------------------------------
 
     def _detect_breaks(self, bars: Dict[str, dict],
@@ -763,11 +783,11 @@ class TradingSessionEnv(gymnasium.Env):
         )
 
     # ------------------------------------------------------------------
-    # Pyramid management
+    # Position management
     # ------------------------------------------------------------------
 
-    def _add_to_pyramid(self, break_info: dict) -> bool:
-        """Add a position to the appropriate pyramid sequence."""
+    def _add_to_pyramid(self, break_info: dict, tp_R_level: float) -> bool:
+        """Add a short position with SL and TP bracket."""
         opt_type = break_info['option_type']
         symbol = break_info['symbol']
         entry_price = break_info['entry_price']
@@ -778,29 +798,20 @@ class TradingSessionEnv(gymnasium.Env):
         # Position limits
         if self._position_count() >= MAX_POSITIONS:
             return False
-
-        seq = self._get_sequence(opt_type)
-
-        # Type-specific limits
-        if opt_type == 'CE':
-            count = self.ce_sequence.position_count if self.ce_sequence else 0
-            if count >= MAX_CE_POSITIONS:
-                return False
-        else:
-            count = self.pe_sequence.position_count if self.pe_sequence else 0
-            if count >= MAX_PE_POSITIONS:
-                return False
-
-        # Same-symbol constraint: if sequence exists, must match symbol
-        if seq is not None and seq.position_count > 0:
-            if seq.symbol != symbol:
-                return False
+        if opt_type == 'CE' and self._ce_count() >= MAX_CE_POSITIONS:
+            return False
+        if opt_type == 'PE' and self._pe_count() >= MAX_PE_POSITIONS:
+            return False
 
         # Size position
         lots = min(int(R_VALUE / (sl_points * LOT_SIZE)), MAX_LOTS)
         if lots <= 0:
             return False
         quantity = lots * LOT_SIZE
+
+        # TP trigger: entry_price - (tp_R_level * sl_points)
+        # For short positions, profit when price drops below entry
+        tp_trigger = entry_price - (tp_R_level * sl_points)
 
         pos = PyramidPosition(
             symbol=symbol,
@@ -812,87 +823,121 @@ class TradingSessionEnv(gymnasium.Env):
             quantity=quantity,
             actual_R_value=sl_points * quantity,
             sl_points_at_entry=sl_points,
+            sl_trigger=sl_trigger,
+            highest_high=highest_high,
+            tp_trigger=tp_trigger,
+            tp_R_level=tp_R_level,
         )
 
-        if seq is None or seq.position_count == 0:
-            seq = PyramidSequence(symbol=symbol, option_type=opt_type)
-            self._set_sequence(opt_type, seq)
-
-        seq.add_position(pos, sl_trigger, highest_high)
+        self.positions.append(pos)
         return True
 
     def _check_sl_fills(self, ts) -> float:
-        """Check if shared SL is hit for each pyramid sequence."""
-        reward = 0.0
-        for opt_type in ['CE', 'PE']:
-            seq = self._get_sequence(opt_type)
-            if seq is None or seq.position_count == 0:
-                continue
-
-            # Check if any bar for the sequence symbol hits the SL
-            key = (ts, seq.symbol)
+        """Check SL fills: bar HIGH >= sl_trigger -> -1R loss.
+        Returns booking bonus (always 0 for SL, losses don't get bonus)."""
+        surviving = []
+        for pos in self.positions:
+            key = (ts, pos.symbol)
             if key not in self.day.bar_lookup:
+                surviving.append(pos)
                 continue
             _, h, _, _, _ = self.day.bar_lookup[key]
 
-            if h >= seq.shared_sl_trigger:
-                # SL hit — exit ALL positions in sequence
-                for pos in seq.positions:
-                    exit_price = seq.shared_sl_trigger
-                    if pos.actual_R_value > 0:
-                        realized_R = (
-                            (pos.entry_price - exit_price) * pos.quantity
-                            / pos.actual_R_value
-                        )
-                    else:
-                        realized_R = 0.0
-                    cost_R = self._transaction_cost_R(
-                        pos.entry_price, exit_price, pos.quantity,
-                    )
-                    realized_R -= cost_R
-                    self.cumulative_R += realized_R
-                    reward += realized_R
-
-                # Clear sequence
-                self._set_sequence(opt_type, None)
-
-        return reward
-
-    def _exit_all_sequences(self) -> float:
-        """Close all positions at current market price."""
-        reward = 0.0
-        for opt_type in ['CE', 'PE']:
-            seq = self._get_sequence(opt_type)
-            if seq is None or seq.position_count == 0:
-                continue
-
-            for pos in seq.positions:
-                bar = self._latest_bars.get(pos.symbol)
-                if bar is not None:
-                    exit_price = bar['close']
-                else:
-                    exit_price = pos.entry_price
-
-                if pos.actual_R_value > 0:
-                    realized_R = (
-                        (pos.entry_price - exit_price) * pos.quantity
-                        / pos.actual_R_value
-                    )
-                else:
-                    realized_R = 0.0
-                cost_R = self._transaction_cost_R(
-                    pos.entry_price, exit_price, pos.quantity,
-                )
-                realized_R -= cost_R
+            if h >= pos.sl_trigger:
+                # SL hit -> close at sl_trigger price
+                exit_price = pos.sl_trigger
+                realized_R = self._compute_realized_R(pos, exit_price)
                 self.cumulative_R += realized_R
-                reward += realized_R
+            else:
+                surviving.append(pos)
 
-            self._set_sequence(opt_type, None)
+        self.positions = surviving
+        return 0.0  # No booking bonus for SL fills
 
-        return reward
+    def _check_tp_fills(self, ts) -> float:
+        """Check TP fills: bar LOW <= tp_trigger -> profit at TP level.
+        Returns booking bonus for realized profits."""
+        surviving = []
+        booking_bonus = 0.0
+
+        for pos in self.positions:
+            key = (ts, pos.symbol)
+            if key not in self.day.bar_lookup:
+                surviving.append(pos)
+                continue
+            _, _, l, _, _ = self.day.bar_lookup[key]
+
+            if pos.tp_trigger > 0 and l <= pos.tp_trigger:
+                # TP hit -> close at tp_trigger price
+                exit_price = pos.tp_trigger
+                realized_R = self._compute_realized_R(pos, exit_price)
+                self.cumulative_R += realized_R
+                booking_bonus += BOOKING_BONUS_COEFF * max(0.0, realized_R)
+            else:
+                surviving.append(pos)
+
+        self.positions = surviving
+        return booking_bonus
+
+    def _market_exit_position(self, slot_idx: int) -> Optional[float]:
+        """Market exit a specific position slot (0-based). Only if profitable.
+        Returns realized_R if exited, None if invalid/unprofitable."""
+        if slot_idx < 0 or slot_idx >= len(self.positions):
+            return None
+
+        pos = self.positions[slot_idx]
+        bar = self._latest_bars.get(pos.symbol)
+        if bar is None:
+            return None
+
+        # Compute unrealized R
+        if pos.actual_R_value <= 0:
+            return None
+        unrealized_R = (
+            (pos.entry_price - bar['close']) * pos.quantity
+            / pos.actual_R_value
+        )
+
+        # Only allow market exit if profitable
+        if unrealized_R < 0:
+            return None
+
+        # Exit at bar close
+        exit_price = bar['close']
+        realized_R = self._compute_realized_R(pos, exit_price)
+        self.cumulative_R += realized_R
+
+        # Remove position
+        self.positions.pop(slot_idx)
+        return realized_R
+
+    def _exit_all_positions(self):
+        """Close all positions at current market price."""
+        for pos in self.positions:
+            bar = self._latest_bars.get(pos.symbol)
+            if bar is not None:
+                exit_price = bar['close']
+            else:
+                exit_price = pos.entry_price
+            realized_R = self._compute_realized_R(pos, exit_price)
+            self.cumulative_R += realized_R
+        self.positions = []
+
+    def _compute_realized_R(self, pos: PyramidPosition, exit_price: float) -> float:
+        """Compute realized R-multiple for a short position exit."""
+        if pos.actual_R_value <= 0:
+            return 0.0
+        realized_R = (
+            (pos.entry_price - exit_price) * pos.quantity
+            / pos.actual_R_value
+        )
+        cost_R = self._transaction_cost_R(
+            pos.entry_price, exit_price, pos.quantity,
+        )
+        return realized_R - cost_R
 
     # ------------------------------------------------------------------
-    # Transaction cost (reused from env.py)
+    # Transaction cost
     # ------------------------------------------------------------------
 
     def _transaction_cost_R(self, entry_price: float, exit_price: float,
@@ -913,7 +958,7 @@ class TradingSessionEnv(gymnasium.Env):
 
     def _total_unrealized_R(self) -> float:
         total = 0.0
-        for pos in self._all_positions():
+        for pos in self.positions:
             bar = self._latest_bars.get(pos.symbol)
             if bar is None or pos.actual_R_value <= 0:
                 continue
@@ -924,187 +969,168 @@ class TradingSessionEnv(gymnasium.Env):
             total += unrealized
         return total
 
-    def _per_position_unrealized_R(self) -> List[float]:
-        """Return list of unrealized R for each open position."""
-        result = []
-        for pos in self._all_positions():
-            bar = self._latest_bars.get(pos.symbol)
-            if bar is None or pos.actual_R_value <= 0:
-                result.append(0.0)
-                continue
-            unrealized = (
-                (pos.entry_price - bar['close']) * pos.quantity
-                / pos.actual_R_value
-            )
-            result.append(unrealized)
-        return result
+    def _position_unrealized_R(self, pos: PyramidPosition) -> float:
+        """Unrealized R for a single position."""
+        bar = self._latest_bars.get(pos.symbol)
+        if bar is None or pos.actual_R_value <= 0:
+            return 0.0
+        return (
+            (pos.entry_price - bar['close']) * pos.quantity
+            / pos.actual_R_value
+        )
 
     # ------------------------------------------------------------------
-    # Feature computation (24 features)
+    # Feature computation (46 features)
     # ------------------------------------------------------------------
 
     def _compute_observation(self, decision_type: float,
                              ts_pydatetime: datetime,
                              break_info: dict = None) -> np.ndarray:
-        """Build 24-feature observation vector.
+        """Build 46-feature observation vector.
 
-        At entry: features 0-11 from break_info symbol.
-        At review: features 0-11 from most recent position's symbol.
+        Group 1 (0-9):   Break context (zeroed during review)
+        Group 2 (10-13): Market context (always)
+        Group 3 (14-19): Session state (always)
+        Group 4 (20):    Decision type
+        Group 5 (21-45): Per-position state (5 slots x 5 features)
         """
-        # Determine reference symbol and bar
+        obs = np.zeros(NUM_FEATURES, dtype=np.float32)
+
+        # --- Group 1: Break Context (features 0-9) ---
+        # At entry: from swing break. At review: all zeros.
         if decision_type == DECISION_ENTRY and break_info is not None:
             symbol = break_info['symbol']
             bar = break_info['bar']
-            ref_entry_price = break_info['entry_price']
-            ref_vwap = break_info['vwap']
-            ref_sl_points = break_info['sl_points']
-            ref_option_type = break_info['option_type']
-        else:
-            # Review: use most recent position's symbol
-            positions = self._all_positions()
-            if positions:
-                latest_pos = positions[-1]
-                symbol = latest_pos.symbol
-                bar = self._latest_bars.get(symbol)
-                if bar is None:
-                    bar = {'high': 0, 'low': 0, 'close': 0, 'open': 0}
-                ref_entry_price = bar.get('close', 0)
-                ref_vwap = self.vwap_calc.get(symbol)
-                ref_sl_points = latest_pos.sl_points_at_entry
-                ref_option_type = latest_pos.option_type
-            else:
-                # No positions (shouldn't happen for review, but be safe)
-                return np.zeros(24, dtype=np.float32)
+            entry_price = break_info['entry_price']
+            vwap = break_info['vwap']
+            sl_points = break_info['sl_points']
+            opt_type = break_info['option_type']
+            detector = self.swing_detector.get_detector(symbol)
 
-        detector = self.swing_detector.get_detector(symbol)
+            # 0: vwap_premium_pct
+            obs[0] = (entry_price - vwap) / vwap if vwap > 0 else 0.0
 
-        # 0. vwap_premium_pct
-        vwap_premium = (
-            (ref_entry_price - ref_vwap) / ref_vwap if ref_vwap > 0 else 0.0
-        )
+            # 1: sl_pct
+            obs[1] = sl_points / entry_price if entry_price > 0 else 0.0
 
-        # 1. sl_pct
-        sl_pct = (
-            ref_sl_points / ref_entry_price
-            if ref_entry_price > 0 else 0.0
-        )
+            # 2: option_type (0=CE, 1=PE)
+            obs[2] = 0.0 if opt_type == 'CE' else 1.0
 
-        # 2. pct_from_day_high
-        dh = self.day_high.get(symbol, bar['high'])
-        close = bar['close'] if isinstance(bar, dict) else bar.get('close', 0)
-        pct_from_day_high = (dh - close) / dh if dh > 0 else 0.0
+            # 3: pct_from_day_high
+            close = bar['close']
+            dh = self.day_high.get(symbol, bar['high'])
+            obs[3] = (dh - close) / dh if dh > 0 else 0.0
 
-        # 3. pct_from_day_low
-        dl = self.day_low.get(symbol, bar['low'])
-        pct_from_day_low = (close - dl) / close if close > 0 else 0.0
+            # 4: pct_from_day_low
+            dl = self.day_low.get(symbol, bar['low'])
+            obs[4] = (close - dl) / close if close > 0 else 0.0
 
-        # 4. pct_diff_swing_low_vs_prev_high
-        prev_high = self._get_prev_swing_high(detector)
-        pct_diff = (
-            (prev_high - ref_entry_price) / prev_high
-            if prev_high > 0 else 0.0
-        )
+            # 5: is_lower_low
+            obs[5] = float(self._check_lower_low(detector, entry_price))
 
-        # 5. bars_since_prev_swing_high
-        bars_since_high = self._get_bars_since_prev_swing_high(detector)
+            # 6: avg_bar_range_pct_5
+            ranges = self.bar_ranges.get(symbol)
+            obs[6] = float(np.mean(ranges)) if ranges and len(ranges) > 0 else 0.02
 
-        # 6. avg_bar_range_pct_5
-        ranges = self.bar_ranges.get(symbol)
-        avg_range = float(np.mean(ranges)) if ranges and len(ranges) > 0 else 0.02
+            # 7: day_range_pct
+            obs[7] = (dh - dl) / entry_price if entry_price > 0 else 0.0
 
-        # 7. swing_low_count_today
-        swing_count = self.swing_break_count.get(ref_option_type, 0)
+            # 8: swing_break_count
+            obs[8] = float(self.swing_break_count.get(opt_type, 0))
 
-        # 8. is_lower_low
-        is_lower_low = self._check_lower_low(detector, ref_entry_price)
+            # 9: d_to_expiry_norm
+            obs[9] = min(self.day.d_to_expiry / 7.0, 4.0) if self.day else 0.0
 
-        # 9. day_range_pct
-        day_range = (
-            (dh - dl) / ref_entry_price
-            if ref_entry_price > 0 else 0.0
-        )
+        # --- Group 2: Market Context (features 10-13) ---
+        # Always populated
 
-        # 10. minutes_since_open
+        # 10: minutes_since_open (normalized to 0-1)
         market_open_dt = datetime.combine(ts_pydatetime.date(), MARKET_OPEN)
         mins = (ts_pydatetime - market_open_dt).total_seconds() / 60.0
+        obs[10] = max(0.0, mins) / 360.0
 
-        # 11. spot_volatility_ratio
-        vol_ratio = self._compute_spot_volatility_ratio()
+        # 11: spot_volatility_ratio
+        obs[11] = self._compute_spot_volatility_ratio()
 
-        # 12-17: Session state
+        # 12: spot_pct_from_open
+        if self.day and self.day.spot_open > 0:
+            # Get latest spot close
+            spot_close = self._get_latest_spot_close()
+            obs[12] = (spot_close - self.day.spot_open) / self.day.spot_open if spot_close > 0 else 0.0
+
+        # 13: spot_day_range_pct
+        if self.day and self.day.spot_open > 0:
+            spot_range = self.spot_high_so_far - self.spot_low_so_far
+            if spot_range > 0 and self.spot_low_so_far < float('inf'):
+                obs[13] = spot_range / self.day.spot_open
+
+        # --- Group 3: Session State (features 14-19) ---
         unrealized = self._total_unrealized_R()
         total_R = self.cumulative_R + unrealized
-        dist_target = self.target_R - total_R
-        dist_stop = total_R - self.stop_R
 
-        # 18: Decision type
-        # (0.0 = entry, 1.0 = review)
+        # 14: cumulative_R
+        obs[14] = self.cumulative_R
 
-        # 19-23: Position summary
-        pos_unrealized = self._per_position_unrealized_R()
-        n_pos = self._position_count()
+        # 15: unrealized_R
+        obs[15] = unrealized
 
-        avg_pos_unrealized_R = float(np.mean(pos_unrealized)) if pos_unrealized else 0.0
-        max_pos_unrealized_R = float(max(pos_unrealized)) if pos_unrealized else 0.0
+        # 16: dist_to_target
+        obs[16] = self.target_R - total_R
 
-        # Avg bars held
-        positions = self._all_positions()
-        if positions:
-            avg_bars_held = float(np.mean([
-                max(0, self.bar_idx - p.entry_bar_idx) for p in positions
-            ]))
-        else:
-            avg_bars_held = 0.0
+        # 17: dist_to_stop
+        obs[17] = total_R - self.stop_R
 
-        # Pyramid depth (total positions across sequences)
-        pyramid_depth = n_pos
+        # 18: n_positions
+        obs[18] = float(self._position_count())
 
-        # Avg pct from SL
-        avg_pct_from_sl = 0.0
-        if positions:
-            pct_from_sl_list = []
-            for pos in positions:
-                seq = self._get_sequence(pos.option_type)
-                if seq and seq.shared_sl_trigger > 0:
-                    bar_p = self._latest_bars.get(pos.symbol)
-                    if bar_p and bar_p['close'] > 0:
-                        pct = (seq.shared_sl_trigger - bar_p['close']) / bar_p['close']
-                        pct_from_sl_list.append(pct)
-            if pct_from_sl_list:
-                avg_pct_from_sl = float(np.mean(pct_from_sl_list))
+        # 19: trades_today
+        obs[19] = float(self.trades_today)
 
-        obs = np.array([
-            vwap_premium,               # 0
-            sl_pct,                     # 1
-            pct_from_day_high,          # 2
-            pct_from_day_low,           # 3
-            pct_diff,                   # 4
-            bars_since_high,            # 5
-            avg_range,                  # 6
-            swing_count,                # 7
-            float(is_lower_low),        # 8
-            day_range,                  # 9
-            mins,                       # 10
-            vol_ratio,                  # 11
-            self.cumulative_R,          # 12
-            float(n_pos),               # 13
-            float(self.trades_today),   # 14
-            unrealized,                 # 15
-            dist_target,                # 16
-            dist_stop,                  # 17
-            decision_type,              # 18
-            avg_pos_unrealized_R,       # 19
-            max_pos_unrealized_R,       # 20
-            avg_bars_held,              # 21
-            float(pyramid_depth),       # 22
-            avg_pct_from_sl,            # 23
-        ], dtype=np.float32)
+        # --- Group 4: Decision Type (feature 20) ---
+        obs[20] = decision_type
+
+        # --- Group 5: Per-Position State (features 21-45) ---
+        # 5 slots x 5 features. Ordered by entry time (slot 0=oldest).
+        # Empty slots = all zeros.
+        for i, pos in enumerate(self.positions[:NUM_POSITION_SLOTS]):
+            base = 21 + i * FEATURES_PER_POSITION
+
+            # +0: pos_unrealized_R
+            obs[base + 0] = self._position_unrealized_R(pos)
+
+            # +1: pos_bars_held (normalized by 360)
+            bars_held = max(0, self.bar_idx - pos.entry_bar_idx)
+            obs[base + 1] = bars_held / 360.0
+
+            # +2: pos_pct_from_sl
+            bar_p = self._latest_bars.get(pos.symbol)
+            if bar_p and bar_p['close'] > 0 and pos.sl_trigger > 0:
+                obs[base + 2] = (pos.sl_trigger - bar_p['close']) / bar_p['close']
+
+            # +3: pos_option_type (CE=+1, PE=-1, empty=0)
+            obs[base + 3] = 1.0 if pos.option_type == 'CE' else -1.0
+
+            # +4: pos_tp_R_level
+            obs[base + 4] = pos.tp_R_level
 
         return obs
 
     # ------------------------------------------------------------------
-    # Helper methods (reused from env.py)
+    # Helper methods
     # ------------------------------------------------------------------
+
+    def _get_latest_spot_close(self) -> float:
+        """Get the most recent spot close price."""
+        if not self.day or not self.day.timestamps:
+            return 0.0
+        # Walk backwards from current bar_idx to find spot data
+        idx = min(self.bar_idx, len(self.day.timestamps) - 1)
+        while idx >= 0:
+            ts = self.day.timestamps[idx]
+            if ts in self.day.spot_lookup:
+                return self.day.spot_lookup[ts][0]  # spot_close
+            idx -= 1
+        return self.day.spot_open if self.day else 0.0
 
     def _get_prev_swing_high(self, detector) -> float:
         if detector is None:

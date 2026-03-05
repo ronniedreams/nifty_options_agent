@@ -2,7 +2,7 @@
 Generate Behavior Cloning data for V3 env.
 
 Replays V1 logic through TradingSessionEnv to produce labeled transitions:
-- ENTRY decisions: V1 filters (VWAP >= 4%, price 100-300, SL% 2-10%) -> ENTER or SKIP
+- ENTRY decisions: V1 filters (VWAP >= 4%, price 100-300, SL% 2-10%) -> ENTER_TP_1.0R or SKIP
 - REVIEW decisions: V1 always holds -> HOLD (action=0)
 - STOP_SESSION: never used by V1
 
@@ -10,7 +10,7 @@ Output: NPZ file with obs, action, reward, next_obs, done arrays.
 
 Usage:
     python -m scripts.rl.generate_bc_data
-    python -m scripts.rl.generate_bc_data --output results/bc_data/bc_transitions.npz
+    python -m scripts.rl.generate_bc_data --output results/bc_data_v3/bc_transitions.npz
 """
 
 import argparse
@@ -42,42 +42,18 @@ V1_MIN_SL_PERCENT = 0.02
 V1_MAX_SL_PERCENT = 0.10
 
 
-def v1_entry_decision(obs: np.ndarray) -> int:
-    """Apply V1 filters to observation and return action.
-
-    obs[0] = vwap_premium_pct
-    obs[1] = sl_pct
-    obs[18] = decision_type (0=entry, 1=review)
-
-    For entry: check VWAP and SL filters. Price filter is already
-    applied by _select_best_strike (MIN_PRICE=50, MAX_PRICE=500),
-    but V1 uses 100-300, so we apply the tighter filter here using
-    the break_info data passed via the env.
-
-    For review: always HOLD (action=0).
-    """
-    decision_type = obs[18]
-
-    if decision_type >= 0.5:
-        # Review decision -> V1 always holds
-        return 0  # HOLD_ALL
-
-    # Entry decision
-    vwap_prem = obs[0]
-    sl_pct = obs[1]
-
-    # V1 filters
-    if vwap_prem < V1_MIN_VWAP_PREMIUM:
-        return 0  # SKIP
-    if sl_pct < V1_MIN_SL_PERCENT or sl_pct > V1_MAX_SL_PERCENT:
-        return 0  # SKIP
-
-    return 1  # ENTER
-
-
 def v1_entry_with_price_check(obs: np.ndarray, break_info: dict) -> int:
-    """Full V1 filter including price range check on break_info."""
-    decision_type = obs[18]
+    """Full V1 filter including price range check on break_info.
+
+    V3 action space:
+        0 = HOLD/SKIP
+        2 = ENTER_TP_1.0R (V1 always uses 1R target)
+
+    obs[0]  = vwap_premium_pct (break context, 0 during review)
+    obs[1]  = sl_pct (break context, 0 during review)
+    obs[20] = decision_type (0=entry, 1=review)
+    """
+    decision_type = obs[20]
 
     if decision_type >= 0.5:
         return 0  # Review -> HOLD
@@ -97,7 +73,7 @@ def v1_entry_with_price_check(obs: np.ndarray, break_info: dict) -> int:
     if sl_pct < V1_MIN_SL_PERCENT or sl_pct > V1_MAX_SL_PERCENT:
         return 0
 
-    return 1  # ENTER
+    return 2  # ENTER_TP_1.0R
 
 
 def generate_bc_data(data_path: str, output_path: str,
@@ -163,10 +139,10 @@ def generate_bc_data(data_path: str, output_path: str,
             all_dones.append(done)
 
             total_decisions += 1
-            decision_type = obs_copy[18]
+            decision_type = obs_copy[20]  # feature 20 = decision_type
             if decision_type < 0.5:
                 # Entry decision
-                if action == 1:
+                if action == 2:  # ENTER_TP_1.0R
                     entry_count += 1
                 else:
                     skip_count += 1
@@ -207,10 +183,9 @@ def generate_bc_data(data_path: str, output_path: str,
     logger.info('BC DATA GENERATION COMPLETE')
     logger.info('=' * 60)
     logger.info(f'Total transitions: {total_decisions}')
-    logger.info(f'  ENTER (action=1): {entry_count} ({100*entry_count/max(1,total_decisions):.1f}%)')
+    logger.info(f'  ENTER_TP_1R (action=2): {entry_count} ({100*entry_count/max(1,total_decisions):.1f}%)')
     logger.info(f'  SKIP  (action=0): {skip_count} ({100*skip_count/max(1,total_decisions):.1f}%)')
     logger.info(f'  HOLD  (action=0): {hold_count} ({100*hold_count/max(1,total_decisions):.1f}%)')
-    logger.info(f'  EXIT_ALL/STOP: 0 (0.0%)')
     logger.info(f'Saved to: {output_path}')
     logger.info(f'File size: {output_path.stat().st_size / 1024:.1f} KB')
     logger.info('=' * 60)
@@ -219,14 +194,14 @@ def generate_bc_data(data_path: str, output_path: str,
 def main():
     parser = argparse.ArgumentParser(description='Generate BC data for V3 env')
     parser.add_argument('--data', type=str,
-                        default='data/nifty_options_combined.parquet',
+                        default='data/nifty_options_full.parquet',
                         help='Path to parquet data')
     parser.add_argument('--output', type=str,
-                        default='results/bc_data/bc_transitions.npz',
+                        default='results/bc_data_v3/bc_transitions.npz',
                         help='Output NPZ path')
     parser.add_argument('--start-date', type=str, default=None,
                         help='Start date (YYYY-MM-DD), default: all')
-    parser.add_argument('--end-date', type=str, default='2023-05-22',
+    parser.add_argument('--end-date', type=str, default='2024-12-31',
                         help='End date (train period)')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()

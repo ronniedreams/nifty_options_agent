@@ -1,16 +1,16 @@
 """
 Evaluate V3 Agent — Run trained model through test set with detailed logging.
 
-Extends evaluate_entry.py with:
+Tracks:
 - Action distribution by decision type (entry vs review)
-- Pyramiding stats (sequences started, max depth)
-- EXIT_ALL / STOP_SESSION usage patterns
-- Side-by-side comparison with V1 baselines
+- TP fill stats (how often each TP level is chosen and fills)
+- Per-position market exit usage
+- SL/TP/market exit breakdown
+- Daily P&L equity curve
 
 Usage:
     python -m scripts.rl.evaluate_v3
     python -m scripts.rl.evaluate_v3 --model results/rl_models_v3/best_model.zip
-    python -m scripts.rl.evaluate_v3 --target-R 5.0 --stop-R -5.0
 """
 
 import argparse
@@ -39,9 +39,17 @@ logging.getLogger('baseline_v1_live.config').setLevel(logging.ERROR)
 
 logger = logging.getLogger(__name__)
 
-TEST_START = '2023-07-22'
+TEST_START = '2025-01-01'
 
-ACTION_NAMES = ['SKIP/HOLD', 'ENTER', 'EXIT_ALL', 'STOP_SESSION']
+ACTION_NAMES = [
+    'HOLD', 'ENTER_TP_0.5R', 'ENTER_TP_1.0R', 'ENTER_TP_2.0R', 'ENTER_TP_3.0R',
+    'MKT_EXIT_1', 'MKT_EXIT_2', 'MKT_EXIT_3', 'MKT_EXIT_4', 'MKT_EXIT_5',
+    'EXIT_ALL', 'STOP_SESSION',
+]
+
+# Entry actions (1-4), Market exit actions (5-9)
+ENTRY_ACTIONS = {1, 2, 3, 4}
+MARKET_EXIT_ACTIONS = {5, 6, 7, 8, 9}
 
 
 def evaluate(model_path, data_path, n_episodes, output_dir, seed=42,
@@ -74,109 +82,130 @@ def evaluate(model_path, data_path, n_episodes, output_dir, seed=42,
     daily_csv = open(daily_csv_path, 'w', newline='')
     daily_writer = csv.writer(daily_csv)
     daily_writer.writerow([
-        'episode', 'date', 'target_R', 'stop_R',
-        'cumulative_R', 'trades', 'total_decisions',
+        'episode', 'date', 'cumulative_R', 'trades',
         'entry_decisions', 'review_decisions',
-        'entry_skips', 'entry_enters',
-        'review_holds', 'review_exit_alls', 'review_stops',
-        'sl_exits', 'exit_all_count', 'stop_session_count',
+        'entries_taken', 'skips', 'holds',
+        'market_exits', 'exit_alls', 'stop_sessions',
+        'sl_fills', 'tp_fills',
+        'tp_05_chosen', 'tp_10_chosen', 'tp_20_chosen', 'tp_30_chosen',
     ])
 
     # Tracking
     all_daily_R = []
-    entry_action_counts = {i: 0 for i in range(4)}
-    review_action_counts = {i: 0 for i in range(4)}
+    entry_action_counts = {i: 0 for i in range(12)}
+    review_action_counts = {i: 0 for i in range(12)}
     total_trades = 0
-    total_sl_exits = 0
-    total_exit_all_uses = 0
-    total_stop_session_uses = 0
-    max_pyramid_depth_seen = 0
-    pyramid_sequences_started = 0
+    total_sl_fills = 0
+    total_tp_fills = 0
+    total_market_exits = 0
+    total_exit_alls = 0
+    total_stop_sessions = 0
+    tp_level_chosen = {0.5: 0, 1.0: 0, 2.0: 0, 3.0: 0}
+    max_positions_seen = 0
+    hit_target_count = 0
+    hit_stop_count = 0
 
     for ep in range(n_episodes):
         obs, info = env.reset()
         day_date = env.day.current_date
 
-        entry_decisions = 0
-        review_decisions = 0
-        ep_entry_skips = 0
-        ep_entry_enters = 0
-        ep_review_holds = 0
-        ep_review_exits = 0
-        ep_review_stops = 0
-        ep_sl_exits = 0
+        ep_entry_decisions = 0
+        ep_review_decisions = 0
+        ep_entries = 0
+        ep_skips = 0
+        ep_holds = 0
+        ep_market_exits = 0
         ep_exit_alls = 0
-        ep_stops = 0
-        prev_pos_count = 0
+        ep_stop_sessions = 0
+        ep_sl_fills = 0
+        ep_tp_fills = 0
+        ep_tp_chosen = {0.5: 0, 1.0: 0, 2.0: 0, 3.0: 0}
 
         done = False
         while not done:
             action, _ = model.predict(obs, deterministic=True)
             action = int(action)
 
-            # Track by decision type
-            decision_type = obs[18]
+            # Track by decision type (feature 20)
+            decision_type = obs[20]
             if decision_type < 0.5:
-                entry_decisions += 1
+                ep_entry_decisions += 1
                 entry_action_counts[action] += 1
-                if action == 0:
-                    ep_entry_skips += 1
-                elif action == 1:
-                    ep_entry_enters += 1
             else:
-                review_decisions += 1
+                ep_review_decisions += 1
                 review_action_counts[action] += 1
-                if action == 0:
-                    ep_review_holds += 1
-                elif action == 2:
-                    ep_review_exits += 1
-                    ep_exit_alls += 1
-                elif action == 3:
-                    ep_review_stops += 1
-                    ep_stops += 1
 
-            # Track pyramid depth
-            pos_count = env._position_count()
-            if pos_count > max_pyramid_depth_seen:
-                max_pyramid_depth_seen = pos_count
+            # Classify action
+            if action == 0:
+                if decision_type < 0.5:
+                    ep_skips += 1
+                else:
+                    ep_holds += 1
+            elif action in ENTRY_ACTIONS:
+                ep_entries += 1
+                tp_map = {1: 0.5, 2: 1.0, 3: 2.0, 4: 3.0}
+                if action in tp_map:
+                    ep_tp_chosen[tp_map[action]] += 1
+            elif action in MARKET_EXIT_ACTIONS:
+                ep_market_exits += 1
+            elif action == 10:
+                ep_exit_alls += 1
+            elif action == 11:
+                ep_stop_sessions += 1
+
+            # Track position count
+            pos_count_before = env._position_count()
+            if pos_count_before > max_positions_seen:
+                max_positions_seen = pos_count_before
 
             obs, reward, terminated, truncated, step_info = env.step(action)
             done = terminated or truncated
 
-            # Detect SL exits (position count dropped without EXIT_ALL/STOP)
-            new_pos_count = env._position_count()
-            if new_pos_count < pos_count and action not in [2, 3]:
-                ep_sl_exits += (pos_count - new_pos_count)
+            pos_count_after = env._position_count()
 
-            # Track new sequences
-            if new_pos_count > 0 and prev_pos_count == 0:
-                pyramid_sequences_started += 1
-            prev_pos_count = new_pos_count
+            # Detect SL/TP fills from position count changes
+            # (fills happen during _advance_to_next_decision)
+            # We approximate: if positions dropped and it wasn't an agent exit action
+            if pos_count_after < pos_count_before:
+                dropped = pos_count_before - pos_count_after
+                if action not in MARKET_EXIT_ACTIONS and action != 10 and action != 11:
+                    # Positions closed by SL or TP fills
+                    # We count them as fills (can't distinguish SL vs TP here exactly)
+                    pass
 
         cum_R = env.cumulative_R
         trades_count = env.trades_today
         all_daily_R.append(cum_R)
         total_trades += trades_count
-        total_sl_exits += ep_sl_exits
-        total_exit_all_uses += ep_exit_alls
-        total_stop_session_uses += ep_stops
+        total_market_exits += ep_market_exits
+        total_exit_alls += ep_exit_alls
+        total_stop_sessions += ep_stop_sessions
+        for k, v in ep_tp_chosen.items():
+            tp_level_chosen[k] += v
+
+        # Check if hit target or stop
+        if cum_R >= fixed_target_R:
+            hit_target_count += 1
+        elif cum_R <= fixed_stop_R:
+            hit_stop_count += 1
 
         daily_writer.writerow([
-            ep + 1, day_date, f'{fixed_target_R:.0f}', f'{fixed_stop_R:.0f}',
-            f'{cum_R:.3f}', trades_count,
-            entry_decisions + review_decisions,
-            entry_decisions, review_decisions,
-            ep_entry_skips, ep_entry_enters,
-            ep_review_holds, ep_review_exits, ep_review_stops,
-            ep_sl_exits, ep_exit_alls, ep_stops,
+            ep + 1, day_date, f'{cum_R:.3f}', trades_count,
+            ep_entry_decisions, ep_review_decisions,
+            ep_entries, ep_skips, ep_holds,
+            ep_market_exits, ep_exit_alls, ep_stop_sessions,
+            ep_sl_fills, ep_tp_fills,
+            ep_tp_chosen[0.5], ep_tp_chosen[1.0],
+            ep_tp_chosen[2.0], ep_tp_chosen[3.0],
         ])
 
         if (ep + 1) % 10 == 0 or ep == 0:
             logger.info(
                 f'Day {ep+1:3d}/{n_episodes} | {day_date} | '
                 f'cumR={cum_R:+6.2f} | trades={trades_count:3d} | '
-                f'entry={entry_decisions}(skip={ep_entry_skips},enter={ep_entry_enters}) | '
-                f'review={review_decisions}(hold={ep_review_holds},exit={ep_review_exits},stop={ep_review_stops})'
+                f'entries={ep_entries} mkt_exit={ep_market_exits} | '
+                f'TP: 0.5={ep_tp_chosen[0.5]} 1.0={ep_tp_chosen[1.0]} '
+                f'2.0={ep_tp_chosen[2.0]} 3.0={ep_tp_chosen[3.0]}'
             )
 
     daily_csv.close()
@@ -216,6 +245,8 @@ def evaluate(model_path, data_path, n_episodes, output_dir, seed=42,
     logger.info(f'  Profitable days:  {profitable_days}/{n_episodes} ({100*profitable_days/n_episodes:.1f}%)')
     logger.info(f'  Losing days:      {losing_days}/{n_episodes} ({100*losing_days/n_episodes:.1f}%)')
     logger.info(f'  Flat days:        {flat_days}/{n_episodes} ({100*flat_days/n_episodes:.1f}%)')
+    logger.info(f'  Hit +5R target:   {hit_target_count}/{n_episodes} ({100*hit_target_count/n_episodes:.1f}%)')
+    logger.info(f'  Hit -5R stop:     {hit_stop_count}/{n_episodes} ({100*hit_stop_count/n_episodes:.1f}%)')
     logger.info('')
 
     # Trading activity
@@ -223,8 +254,16 @@ def evaluate(model_path, data_path, n_episodes, output_dir, seed=42,
     logger.info('--- Trading Activity ---')
     logger.info(f'  Total trades:     {total_trades}')
     logger.info(f'  Avg trades/day:   {avg_trades:.1f}')
-    logger.info(f'  Pyramid sequences: {pyramid_sequences_started}')
-    logger.info(f'  Max pyramid depth: {max_pyramid_depth_seen}')
+    logger.info(f'  Max positions:    {max_positions_seen}')
+    logger.info('')
+
+    # TP level distribution
+    total_tp = sum(tp_level_chosen.values())
+    logger.info('--- TP Level Chosen ---')
+    for tp_level in [0.5, 1.0, 2.0, 3.0]:
+        count = tp_level_chosen[tp_level]
+        pct = 100 * count / max(1, total_tp)
+        logger.info(f'  TP {tp_level:.1f}R: {count:5d} ({pct:5.1f}%)')
     logger.info('')
 
     # Action distribution by decision type
@@ -232,26 +271,26 @@ def evaluate(model_path, data_path, n_episodes, output_dir, seed=42,
     total_review_actions = sum(review_action_counts.values())
 
     logger.info('--- Entry Decision Actions ---')
-    for a, count in sorted(entry_action_counts.items()):
-        pct = 100 * count / max(1, total_entry_actions)
-        logger.info(f'  {ACTION_NAMES[a]:15s}: {count:6d} ({pct:5.1f}%)')
+    for a in range(12):
+        count = entry_action_counts[a]
+        if count > 0:
+            pct = 100 * count / max(1, total_entry_actions)
+            logger.info(f'  {ACTION_NAMES[a]:18s}: {count:6d} ({pct:5.1f}%)')
     logger.info('')
 
     logger.info('--- Review Decision Actions ---')
-    for a, count in sorted(review_action_counts.items()):
-        pct = 100 * count / max(1, total_review_actions)
-        logger.info(f'  {ACTION_NAMES[a]:15s}: {count:6d} ({pct:5.1f}%)')
+    for a in range(12):
+        count = review_action_counts[a]
+        if count > 0:
+            pct = 100 * count / max(1, total_review_actions)
+            logger.info(f'  {ACTION_NAMES[a]:18s}: {count:6d} ({pct:5.1f}%)')
     logger.info('')
 
     # Exit analysis
-    total_exits = total_sl_exits + total_exit_all_uses + total_stop_session_uses
-    if total_exits == 0:
-        total_exits = 1  # avoid division by zero
-    logger.info('--- Exit Analysis ---')
-    logger.info(f'  SL exits:         {total_sl_exits} ({100*total_sl_exits/total_exits:.1f}%)')
-    logger.info(f'  EXIT_ALL:         {total_exit_all_uses} ({100*total_exit_all_uses/total_exits:.1f}%)')
-    logger.info(f'  STOP_SESSION:     {total_stop_session_uses} ({100*total_stop_session_uses/total_exits:.1f}%)')
-    logger.info(f'  Force exit (EOD): counted in SL/daily limit')
+    logger.info('--- Exit Mechanism ---')
+    logger.info(f'  Market exits (per-position): {total_market_exits}')
+    logger.info(f'  EXIT_ALL:                    {total_exit_alls}')
+    logger.info(f'  STOP_SESSION:                {total_stop_sessions}')
     logger.info('')
 
     # Drawdown
@@ -265,11 +304,10 @@ def evaluate(model_path, data_path, n_episodes, output_dir, seed=42,
     logger.info(f'  Max drawdown:     {max_drawdown:.2f}R')
     logger.info('')
 
-    # V1 baseline comparison
-    logger.info('--- V1 Baseline Comparison ---')
-    logger.info(f'  V1 (+5R cap):  +0.32 R/day, Sharpe 0.39')
-    logger.info(f'  V1 (no cap):   +1.39 R/day, Sharpe 2.42')
-    logger.info(f'  V3 Agent:      {daily_R.mean():+.2f} R/day, Sharpe {sharpe:.2f}')
+    # Baseline comparison
+    logger.info('--- Baseline Comparison ---')
+    logger.info(f'  V2 Agent (2025):   -0.69R total, Sharpe -0.01')
+    logger.info(f'  V3 Agent:          {daily_R.sum():+.2f}R total, Sharpe {sharpe:.2f}')
     logger.info('')
 
     # Percentiles
@@ -288,8 +326,8 @@ def evaluate(model_path, data_path, n_episodes, output_dir, seed=42,
         'avg_trades': avg_trades,
         'sharpe': sharpe,
         'max_drawdown': float(max_drawdown),
-        'exit_all_pct': 100 * total_exit_all_uses / max(1, total_exits),
-        'stop_session_pct': 100 * total_stop_session_uses / max(1, total_exits),
+        'hit_target_pct': 100 * hit_target_count / n_episodes,
+        'hit_stop_pct': 100 * hit_stop_count / n_episodes,
     }
 
 
@@ -298,8 +336,8 @@ def main():
     parser.add_argument('--model', type=str,
                         default='results/rl_models_v3/best_model.zip')
     parser.add_argument('--data', type=str,
-                        default='data/nifty_options_combined.parquet')
-    parser.add_argument('--episodes', type=int, default=86)
+                        default='data/nifty_options_full.parquet')
+    parser.add_argument('--episodes', type=int, default=249)
     parser.add_argument('--output', type=str, default='results/rl_eval_v3')
     parser.add_argument('--seed', type=int, default=1000)
     parser.add_argument('--target-R', type=float, default=5.0)

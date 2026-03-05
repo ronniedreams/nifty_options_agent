@@ -5,7 +5,7 @@ Seeds the replay buffer with BC transitions before training begins.
 No ForceEntryWrapper needed — BC provides a baseline policy.
 
 Usage:
-    python -m scripts.rl.train_v3 --steps 300000 --bc-data results/bc_data/bc_transitions.npz
+    python -m scripts.rl.train_v3 --steps 500000 --bc-data results/bc_data_v3/bc_transitions.npz
     python -m scripts.rl.train_v3 --steps 500000 --eval-freq 5000
     python -m scripts.rl.train_v3 --resume results/rl_models_v3/v3_model_latest.zip
 
@@ -46,15 +46,19 @@ logging.getLogger('baseline_v1_live.config').setLevel(logging.ERROR)
 
 logger = logging.getLogger(__name__)
 
-# Time-series split (updated for full 2022-2025 dataset)
+# Time-series split
 TRAIN_END = '2024-12-31'
 TEST_START = '2025-01-01'
 
-ACTION_NAMES = ['SKIP/HOLD', 'ENTER', 'EXIT_ALL', 'STOP_SESSION']
+ACTION_NAMES = [
+    'HOLD', 'ENTER_TP_0.5R', 'ENTER_TP_1.0R', 'ENTER_TP_2.0R', 'ENTER_TP_3.0R',
+    'MKT_EXIT_1', 'MKT_EXIT_2', 'MKT_EXIT_3', 'MKT_EXIT_4', 'MKT_EXIT_5',
+    'EXIT_ALL', 'STOP_SESSION',
+]
 
 
 # ---------------------------------------------------------------------------
-# EpisodeLoggerCallback (adapted from train_entry.py)
+# EpisodeLoggerCallback
 # ---------------------------------------------------------------------------
 
 class EpisodeLoggerCallback(BaseCallback):
@@ -75,8 +79,7 @@ class EpisodeLoggerCallback(BaseCallback):
         self._csv_writer = csv.writer(self._csv_file)
         self._csv_writer.writerow([
             'episode', 'timestep', 'reward', 'length',
-            'cumulative_R', 'trades', 'target_R', 'stop_R',
-            'avg_reward_20', 'avg_cumR_20',
+            'cumulative_R', 'trades', 'avg_reward_20', 'avg_cumR_20',
         ])
 
     def _on_step(self):
@@ -90,8 +93,6 @@ class EpisodeLoggerCallback(BaseCallback):
 
                 cum_R = info.get('final_cumR', 0.0)
                 trades = info.get('final_trades', 0)
-                target_R = info.get('final_target_R', 5.0)
-                stop_R = info.get('final_stop_R', -5.0)
 
                 recent = self._episode_rewards[-20:]
                 avg_r = np.mean(recent)
@@ -100,7 +101,6 @@ class EpisodeLoggerCallback(BaseCallback):
                     self._episode_count, self.num_timesteps,
                     f'{ep_reward:.3f}', ep_length,
                     f'{cum_R:.3f}', trades,
-                    f'{target_R:.0f}', f'{stop_R:.0f}',
                     f'{avg_r:.3f}', f'{cum_R:.3f}',
                 ])
                 self._csv_file.flush()
@@ -151,13 +151,15 @@ def seed_replay_buffer(model, bc_path: str):
 
     n = len(obs)
     logger.info(f'BC data: {n} transitions')
-    logger.info(f'  Action distribution: '
-                f'SKIP/HOLD={np.sum(actions==0)} '
-                f'ENTER={np.sum(actions==1)} '
-                f'EXIT_ALL={np.sum(actions==2)} '
-                f'STOP={np.sum(actions==3)}')
 
-    # Access the replay buffer
+    # Log action distribution
+    action_dist = {}
+    for name_idx, name in enumerate(ACTION_NAMES):
+        count = np.sum(actions == name_idx)
+        if count > 0:
+            action_dist[name] = count
+    logger.info(f'  Action distribution: {action_dist}')
+
     buffer = model.replay_buffer
 
     for i in range(n):
@@ -178,56 +180,20 @@ def seed_replay_buffer(model, bc_path: str):
 # Environment creation
 # ---------------------------------------------------------------------------
 
-def make_env(data_path, eval_mode=False, seed=42, share_data_from=None,
+def make_env(data_path, eval_mode=False, seed=42,
              start_date=None, end_date=None):
     """Create a monitored TradingSessionEnv."""
     from scripts.rl.env_v3 import TradingSessionEnv
 
-    if share_data_from is not None:
-        env = TradingSessionEnv.__new__(TradingSessionEnv)
-        gymnasium.Env.__init__(env)
-        env._data = share_data_from._data
-        env._day_groups = share_data_from._day_groups
-        all_days = sorted(share_data_from._day_groups.keys())
-        from datetime import date as date_cls
-        if start_date:
-            s = date_cls.fromisoformat(start_date)
-            all_days = [d for d in all_days if d >= s]
-        if end_date:
-            e = date_cls.fromisoformat(end_date)
-            all_days = [d for d in all_days if d <= e]
-        env.trading_days = all_days
-        env.eval_mode = eval_mode
-        env._day_idx = 0
-        env._rng = np.random.default_rng(seed)
-        env.review_interval = 5
-        env.action_space = spaces.Discrete(4)
-        env.observation_space = spaces.Box(
-            -np.inf, np.inf, shape=(24,), dtype=np.float32,
-        )
-        env.day = None
-        env.target_R = 5.0
-        env.stop_R = -5.0
-        env._fixed_target_R = None
-        env._fixed_stop_R = None
-        env.ce_sequence = None
-        env.pe_sequence = None
-        env.cumulative_R = 0.0
-        env.trades_today = 0
-        env.bar_idx = 0
-        env._current_decision = None
-        logger.info(
-            f'Shared env: {len(env.trading_days)} days '
-            f'({env.trading_days[0]} to {env.trading_days[-1]})'
-        )
-    else:
-        env = TradingSessionEnv(
-            data_path=data_path,
-            eval_mode=eval_mode,
-            seed=seed,
-            start_date=start_date,
-            end_date=end_date,
-        )
+    env = TradingSessionEnv(
+        data_path=data_path,
+        eval_mode=eval_mode,
+        seed=seed,
+        start_date=start_date,
+        end_date=end_date,
+        fixed_target_R=5.0,
+        fixed_stop_R=-5.0,
+    )
 
     env = Monitor(env)
     return env
@@ -239,16 +205,16 @@ def make_env(data_path, eval_mode=False, seed=42, share_data_from=None,
 
 def main():
     parser = argparse.ArgumentParser(description='Train V3 QR-DQN with BC warmstart')
-    parser.add_argument('--steps', type=int, default=300_000,
-                        help='Total training timesteps (default: 300K)')
+    parser.add_argument('--steps', type=int, default=500_000,
+                        help='Total training timesteps (default: 500K)')
     parser.add_argument('--bc-data', type=str,
-                        default='results/bc_data/bc_transitions.npz',
+                        default='results/bc_data_v3/bc_transitions.npz',
                         help='Path to BC transitions NPZ')
     parser.add_argument('--eval-freq', type=int, default=5000)
     parser.add_argument('--eval-episodes', type=int, default=20)
     parser.add_argument('--data', type=str,
                         default='data/nifty_options_full.parquet')
-    parser.add_argument('--output', type=str, default='results/rl_models_v2')
+    parser.add_argument('--output', type=str, default='results/rl_models_v3')
     parser.add_argument('--resume', type=str, default=None,
                         help='Resume from saved model .zip')
     parser.add_argument('--seed', type=int, default=42)
@@ -269,7 +235,7 @@ def main():
     )
     logger.info(f'Training env ready in {time_mod.time()-t0:.1f}s')
 
-    # Eval env (separate load — different date range from train)
+    # Eval env
     logger.info(f'Creating eval env (from {TEST_START})...')
     t0 = time_mod.time()
     eval_env = make_env(
@@ -288,20 +254,20 @@ def main():
             'MlpPolicy',
             train_env,
             policy_kwargs=dict(
-                net_arch=[128, 64],
-                n_quantiles=50,
+                net_arch=[256, 128],
+                n_quantiles=51,
             ),
             learning_rate=1e-4,
-            buffer_size=200_000,
-            learning_starts=0,       # Start immediately (BC data in buffer)
-            batch_size=64,
-            gamma=1.0,               # No discount (one-day episode)
+            buffer_size=100_000,
+            learning_starts=0,
+            batch_size=256,
+            gamma=0.99,
             tau=1.0,
             train_freq=4,
             gradient_steps=1,
             target_update_interval=1000,
             exploration_fraction=0.3,
-            exploration_initial_eps=0.5,   # Lower than V1 (BC provides baseline)
+            exploration_initial_eps=0.5,
             exploration_final_eps=0.05,
             verbose=0,
             seed=args.seed,
