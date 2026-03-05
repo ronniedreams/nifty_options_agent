@@ -219,6 +219,10 @@ def main():
                         help='Resume from saved model .zip')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--print-freq', type=int, default=10)
+    parser.add_argument('--train-end', type=str, default=TRAIN_END,
+                        help=f'Training data end date (default: {TRAIN_END})')
+    parser.add_argument('--test-start', type=str, default=TEST_START,
+                        help=f'Eval data start date (default: {TEST_START})')
     parser.add_argument('--no-bc', action='store_true',
                         help='Skip BC seeding (train from scratch)')
     args = parser.parse_args()
@@ -227,20 +231,20 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Training env
-    logger.info(f'Creating training env (up to {TRAIN_END})...')
+    logger.info(f'Creating training env (up to {args.train_end})...')
     t0 = time_mod.time()
     train_env = make_env(
         args.data, eval_mode=False, seed=args.seed,
-        end_date=TRAIN_END,
+        end_date=args.train_end,
     )
     logger.info(f'Training env ready in {time_mod.time()-t0:.1f}s')
 
     # Eval env
-    logger.info(f'Creating eval env (from {TEST_START})...')
+    logger.info(f'Creating eval env (from {args.test_start})...')
     t0 = time_mod.time()
     eval_env = make_env(
         args.data, eval_mode=True, seed=args.seed + 1000,
-        start_date=TEST_START,
+        start_date=args.test_start,
     )
     logger.info(f'Eval env ready in {time_mod.time()-t0:.1f}s')
 

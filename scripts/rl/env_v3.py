@@ -834,9 +834,14 @@ class TradingSessionEnv(gymnasium.Env):
 
     def _check_sl_fills(self, ts) -> float:
         """Check SL fills: bar HIGH >= sl_trigger -> -1R loss.
+        Stops processing once daily limit is breached.
         Returns booking bonus (always 0 for SL, losses don't get bonus)."""
         surviving = []
+        limit_hit = False
         for pos in self.positions:
+            if limit_hit:
+                surviving.append(pos)
+                continue
             key = (ts, pos.symbol)
             if key not in self.day.bar_lookup:
                 surviving.append(pos)
@@ -844,23 +849,31 @@ class TradingSessionEnv(gymnasium.Env):
             _, h, _, _, _ = self.day.bar_lookup[key]
 
             if h >= pos.sl_trigger:
-                # SL hit -> close at sl_trigger price
                 exit_price = pos.sl_trigger
                 realized_R = self._compute_realized_R(pos, exit_price)
                 self.cumulative_R += realized_R
+                # Stop filling once daily limit breached
+                total_R = self.cumulative_R + self._total_unrealized_R_from(surviving)
+                if total_R >= self.target_R or total_R <= self.stop_R:
+                    limit_hit = True
             else:
                 surviving.append(pos)
 
         self.positions = surviving
-        return 0.0  # No booking bonus for SL fills
+        return 0.0
 
     def _check_tp_fills(self, ts) -> float:
         """Check TP fills: bar LOW <= tp_trigger -> profit at TP level.
+        Stops processing once daily limit is breached.
         Returns booking bonus for realized profits."""
         surviving = []
         booking_bonus = 0.0
+        limit_hit = False
 
         for pos in self.positions:
+            if limit_hit:
+                surviving.append(pos)
+                continue
             key = (ts, pos.symbol)
             if key not in self.day.bar_lookup:
                 surviving.append(pos)
@@ -868,16 +881,29 @@ class TradingSessionEnv(gymnasium.Env):
             _, _, l, _, _ = self.day.bar_lookup[key]
 
             if pos.tp_trigger > 0 and l <= pos.tp_trigger:
-                # TP hit -> close at tp_trigger price
                 exit_price = pos.tp_trigger
                 realized_R = self._compute_realized_R(pos, exit_price)
                 self.cumulative_R += realized_R
                 booking_bonus += BOOKING_BONUS_COEFF * max(0.0, realized_R)
+                # Stop filling once daily limit breached
+                total_R = self.cumulative_R + self._total_unrealized_R_from(surviving)
+                if total_R >= self.target_R or total_R <= self.stop_R:
+                    limit_hit = True
             else:
                 surviving.append(pos)
 
         self.positions = surviving
         return booking_bonus
+
+    def _total_unrealized_R_from(self, positions: List[PyramidPosition]) -> float:
+        """Unrealized R for a specific list of positions (used during fill checks)."""
+        total = 0.0
+        for pos in positions:
+            bar = self._latest_bars.get(pos.symbol)
+            if bar is None or pos.actual_R_value <= 0:
+                continue
+            total += (pos.entry_price - bar['close']) * pos.quantity / pos.actual_R_value
+        return total
 
     def _market_exit_position(self, slot_idx: int) -> Optional[float]:
         """Market exit a specific position slot (0-based). Only if profitable.
