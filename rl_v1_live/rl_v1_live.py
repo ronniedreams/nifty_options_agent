@@ -286,6 +286,18 @@ class MLV3Live:
             self.telegram.send_message("Session stopped (model decision from earlier). Not restarting.")
             return
 
+        # If daily limit was already hit today, don't re-enter the trading loop
+        cum_r = self.position_tracker.cumulative_R
+        if cum_r >= DAILY_TARGET_R or cum_r <= DAILY_STOP_R:
+            logger.info(
+                f"[RL-V1] Daily limit already hit (cumR={cum_r:+.2f}). "
+                f"Not restarting trading loop."
+            )
+            self.telegram.send_message(
+                f"Daily limit already hit (cumR={cum_r:+.2f}). Sleeping until next session."
+            )
+            return
+
         # Connect data pipeline (Zerodha primary WS)
         self.data_pipeline.connect()
         self.data_pipeline.connect_angelone_backup()
