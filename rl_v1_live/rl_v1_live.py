@@ -986,38 +986,43 @@ def main():
         from .telegram_notifier import TelegramNotifierV3
         tg = TelegramNotifierV3()
 
-        # Upstox auto-login if configured
+        # Zerodha + Angel One auto-login (same as baseline)
         if AUTOMATED_LOGIN and PAPER_TRADING:
-            required = [UPSTOX_MOBILE, UPSTOX_PIN, UPSTOX_TOTP_SECRET,
-                        UPSTOX_API_KEY, UPSTOX_API_SECRET]
-            if all(required):
-                try:
-                    from .login_handler import LoginHandlerV1
-                    from baseline_v1_live.config import (
+            try:
+                from baseline_v1_live.login_handler import LoginHandler
+                from baseline_v1_live.config import (
+                    OPENALGO_USERNAME, OPENALGO_PASSWORD,
+                    OPENALGO_HOST, OPENALGO_API_KEY,
+                    ZERODHA_TOTP_SECRET, ANGELONE_TOTP_SECRET,
+                    ANGELONE_HOST,
+                )
+                zerodha_user_id = os.getenv('ZERODHA_USER_ID', '')
+                zerodha_password = os.getenv('ZERODHA_PASSWORD', '')
+                angelone_user_id = os.getenv('ANGELONE_USER_ID', '')
+                angelone_password = os.getenv('ANGELONE_PASSWORD', '')
+
+                required = [
+                    OPENALGO_USERNAME, OPENALGO_PASSWORD,
+                    zerodha_user_id, zerodha_password,
+                    ZERODHA_TOTP_SECRET,
+                ]
+                if all(required):
+                    handler = LoginHandler(OPENALGO_HOST, OPENALGO_API_KEY)
+                    login_ok = handler.auto_login_all(
                         OPENALGO_USERNAME, OPENALGO_PASSWORD,
-                    )
-                    handler = LoginHandlerV1(UPSTOX_OPENALGO_HOST)
-                    login_ok = handler.auto_login(
-                        mobile=UPSTOX_MOBILE,
-                        password=UPSTOX_PASSWORD,
-                        pin=UPSTOX_PIN,
-                        totp_secret=UPSTOX_TOTP_SECRET,
-                        api_key=UPSTOX_API_KEY,
-                        api_secret=UPSTOX_API_SECRET,
-                        redirect_uri=UPSTOX_REDIRECT_URI,
-                        openalgo_username=OPENALGO_USERNAME,
-                        openalgo_password=OPENALGO_PASSWORD,
+                        zerodha_user_id, zerodha_password, ZERODHA_TOTP_SECRET,
+                        angelone_user_id, angelone_password, ANGELONE_TOTP_SECRET,
+                        ANGELONE_HOST,
                     )
                     if login_ok:
-                        tg.send_message("[RL-V1] Upstox auto-login successful")
+                        tg.send_message("[RL-V1] Zerodha + Angel One auto-login successful")
                     else:
-                        tg.send_error("[RL-V1] Upstox auto-login FAILED - manual login required")
-                except Exception as e:
-                    logger.warning(f"[RL-V1-AUTO] Upstox auto-login failed: {e}")
-                    tg.send_error(f"[RL-V1] Upstox auto-login exception: {e}")
-            else:
-                logger.warning("[RL-V1-AUTO] Upstox auto-login: missing credentials")
-                tg.send_error("[RL-V1] Upstox auto-login: missing credentials in .env")
+                        tg.send_error("[RL-V1] Auto-login FAILED - manual login required")
+                else:
+                    logger.warning("[RL-V1-AUTO] Auto-login: missing Zerodha credentials")
+            except Exception as e:
+                logger.warning(f"[RL-V1-AUTO] Auto-login failed: {e}")
+                tg.send_error(f"[RL-V1] Auto-login exception: {e}")
 
         # Wait for market open and first candle
         now = datetime.now(IST)
