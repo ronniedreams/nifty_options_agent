@@ -385,7 +385,10 @@ class MLV3Live:
                 # Get new bars
                 new_bars = self._get_new_bars(last_bar_count)
                 if not new_bars:
-                    time.sleep(1)
+                    # Tick-level break detection between bar closes
+                    if not self.session_stopped:
+                        self._check_tick_level_breaks()
+                    time.sleep(0.5)
                     continue
 
                 self.bar_idx += 1
@@ -574,6 +577,98 @@ class MLV3Live:
                 })
 
         return breaks
+
+    def _check_tick_level_breaks(self):
+        """Check current (incomplete) bar lows against confirmed swing lows.
+
+        Detects swing breaks on tick level instead of waiting for bar close.
+        Uses the same _confirmed_swings dict — the 'traded' flag prevents
+        duplicate entries when the bar eventually closes.
+        """
+        if not self._confirmed_swings:
+            return
+
+        # Get current incomplete bars from data pipeline
+        current_bars = {}
+        for symbol in self.symbols:
+            bar = self.data_pipeline.get_current_bar(symbol)
+            if bar and bar.low is not None:
+                current_bars[symbol] = bar
+
+        if not current_bars:
+            return
+
+        breaks = []
+        now = datetime.now(IST)
+
+        for symbol, cs in list(self._confirmed_swings.items()):
+            if cs['traded']:
+                continue
+            if symbol not in current_bars:
+                continue
+
+            current_bar = current_bars[symbol]
+
+            # Update highest_high with current bar's high
+            if current_bar.high and current_bar.high > cs['highest_high']:
+                cs['highest_high'] = current_bar.high
+
+            # Check if current tick has broken the swing low
+            if current_bar.low <= cs['price']:
+                cs['traded'] = True
+
+                highest_high = max(cs['highest_high'], current_bar.high)
+                sl_trigger = highest_high + 1
+                sl_points = sl_trigger - cs['price']
+                if sl_points <= 0:
+                    continue
+
+                strike, opt_type = _parse_symbol(symbol)
+                if strike is None:
+                    continue
+
+                self.obs_builder.record_swing_break(opt_type)
+
+                # Build bar dict from current incomplete bar
+                bar_dict = {
+                    'timestamp': current_bar.timestamp,
+                    'open': current_bar.open,
+                    'high': current_bar.high,
+                    'low': current_bar.low,
+                    'close': current_bar.close,
+                    'volume': current_bar.volume,
+                    'vwap': (self.obs_builder.vwap_calc.get(symbol)
+                             or current_bar.close),
+                }
+
+                logger.info(
+                    f"[RL-V1-TICK-BREAK] {symbol} tick-level break! "
+                    f"low={current_bar.low:.2f} <= swing={cs['price']:.2f}"
+                )
+
+                breaks.append({
+                    'symbol': symbol,
+                    'option_type': opt_type,
+                    'strike': strike,
+                    'entry_price': cs['price'],
+                    'highest_high': highest_high,
+                    'sl_trigger': sl_trigger,
+                    'sl_points': sl_points,
+                    'break_time': now,
+                    'swing_time': cs['timestamp'],
+                    'vwap': cs['vwap'],
+                    'bar': bar_dict,
+                })
+
+        if breaks:
+            best = self._select_best_strike(breaks)
+            if best is not None:
+                logger.info(
+                    f"[RL-V1-TICK-BREAK] Best: {best['symbol']} "
+                    f"entry={best['entry_price']:.2f} "
+                    f"sl={best['sl_points']:.1f}pts"
+                )
+                self._handle_entry_decision(best)
 
     def _select_best_strike(self, breaks: List[dict]) -> Optional[dict]:
         """Select best strike from breaks. Matches env_v3._select_best_strike."""
